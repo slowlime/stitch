@@ -4,7 +4,6 @@ use miette::SourceOffset;
 pub struct Cursor<'buf> {
     iter: std::str::Chars<'buf>,
     pos: SourceOffset,
-    prev_pos: Option<SourceOffset>,
     eof: bool,
 }
 
@@ -13,7 +12,6 @@ impl<'buf> Cursor<'buf> {
         Self {
             iter: buf.chars(),
             pos: 0.into(),
-            prev_pos: None,
             eof: false,
         }
     }
@@ -23,13 +21,12 @@ impl<'buf> Cursor<'buf> {
         self.pos
     }
 
-    /// Returns the position of the previously returned character.
-    pub fn prev_pos(&self) -> SourceOffset {
-        self.prev_pos.unwrap_or(0.into())
-    }
-
     pub fn peek(&self) -> Option<char> {
         self.iter.clone().next()
+    }
+
+    pub fn peek_nth(&self, n: usize) -> Option<char> {
+        self.iter.clone().nth(n)
     }
 
     pub fn remaining(&self) -> &'buf str {
@@ -40,6 +37,7 @@ impl<'buf> Cursor<'buf> {
         self.remaining().starts_with(value)
     }
 
+    #[must_use = "the method returns None if the expected string is not matched"]
     pub fn consume_expecting(&mut self, expected: &str) -> Option<&'buf str> {
         self.starts_with(expected)
             .then(|| self.consume_n(expected.len()))
@@ -70,8 +68,6 @@ impl<'buf> Iterator for Cursor<'buf> {
         if self.eof {
             return None;
         }
-
-        self.prev_pos = Some(self.pos);
 
         let c = match self.iter.next() {
             Some(c) => c,
