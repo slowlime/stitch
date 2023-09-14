@@ -1,10 +1,10 @@
 use std::borrow::Cow;
-use std::error::Error;
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::iter::FusedIterator;
 use std::num::{IntErrorKind, ParseIntError};
 
-use miette::{SourceOffset, SourceSpan};
+use miette::{Diagnostic, SourceOffset, SourceSpan};
+use thiserror::Error;
 
 use crate::parse::cursor::Cursor;
 
@@ -41,11 +41,47 @@ fn scan_special(s: &str, mode: MatchMode) -> Option<TokenValue<'_>> {
     result.map(TokenValue::Special)
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+fn format_char(c: char) -> impl Display {
+    struct CharFormatter(char);
+
+    impl Display for CharFormatter {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if self.0.is_ascii_graphic() {
+                write!(f, "{}", self.0)
+            } else {
+                write!(f, "U+{:04x}", self.0 as u32)
+            }
+        }
+    }
+
+    CharFormatter(c)
+}
+
+#[derive(Error, Diagnostic, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LexerErrorKind {
+    #[error("the number literal is too large")]
+    #[diagnostic(code(lexer::number_too_large))]
     NumberTooLarge,
+
+    #[error("the comment is not terminated")]
+    #[diagnostic(code(lexer::unterminated_comment))]
     UnterminatedComment,
+
+    #[error("the string is not terminated")]
+    #[diagnostic(code(lexer::unterminated_string))]
     UnterminatedString,
+
+    #[error("the escape sequence '\\{c}' is invalid")]
+    #[diagnostic(code(lexer::invalid_escape))]
+    InvalidEscape {
+        c: char,
+
+        #[label = "The escape sequence is here"]
+        span: SourceSpan,
+    },
+
+    #[error("encountered an unrecognized character {}", format_char(*.0))]
+    #[diagnostic(code(lexer::unrecognized_character))]
     UnrecognizedCharacter(char),
 }
 
@@ -58,34 +94,6 @@ impl From<ParseIntError> for LexerErrorKind {
     }
 }
 
-impl Display for LexerErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let &Self::UnrecognizedCharacter(c) = self {
-            write!(f, "encountered an unrecognized character '")?;
-
-            if c.is_ascii_graphic() {
-                write!(f, "{}", c)?;
-            } else {
-                write!(f, "U+{:04x}", c as u32)?;
-            }
-
-            return write!(f, "'");
-        }
-
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::NumberTooLarge => "the number literal is too large",
-                Self::UnterminatedComment => "the comment is not terminated",
-                Self::UnterminatedString => "the string is not terminated",
-
-                Self::UnrecognizedCharacter(_) => unreachable!(),
-            }
-        )
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct PosLexerError {
     end: SourceOffset,
@@ -95,16 +103,18 @@ struct PosLexerError {
 impl PosLexerError {
     fn with_start(self, start: SourceOffset) -> LexerError {
         LexerError {
-            span: (start.offset()..self.end.offset()).into(),
             kind: self.kind,
+            span: (start.offset()..self.end.offset()).into(),
         }
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Error, Diagnostic, Debug, Clone, Eq, PartialEq)]
 pub struct LexerError {
-    span: SourceSpan,
     kind: LexerErrorKind,
+
+    #[label]
+    span: SourceSpan,
 }
 
 impl Display for LexerError {
@@ -112,8 +122,6 @@ impl Display for LexerError {
         write!(f, "lexical analysis failed: {}", self.kind)
     }
 }
-
-impl Error for LexerError {}
 
 #[derive(Debug, Clone)]
 pub struct Lexer<'buf> {
@@ -157,6 +165,7 @@ impl<'buf> Lexer<'buf> {
         let buf = self.cursor.remaining();
         let mut token_value = Cow::Borrowed("");
         let mut escape_pos: Option<SourceOffset> = None;
+        let mut invalid_escape: Option<(SourceSpan, char)> = None;
 
         loop {
             let c = match self.cursor.next() {
@@ -165,7 +174,7 @@ impl<'buf> Lexer<'buf> {
             };
 
             match escape_pos {
-                Some(pos) => {
+                Some(backslash_pos) => {
                     token_value.to_mut().push(match c {
                         't' => '\t',
                         'b' => '\x08', // backspace
@@ -174,7 +183,17 @@ impl<'buf> Lexer<'buf> {
                         'f' => '\x0c', // form feed
                         '0' => '\0',
                         '\'' | '|' => c,
-                        _ => todo!("return an error somehow... can't really `return` here cause that's gonna set the start to the beginning of the string and I'd rather it started at the backslash"),
+
+                        _ => {
+                            if invalid_escape.is_none() {
+                                invalid_escape = Some((
+                                    (backslash_pos.offset()..self.cursor.pos().offset()).into(),
+                                    c,
+                                ));
+                            }
+
+                            continue;
+                        }
                     });
 
                     escape_pos = None;
@@ -202,7 +221,11 @@ impl<'buf> Lexer<'buf> {
             }
         }
 
-        Ok(TokenValue::String(token_value))
+        if let Some((span, c)) = invalid_escape {
+            Err(self.make_error_at_pos(LexerErrorKind::InvalidEscape { span, c }))
+        } else {
+            Ok(TokenValue::String(token_value))
+        }
     }
 
     fn scan_separator(&mut self) -> ScanResult<'buf> {
@@ -237,7 +260,7 @@ impl<'buf> Lexer<'buf> {
         } else {
             integer_part
                 .parse::<i64>()
-                .map_err(|_| self.make_error_at_pos(LexerErrorKind::NumberTooLarge))
+                .map_err(|e| self.make_error_at_pos(e.into()))
                 .map(TokenValue::Int)
         }
     }
