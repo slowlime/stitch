@@ -12,6 +12,12 @@ pub enum Location {
     Builtin,
 }
 
+impl Location {
+    pub fn span(&self) -> Option<SourceSpan> {
+        try_match!(*self, Location::UserCode { span, .. } => span)
+    }
+}
+
 impl From<Location> for Option<SourceSpan> {
     fn from(location: Location) -> Self {
         try_match!(location, Location::UserCode { span, .. } => span)

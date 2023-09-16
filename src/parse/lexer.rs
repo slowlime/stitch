@@ -111,10 +111,10 @@ impl PosLexerError {
 
 #[derive(Error, Diagnostic, Debug, Clone, Eq, PartialEq)]
 pub struct LexerError {
-    kind: LexerErrorKind,
+    pub kind: LexerErrorKind,
 
     #[label]
-    span: SourceSpan,
+    pub span: SourceSpan,
 }
 
 impl Display for LexerError {

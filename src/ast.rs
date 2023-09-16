@@ -6,10 +6,10 @@ use crate::location::{Location, Spanned};
 pub struct Class<'buf> {
     pub location: Location,
     pub name: Spanned<Cow<'buf, str>>,
-    pub superclass: Option<Cow<'buf, str>>,
-    pub object_fields: Vec<Cow<'buf, str>>,
+    pub superclass: Option<Spanned<Cow<'buf, str>>>,
+    pub object_fields: Vec<Spanned<Cow<'buf, str>>>,
     pub object_methods: Vec<Method<'buf>>,
-    pub class_fields: Vec<Cow<'buf, str>>,
+    pub class_fields: Vec<Spanned<Cow<'buf, str>>>,
     pub class_methods: Vec<Method<'buf>>,
 }
 

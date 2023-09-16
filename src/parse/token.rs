@@ -47,6 +47,12 @@ impl Display for TokenType {
     }
 }
 
+impl<'buf> From<Token<'buf>> for SourceSpan {
+    fn from(token: Token<'buf>) -> SourceSpan {
+        token.span
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenValue<'buf> {
     Int(i64),
