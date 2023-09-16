@@ -1,15 +1,15 @@
-use std::borrow::Cow;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 
-use miette::{Diagnostic, SourceOffset, SourceSpan};
+use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
 
-use super::token::{Special, Token, TokenType};
+use super::token::{Special, Token, TokenType, TokenValue};
 use super::{Lexer, LexerError};
 
 use crate::ast;
-use crate::location::{Location, Spanned};
+use crate::location::{Location, Offset, Span, Spanned};
+use crate::parse::token::BinOp;
 use crate::util::format_list;
 
 const RECURSION_LIMIT: usize = 1000;
@@ -19,7 +19,7 @@ pub enum ParserError<'buf> {
     #[error("encountered an unexpected token: {} (expected {})", .actual.ty(), format_list(&.expected, "or"))]
     #[diagnostic(code(parser::unexpected_token))]
     UnexpectedToken {
-        expected: Vec<TokenType>,
+        expected: Vec<TokenType<'buf>>,
 
         #[label]
         actual: Token<'buf>,
@@ -40,7 +40,7 @@ pub enum ParserError<'buf> {
         RECURSION_LIMIT
     )]
     #[diagnostic(code(parser::recursion_limit))]
-    RecursionLimit(#[label] SourceSpan),
+    RecursionLimit(#[label] Span),
 
     #[error(transparent)]
     #[diagnostic(transparent)]
@@ -53,23 +53,29 @@ enum PrimitiveAllowed {
     No,
 }
 
-trait Matcher {
-    fn matches(&self, token: &Token<'_>) -> bool;
-
-    fn expected_tokens(&self) -> Vec<TokenType>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BlockParamsAllowed {
+    Yes,
+    No,
 }
 
-impl<const N: usize> Matcher for [TokenType; N] {
+trait Matcher<'a> {
+    fn matches(&self, token: &Token<'_>) -> bool;
+
+    fn expected_tokens(&self) -> Vec<TokenType<'a>>;
+}
+
+impl<'a, const N: usize> Matcher<'a> for [TokenType<'a>; N] {
     fn matches(&self, token: &Token<'_>) -> bool {
         self.contains(&token.ty())
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType> {
+    fn expected_tokens(&self) -> Vec<TokenType<'a>> {
         self.to_vec()
     }
 }
 
-impl<const N: usize> Matcher for [Special; N] {
+impl<const N: usize> Matcher<'static> for [Special; N] {
     fn matches(&self, token: &Token<'_>) -> bool {
         match token.ty() {
             TokenType::Special(sym) => self.contains(&sym),
@@ -77,45 +83,54 @@ impl<const N: usize> Matcher for [Special; N] {
         }
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType> {
+    fn expected_tokens(&self) -> Vec<TokenType<'static>> {
         self.iter().copied().map(TokenType::Special).collect()
     }
 }
 
-impl Matcher for TokenType {
+impl<'a> Matcher<'a> for TokenType<'a> {
     fn matches(&self, token: &Token<'_>) -> bool {
         self == &token.ty()
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType> {
-        vec![*self]
+    fn expected_tokens(&self) -> Vec<TokenType<'a>> {
+        vec![self.clone()]
     }
 }
 
-impl Matcher for Special {
+impl Matcher<'static> for Special {
     fn matches(&self, token: &Token<'_>) -> bool {
         TokenType::Special(*self) == token.ty()
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType> {
+    fn expected_tokens(&self) -> Vec<TokenType<'static>> {
         vec![TokenType::Special(*self)]
     }
 }
 
-macro_rules! lookahead {
-    ($self:ident : { $( $matcher:expr => $arm:expr, )+ _ => $default:expr $(,)? }) => ({
-        match $self.lexer.peek() {
-            $( Some(Ok(token)) if $matcher.matches(token) => $arm, )+
-            _ => $default,
-        }
-    });
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SeparatorMatcher;
 
-    ($self:ident : { $( $matcher:expr => $arm:expr, )+ _ => #error $(,)? }) => ({
+impl Matcher<'static> for SeparatorMatcher {
+    fn matches(&self, token: &Token<'_>) -> bool {
+        match token.value {
+            TokenValue::BinOp(ref op) => op.is_separator(),
+            _ => false,
+        }
+    }
+
+    fn expected_tokens(&self) -> Vec<TokenType<'static>> {
+        vec![TokenType::BinOp(BinOp::new("----"))]
+    }
+}
+
+macro_rules! lookahead {
+    ($self:ident : { $( $matcher:expr => $arm:expr, )+ _ => return #error $(,)? }) => ({
         lookahead!($self: {
             $( $matcher => $arm, )+
 
             _ => {
-                let mut expected = HashSet::new();
+                let mut expected = ::std::collections::HashSet::new();
                 $( expected.extend($matcher.expected_tokens()); )+
 
                 return match $self.lexer.peek().unwrap().clone() {
@@ -129,14 +144,14 @@ macro_rules! lookahead {
             },
         })
     });
-}
 
-struct Lookahead<'buf, 'a> {
-    parser: &'a mut Parser<'buf>,
-    attempts: Vec<TokenType>,
+    ($self:ident : { $( $matcher:expr => $arm:expr, )+ _ => $default:expr $(,)? }) => ({
+        match $self.lexer.peek() {
+            $( Some(Ok(token)) if $matcher.matches(token) => $arm, )+
+            _ => $default,
+        }
+    });
 }
-
-impl<'buf> Lookahead<'buf, '_> {}
 
 struct BoundedParser<'buf, 'a> {
     parser: &'a mut Parser<'buf>,
@@ -202,19 +217,17 @@ macro_rules! expect_impl {
 
 pub struct Parser<'buf> {
     lexer: std::iter::Peekable<Lexer<'buf>>,
-    filename: String,
     recursion_limit: usize,
     layer_start: SourceOffset,
-    attempted_tokens: Vec<TokenType>,
+    attempted_tokens: Vec<TokenType<'buf>>,
 }
 
 impl<'buf> Parser<'buf> {
-    pub fn new(filename: String, lexer: Lexer<'buf>) -> Self {
+    pub fn new(lexer: Lexer<'buf>) -> Self {
         let layer_start = lexer.pos();
 
         Self {
             lexer: lexer.peekable(),
-            filename,
             recursion_limit: RECURSION_LIMIT,
             layer_start,
             attempted_tokens: vec![],
@@ -238,18 +251,18 @@ impl<'buf> Parser<'buf> {
         })
     }
 
-    fn make_span_from(&mut self, start: impl Into<SourceOffset>) -> SourceSpan {
-        (start.into().offset()..self.next_pos().offset()).into()
+    fn make_span_from(&mut self, start: impl Offset) -> Span {
+        Span::new_spanning(start.offset()..self.next_pos().offset())
     }
 
     fn next_pos(&mut self) -> SourceOffset {
         match self.lexer.peek().unwrap().as_ref() {
-            Ok(token) => token.span.offset().into(),
-            Err(e) => e.span.offset().into(),
+            Ok(token) => token.span.start(),
+            Err(e) => e.span.start(),
         }
     }
 
-    fn expect(&mut self, matcher: impl Matcher) -> Result<Token<'buf>, ParserError<'buf>> {
+    fn expect(&mut self, matcher: impl Matcher<'static>) -> Result<Token<'buf>, ParserError<'buf>> {
         expect_impl! {
             match self.try_consume!(matcher) {
                 Ok(token) => Ok(token),
@@ -264,7 +277,7 @@ impl<'buf> Parser<'buf> {
 
     fn try_consume(
         &mut self,
-        matcher: impl Matcher,
+        matcher: impl Matcher<'static>,
     ) -> Result<Option<Token<'buf>>, ParserError<'buf>> {
         expect_impl! {
             match self.try_consume!(matcher) {
@@ -274,7 +287,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn peek(&mut self, matcher: impl Matcher) -> Result<bool, ParserError<'buf>> {
+    fn peek(&mut self, matcher: impl Matcher<'static>) -> Result<bool, ParserError<'buf>> {
         expect_impl! {
             match self.peek!(matcher) {
                 Ok(_) => Ok(true),
@@ -303,7 +316,7 @@ impl<'buf> Parser<'buf> {
         self.expect(Special::ParenLeft)?;
 
         let object_fields = if self.peek(Special::Bar)? {
-            self.parse_fields()?
+            self.parse_var_list()?
         } else {
             vec![]
         };
@@ -313,15 +326,15 @@ impl<'buf> Parser<'buf> {
         loop {
             object_methods.push(lookahead!(self: {
                 Special::ParenRight => break,
-                TokenType::Separator => break,
+                SeparatorMatcher => break,
                 _ => self.parse_method()?,
             }));
         }
 
         let (class_fields, class_methods) =
-            if let Some(separator) = self.try_consume(TokenType::Separator)? {
+            if let Some(separator) = self.try_consume(SeparatorMatcher)? {
                 let class_fields = if self.peek(Special::Bar)? {
-                    self.parse_fields()?
+                    self.parse_var_list()?
                 } else {
                     vec![]
                 };
@@ -332,8 +345,8 @@ impl<'buf> Parser<'buf> {
                     class_methods.push(lookahead!(self: {
                         Special::ParenRight => break,
 
-                        TokenType::Separator => {
-                            let bad_separator = self.expect(TokenType::Separator).unwrap();
+                        SeparatorMatcher => {
+                            let bad_separator = self.expect(SeparatorMatcher).unwrap();
 
                             return Err(ParserError::MultipleSeparators {
                                 bad_separator,
@@ -350,13 +363,10 @@ impl<'buf> Parser<'buf> {
                 Default::default()
             };
 
-        self.expect(Special::ParenRight)?;
+        let right_paren = self.expect(Special::ParenRight)?;
 
         Ok(ast::Class {
-            location: Location::UserCode {
-                file: self.filename.clone(),
-                span: self.make_span_from(name.location.span().unwrap().offset()),
-            },
+            location: Location::UserCode(name.span().unwrap().convex_hull(&right_paren.span)),
             name,
             superclass,
             object_fields,
@@ -366,18 +376,66 @@ impl<'buf> Parser<'buf> {
         })
     }
 
-    fn parse_fields(&mut self) -> Result<Vec<Spanned<Cow<'buf, str>>>, ParserError<'buf>> {
-        todo!()
+    fn parse_var_list(&mut self) -> Result<Vec<ast::Name<'buf>>, ParserError<'buf>> {
+        self.expect(Special::Bar)?;
+
+        let mut vars = vec![];
+
+        while self.try_consume(Special::Bar)?.is_none() {
+            vars.push(self.parse_ident(PrimitiveAllowed::Yes)?);
+        }
+
+        Ok(vars)
     }
 
     fn parse_method(&mut self) -> Result<ast::Method<'buf>, ParserError<'buf>> {
+        let (selector, params) = self.parse_pattern()?;
+        self.expect(Special::Equals)?;
+
+        let def = lookahead!(self: {
+            Special::Primitive => {
+                let token = self.expect(Special::Primitive).unwrap();
+
+                Spanned::new_spanning(ast::MethodDef::Primitive, token.span)
+            },
+
+            Special::ParenLeft => {
+                let mut block = self.parse_block_body(BlockParamsAllowed::No, Special::ParenLeft, Special::ParenRight)?;
+                block.value.params = params;
+                let span = block.span().unwrap();
+
+                Spanned::new_spanning(ast::MethodDef::Block(block.value), span)
+            },
+
+            _ => return #error,
+        });
+
+        Ok(ast::Method {
+            location: Location::UserCode(selector.span().unwrap().convex_hull(&def.span().unwrap())),
+            selector,
+            def,
+        })
+    }
+
+    fn parse_pattern(
+        &mut self,
+    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
+        todo!()
+    }
+
+    fn parse_block_body(
+        &mut self,
+        params_allowed: BlockParamsAllowed,
+        left_matcher: impl Matcher<'static>,
+        right_matcher: impl Matcher<'static>,
+    ) -> Result<Spanned<ast::Block<'buf>>, ParserError<'buf>> {
         todo!()
     }
 
     fn parse_ident(
         &mut self,
         primitive_allowed: PrimitiveAllowed,
-    ) -> Result<Spanned<Cow<'buf, str>>, ParserError<'buf>> {
+    ) -> Result<ast::Name<'buf>, ParserError<'buf>> {
         todo!()
     }
 }

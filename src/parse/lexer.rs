@@ -3,10 +3,12 @@ use std::fmt::{self, Display};
 use std::iter::FusedIterator;
 use std::num::{IntErrorKind, ParseIntError};
 
-use miette::{Diagnostic, SourceOffset, SourceSpan};
+use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
 
+use crate::location::Span;
 use crate::parse::cursor::Cursor;
+use crate::parse::token::BinOp;
 
 use super::token::{Special, Token, TokenValue};
 
@@ -14,6 +16,13 @@ type ScanResult<'buf> = Result<TokenValue<'buf>, PosLexerError>;
 
 fn is_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r' | '\n')
+}
+
+fn is_bin_op_char(c: char) -> bool {
+    matches!(
+        c,
+        '~' | '&' | '|' | '*' | '/' | '\\' | '+' | '=' | '>' | '<' | ',' | '@' | '%' | '-'
+    )
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -77,7 +86,7 @@ pub enum LexerErrorKind {
         c: char,
 
         #[label = "The escape sequence is here"]
-        span: SourceSpan,
+        span: Span,
     },
 
     #[error("encountered an unrecognized character {}", format_char(*.0))]
@@ -114,7 +123,7 @@ pub struct LexerError {
     pub kind: LexerErrorKind,
 
     #[label]
-    pub span: SourceSpan,
+    pub span: Span,
 }
 
 impl Display for LexerError {
@@ -165,7 +174,7 @@ impl<'buf> Lexer<'buf> {
         let buf = self.cursor.remaining();
         let mut token_value = Cow::Borrowed("");
         let mut escape_pos: Option<SourceOffset> = None;
-        let mut invalid_escape: Option<(SourceSpan, char)> = None;
+        let mut invalid_escape: Option<(Span, char)> = None;
 
         loop {
             let c = match self.cursor.next() {
@@ -228,11 +237,11 @@ impl<'buf> Lexer<'buf> {
         }
     }
 
-    fn scan_separator(&mut self) -> ScanResult<'buf> {
-        self.cursor.consume_expecting("----").unwrap();
-        self.cursor.consume_while(|c| c == '-');
+    fn scan_bin_op(&mut self) -> ScanResult<'buf> {
+        let op = self.cursor.consume_while(is_bin_op_char);
+        assert!(op.len() > 1);
 
-        Ok(TokenValue::Separator)
+        Ok(TokenValue::BinOp(BinOp::new(op)))
     }
 
     fn scan_ident(&mut self) -> ScanResult<'buf> {
@@ -287,7 +296,7 @@ impl<'buf> Iterator for Lexer<'buf> {
 
                     return Some(Ok(Token {
                         value: TokenValue::Eof,
-                        span: SourceSpan::new(start, 0.into()),
+                        span: Span::new_with_extent(start, 0),
                     }));
                 }
 
@@ -304,7 +313,11 @@ impl<'buf> Iterator for Lexer<'buf> {
 
                 Some('\'') => self.scan_string(),
 
-                Some('-') if self.cursor.starts_with("----") => self.scan_separator(),
+                Some(c)
+                    if is_bin_op_char(c) && self.cursor.peek_nth(1).is_some_and(is_bin_op_char) =>
+                {
+                    self.scan_bin_op()
+                }
 
                 Some(c) if c.is_ascii_digit() => self.scan_number(),
 

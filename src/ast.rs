@@ -2,29 +2,31 @@ use std::borrow::Cow;
 
 use crate::location::{Location, Spanned};
 
+pub type Name<'buf> = Spanned<Cow<'buf, str>>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Class<'buf> {
     pub location: Location,
-    pub name: Spanned<Cow<'buf, str>>,
-    pub superclass: Option<Spanned<Cow<'buf, str>>>,
-    pub object_fields: Vec<Spanned<Cow<'buf, str>>>,
+    pub name: Name<'buf>,
+    pub superclass: Option<Name<'buf>>,
+    pub object_fields: Vec<Name<'buf>>,
     pub object_methods: Vec<Method<'buf>>,
-    pub class_fields: Vec<Spanned<Cow<'buf, str>>>,
+    pub class_fields: Vec<Name<'buf>>,
     pub class_methods: Vec<Method<'buf>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Method<'buf> {
     pub location: Location,
-    pub selector: Selector<'buf>,
-    pub definition: Spanned<MethodDef<'buf>>,
+    pub selector: Spanned<Selector<'buf>>,
+    pub def: Spanned<MethodDef<'buf>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selector<'buf> {
-    Unary(Spanned<Cow<'buf, str>>),
-    Binary(Spanned<Cow<'buf, str>>),
-    Keyword(Vec<Spanned<Cow<'buf, str>>>),
+    Unary(Name<'buf>),
+    Binary(Name<'buf>),
+    Keyword(Vec<Name<'buf>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,8 +37,8 @@ pub enum MethodDef<'buf> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block<'buf> {
-    pub params: Vec<Spanned<Cow<'buf, str>>>,
-    pub locals: Vec<Spanned<Cow<'buf, str>>>,
+    pub params: Vec<Name<'buf>>,
+    pub locals: Vec<Name<'buf>>,
     pub body: Vec<Stmt<'buf>>,
 }
 
@@ -50,7 +52,7 @@ pub enum Stmt<'buf> {
 pub enum Expr<'buf> {
     Assign(Assign<'buf>),
     Var(Var<'buf>),
-    Block(Block<'buf>),
+    Block(Spanned<Block<'buf>>),
     Array(ArrayLit<'buf>),
     Symbol(SymbolLit<'buf>),
     String(StringLit<'buf>),
@@ -62,24 +64,24 @@ pub enum Expr<'buf> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assign<'buf> {
     pub location: Location,
-    pub var: Spanned<Cow<'buf, str>>,
+    pub var: Name<'buf>,
     pub value: Box<Expr<'buf>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Var<'buf>(pub Spanned<Cow<'buf, str>>);
+pub struct Var<'buf>(pub Name<'buf>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArrayLit<'buf>(pub Spanned<Vec<Expr<'buf>>>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolLit<'buf> {
-    String(Spanned<Cow<'buf, str>>),
+    String(Name<'buf>),
     Selector(Selector<'buf>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct StringLit<'buf>(Spanned<Cow<'buf, str>>);
+pub struct StringLit<'buf>(Name<'buf>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IntLit(Spanned<i64>);
