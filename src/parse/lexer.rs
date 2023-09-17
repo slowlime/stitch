@@ -8,21 +8,14 @@ use thiserror::Error;
 
 use crate::location::Span;
 use crate::parse::cursor::Cursor;
-use crate::parse::token::BinOp;
+use crate::parse::token::{is_bin_op_char, BinOp};
 
-use super::token::{Special, Token, TokenValue};
+use super::token::{Special, Symbol, Token, TokenValue, Keyword};
 
 type ScanResult<'buf> = Result<TokenValue<'buf>, PosLexerError>;
 
 fn is_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r' | '\n')
-}
-
-fn is_bin_op_char(c: char) -> bool {
-    matches!(
-        c,
-        '~' | '&' | '|' | '*' | '/' | '\\' | '+' | '=' | '>' | '<' | ',' | '@' | '%' | '-'
-    )
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -33,6 +26,18 @@ fn is_ident_start(c: char) -> bool {
 fn is_ident_continuation(c: char) -> bool {
     // this is stricter than needed (the grammar says \p{Alpha})
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+fn make_ident_matcher() -> impl FnMut(char) -> bool {
+    let mut first = true;
+
+    move |c| if first {
+        first = false;
+
+        is_ident_start(c)
+    } else {
+        is_ident_continuation(c)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,6 +93,18 @@ pub enum LexerErrorKind {
         #[label = "The escape sequence is here"]
         span: Span,
     },
+
+    #[error("`#` must be followed by a selector, string, or a left parenthesis")]
+    #[diagnostic(code(lexer::illegal_octothorpe))]
+    IllegalOctothorpe,
+
+    #[error("keyword selector must only contain keywords")]
+    #[diagnostic(code(lexer::malformed_kw_selector))]
+    MalformedKwSelector,
+
+    #[error("invalid block param specification: expected `:varname`")]
+    #[diagnostic(code(lexer::invalid_block_param))]
+    InvalidBlockParam,
 
     #[error("encountered an unrecognized character {}", format_char(*.0))]
     #[diagnostic(code(lexer::unrecognized_character))]
@@ -237,20 +254,108 @@ impl<'buf> Lexer<'buf> {
         }
     }
 
+    fn scan_symbol_or_array(&mut self) -> ScanResult<'buf> {
+        self.cursor.consume_expecting("#").unwrap();
+
+        match self.cursor.peek() {
+            Some('\'') => self.scan_string_symbol(),
+            Some('(') => Ok(TokenValue::Special(Special::ArrayLeft)),
+            Some(c) if is_bin_op_char(c) => self.scan_bin_selector(),
+            Some(c) if is_ident_start(c) => self.scan_un_or_kw_selector(),
+            Some(_) | None => Err(self.make_error_at_pos(LexerErrorKind::IllegalOctothorpe)),
+        }
+    }
+
+    fn scan_string_symbol(&mut self) -> ScanResult<'buf> {
+        let TokenValue::String(value) = self.scan_string()? else {
+            unreachable!()
+        };
+
+        Ok(TokenValue::Symbol(Symbol::String(value)))
+    }
+
+    fn scan_bin_selector(&mut self) -> ScanResult<'buf> {
+        let TokenValue::BinOp(bin_op) = self.scan_bin_op()? else {
+            unreachable!()
+        };
+
+        Ok(TokenValue::Symbol(Symbol::BinarySelector(bin_op)))
+    }
+
+    fn scan_un_or_kw_selector(&mut self) -> ScanResult<'buf> {
+        let start = self.pos();
+
+        match self.scan_ident()? {
+            TokenValue::Special(s @ Special::Primitive) => Ok(TokenValue::Symbol(Symbol::UnarySelector(s.as_str()))),
+            TokenValue::Ident(id) => Ok(TokenValue::Symbol(Symbol::UnarySelector(id))),
+            TokenValue::Keyword(kw) => self.scan_kw_selector(start, kw),
+            _ => unreachable!(),
+        }
+    }
+
+    fn scan_kw_selector(&mut self, first_kw_start: SourceOffset, first_kw: &'buf str) -> ScanResult<'buf> {
+        let mut kws = vec![Keyword {
+            span: (first_kw_start..self.pos()).into(),
+            kw: first_kw,
+        }];
+
+        loop {
+            match self.cursor.peek() {
+                Some(c) if is_ident_start(c) => {
+                    let start = self.pos();
+
+                    match self.scan_ident()? {
+                        TokenValue::Keyword(kw) => kws.push(Keyword {
+                            span: (start..self.pos()).into(),
+                            kw,
+                        }),
+
+                        _ => return Err(self.make_error_at_pos(LexerErrorKind::MalformedKwSelector)),
+                    }
+                },
+
+                Some(c) if is_bin_op_char(c) => return Err(self.make_error_at_pos(LexerErrorKind::MalformedKwSelector)),
+
+                _ => break,
+            }
+        }
+
+        Ok(TokenValue::Symbol(Symbol::KeywordSelector(kws)))
+    }
+
     fn scan_bin_op(&mut self) -> ScanResult<'buf> {
         let op = self.cursor.consume_while(is_bin_op_char);
-        assert!(op.len() > 1);
+        assert!(op.len() >= 1);
 
         Ok(TokenValue::BinOp(BinOp::new(op)))
     }
 
-    fn scan_ident(&mut self) -> ScanResult<'buf> {
-        let ident = self.cursor.consume_while(is_ident_continuation);
+    fn scan_block_param(&mut self) -> ScanResult<'buf> {
+        self.cursor.consume_expecting(":").unwrap();
+        let id = self.cursor.consume_while(make_ident_matcher());
 
-        Ok(scan_special(ident, MatchMode::Exact).unwrap_or(TokenValue::Ident(ident)))
+        if id.is_empty() {
+            Err(self.make_error_at_pos(LexerErrorKind::InvalidBlockParam))
+        } else {
+            Ok(TokenValue::BlockParam(id))
+        }
+    }
+
+    fn scan_ident(&mut self) -> ScanResult<'buf> {
+        let ident = self.cursor.consume_while(make_ident_matcher());
+        debug_assert!(!ident.is_empty());
+
+        Ok(if let Some(s) = scan_special(ident, MatchMode::Exact) {
+            s
+        } else if self.cursor.consume_expecting(":").is_some() {
+            TokenValue::Keyword(ident)
+        } else {
+            TokenValue::Ident(ident)
+        })
     }
 
     fn scan_number(&mut self) -> ScanResult<'buf> {
+        let negative = self.cursor.consume_expecting("-").is_some();
         let buf = self.cursor.remaining();
         let integer_part = self.cursor.consume_while(|c| c.is_ascii_digit());
         debug_assert!(!integer_part.is_empty());
@@ -264,13 +369,23 @@ impl<'buf> Lexer<'buf> {
             debug_assert!(!fractional_part.is_empty());
 
             let literal = &buf[0..integer_part.len() + 1 + fractional_part.len()];
+            let mut value = literal.parse::<f64>().unwrap();
 
-            Ok(TokenValue::Float(literal.parse().unwrap()))
+            if negative {
+                value = -value;
+            }
+
+            Ok(TokenValue::Float(value))
         } else {
-            integer_part
+            let mut value = integer_part
                 .parse::<i64>()
-                .map_err(|e| self.make_error_at_pos(e.into()))
-                .map(TokenValue::Int)
+                .map_err(|e| self.make_error_at_pos(e.into()))?;
+
+            if negative {
+                value = -value;
+            }
+
+            Ok(TokenValue::Int(value))
         }
     }
 }
@@ -313,6 +428,10 @@ impl<'buf> Iterator for Lexer<'buf> {
 
                 Some('\'') => self.scan_string(),
 
+                Some('#') => self.scan_symbol_or_array(),
+
+                Some(':') if self.cursor.peek_nth(1).is_some_and(is_ident_start) => self.scan_block_param(),
+
                 Some(c)
                     if is_bin_op_char(c) && self.cursor.peek_nth(1).is_some_and(is_bin_op_char) =>
                 {
@@ -320,6 +439,7 @@ impl<'buf> Iterator for Lexer<'buf> {
                 }
 
                 Some(c) if c.is_ascii_digit() => self.scan_number(),
+                Some('-') if self.cursor.peek_nth(1).is_some_and(|c| c.is_ascii_digit()) => self.scan_number(),
 
                 Some(c) if is_ident_start(c) => self.scan_ident(),
 
@@ -340,7 +460,7 @@ impl<'buf> Iterator for Lexer<'buf> {
 
         Some(match scan_result {
             Ok(value) => Ok(Token {
-                span: (start.offset()..self.pos().offset()).into(),
+                span: (start..self.pos()).into(),
                 value,
             }),
 

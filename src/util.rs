@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fmt::Display;
 
 macro_rules! try_match {
     ($scrutinee:expr, $pattern:pat => $map:expr) => {
@@ -9,10 +10,6 @@ macro_rules! try_match {
     };
 }
 
-use std::fmt::Display;
-use std::ops::RangeBounds;
-
-use miette::SourceSpan;
 pub(crate) use try_match;
 
 pub fn format_list<'a, T: Display>(items: &'a [T], conjunction: &'a str) -> impl Display + 'a {
@@ -43,3 +40,27 @@ pub fn format_list<'a, T: Display>(items: &'a [T], conjunction: &'a str) -> impl
 
     ListFormatter { items, conjunction }
 }
+
+macro_rules! define_yes_no_options {
+    { $($vis:vis enum $name:ident ;)* } => {
+        $(
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+            $vis enum $name {
+                Yes,
+                No,
+            }
+
+            impl $name {
+                pub fn is_yes(self) -> bool {
+                    self == Self::Yes
+                }
+
+                pub fn is_no(self) -> bool {
+                    self == Self::No
+                }
+            }
+        )*
+    };
+}
+
+pub(crate) use define_yes_no_options;

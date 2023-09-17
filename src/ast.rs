@@ -45,7 +45,7 @@ pub struct Block<'buf> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt<'buf> {
     Return(Spanned<Expr<'buf>>),
-    Expr(Expr<'buf>),
+    Expr(Spanned<Expr<'buf>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +59,22 @@ pub enum Expr<'buf> {
     Int(IntLit),
     Float(FloatLit),
     Dispatch(Dispatch<'buf>),
+}
+
+impl Expr<'_> {
+    pub fn location(&self) -> Location {
+        match self {
+            Self::Assign(expr) => expr.location,
+            Self::Var(expr) => expr.0.location,
+            Self::Block(expr) => expr.location,
+            Self::Array(expr) => expr.0.location,
+            Self::Symbol(expr) => expr.location(),
+            Self::String(expr) => expr.0.location,
+            Self::Int(expr) => expr.0.location,
+            Self::Float(expr) => expr.0.location,
+            Self::Dispatch(expr) => expr.location,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,21 +93,31 @@ pub struct ArrayLit<'buf>(pub Spanned<Vec<Expr<'buf>>>);
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolLit<'buf> {
     String(Name<'buf>),
-    Selector(Selector<'buf>),
+    Selector(Spanned<Selector<'buf>>),
+}
+
+impl SymbolLit<'_> {
+    pub fn location(&self) -> Location {
+        match self {
+            Self::String(name) => name.location,
+            Self::Selector(sel) => sel.location,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct StringLit<'buf>(Name<'buf>);
+pub struct StringLit<'buf>(pub Name<'buf>);
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct IntLit(Spanned<i64>);
+pub struct IntLit(pub Spanned<i64>);
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FloatLit(Spanned<f64>);
+pub struct FloatLit(pub Spanned<f64>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dispatch<'buf> {
     pub location: Location,
+    pub recv: Box<Expr<'buf>>,
     pub selector: Selector<'buf>,
-    pub params: Vec<Expr<'buf>>,
+    pub args: Vec<Expr<'buf>>,
 }

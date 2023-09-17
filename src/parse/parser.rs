@@ -1,25 +1,25 @@
+use std::borrow::Cow;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 
 use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
 
-use super::token::{Special, Token, TokenType, TokenValue};
+use super::token::{self, Special, Token, TokenType, TokenValue};
 use super::{Lexer, LexerError};
 
 use crate::ast;
 use crate::location::{Location, Offset, Span, Spanned};
-use crate::parse::token::BinOp;
-use crate::util::format_list;
+use crate::util::{define_yes_no_options, format_list};
 
-const RECURSION_LIMIT: usize = 1000;
+const RECURSION_LIMIT: usize = 8192;
 
 #[derive(Error, Diagnostic, Debug, Clone, PartialEq)]
 pub enum ParserError<'buf> {
     #[error("encountered an unexpected token: {} (expected {})", .actual.ty(), format_list(&.expected, "or"))]
     #[diagnostic(code(parser::unexpected_token))]
     UnexpectedToken {
-        expected: Vec<TokenType<'buf>>,
+        expected: Vec<Cow<'static, str>>,
 
         #[label]
         actual: Token<'buf>,
@@ -47,22 +47,16 @@ pub enum ParserError<'buf> {
     LexerError(#[from] LexerError),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum PrimitiveAllowed {
-    Yes,
-    No,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum BlockParamsAllowed {
-    Yes,
-    No,
+define_yes_no_options! {
+    enum PrimitiveAllowed;
+    enum BlockParamsAllowed;
+    enum StatementFinal;
 }
 
 trait Matcher<'a> {
     fn matches(&self, token: &Token<'_>) -> bool;
 
-    fn expected_tokens(&self) -> Vec<TokenType<'a>>;
+    fn expected_tokens(&self) -> Vec<Cow<'static, str>>;
 }
 
 impl<'a, const N: usize> Matcher<'a> for [TokenType<'a>; N] {
@@ -70,8 +64,8 @@ impl<'a, const N: usize> Matcher<'a> for [TokenType<'a>; N] {
         self.contains(&token.ty())
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType<'a>> {
-        self.to_vec()
+    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+        self.iter().map(|t| t.to_string().into()).collect()
     }
 }
 
@@ -83,8 +77,8 @@ impl<const N: usize> Matcher<'static> for [Special; N] {
         }
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType<'static>> {
-        self.iter().copied().map(TokenType::Special).collect()
+    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+        self.iter().map(|s| s.as_str().into()).collect()
     }
 }
 
@@ -93,8 +87,8 @@ impl<'a> Matcher<'a> for TokenType<'a> {
         self == &token.ty()
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType<'a>> {
-        vec![self.clone()]
+    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+        vec![self.to_string().into()]
     }
 }
 
@@ -103,8 +97,8 @@ impl Matcher<'static> for Special {
         TokenType::Special(*self) == token.ty()
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType<'static>> {
-        vec![TokenType::Special(*self)]
+    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+        vec![self.as_str().into()]
     }
 }
 
@@ -119,8 +113,38 @@ impl Matcher<'static> for SeparatorMatcher {
         }
     }
 
-    fn expected_tokens(&self) -> Vec<TokenType<'static>> {
-        vec![TokenType::BinOp(BinOp::new("----"))]
+    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+        vec!["separator".into()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BinOpMatcher;
+
+impl Matcher<'static> for BinOpMatcher {
+    fn matches(&self, token: &Token<'_>) -> bool {
+        token.value.as_bin_op().is_some()
+    }
+
+    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+        vec!["binary operator".into()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct VarNameMatcher;
+
+impl Matcher<'static> for VarNameMatcher {
+    fn matches(&self, token: &Token<'_>) -> bool {
+        match token.value {
+            TokenValue::Special(Special::Primitive) => true,
+            TokenValue::Ident(_) => true,
+            _ => false,
+        }
+    }
+
+    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+        vec!["identifier".into()]
     }
 }
 
@@ -219,7 +243,7 @@ pub struct Parser<'buf> {
     lexer: std::iter::Peekable<Lexer<'buf>>,
     recursion_limit: usize,
     layer_start: SourceOffset,
-    attempted_tokens: Vec<TokenType<'buf>>,
+    attempted_tokens: Vec<Cow<'static, str>>,
 }
 
 impl<'buf> Parser<'buf> {
@@ -411,7 +435,9 @@ impl<'buf> Parser<'buf> {
         });
 
         Ok(ast::Method {
-            location: Location::UserCode(selector.span().unwrap().convex_hull(&def.span().unwrap())),
+            location: Location::UserCode(
+                selector.span().unwrap().convex_hull(&def.span().unwrap()),
+            ),
             selector,
             def,
         })
@@ -420,22 +446,418 @@ impl<'buf> Parser<'buf> {
     fn parse_pattern(
         &mut self,
     ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
-        todo!()
+        lookahead!(self: {
+            BinOpMatcher => self.parse_bin_pattern(),
+            TokenType::Keyword => self.parse_kw_pattern(),
+            _ => self.parse_un_pattern(),
+        })
+    }
+
+    fn parse_bin_pattern(
+        &mut self,
+    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
+        let Token { span, value } = self.expect(BinOpMatcher).unwrap();
+        let name = Spanned::new_spanning(value.as_bin_op().unwrap().into_owned().into_str(), span);
+        let param = self.parse_ident(PrimitiveAllowed::Yes)?;
+
+        Ok((
+            Spanned::new_spanning(ast::Selector::Binary(name), span),
+            vec![param],
+        ))
+    }
+
+    fn parse_kw_pattern(
+        &mut self,
+    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
+        let mut kws = vec![];
+        let mut params = vec![];
+
+        while let Some(kw) = self.try_consume(TokenType::Keyword)? {
+            let Token {
+                span,
+                value: TokenValue::Keyword(kw),
+            } = kw
+            else {
+                unreachable!()
+            };
+
+            kws.push(Spanned::new_spanning(kw.into(), span));
+            params.push(self.parse_ident(PrimitiveAllowed::Yes)?);
+        }
+
+        debug_assert!(!kws.is_empty());
+        let span = kws[0]
+            .span()
+            .unwrap()
+            .convex_hull(&params.last().unwrap().span().unwrap());
+
+        Ok((
+            Spanned::new_spanning(ast::Selector::Keyword(kws), span),
+            params,
+        ))
+    }
+
+    fn parse_un_pattern(
+        &mut self,
+    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
+        let selector = self.parse_ident(PrimitiveAllowed::Yes)?;
+        let span = selector.span().unwrap();
+
+        Ok((
+            Spanned::new_spanning(ast::Selector::Unary(selector), span),
+            vec![],
+        ))
     }
 
     fn parse_block_body(
         &mut self,
         params_allowed: BlockParamsAllowed,
         left_matcher: impl Matcher<'static>,
-        right_matcher: impl Matcher<'static>,
+        right_matcher: impl Matcher<'static> + Copy,
     ) -> Result<Spanned<ast::Block<'buf>>, ParserError<'buf>> {
-        todo!()
+        let left = self.expect(left_matcher)?;
+        let mut params = vec![];
+
+        if params_allowed.is_yes() {
+            while let Some(Token { span, value }) = self.try_consume(TokenType::BlockParam)? {
+                let TokenValue::BlockParam(param) = value else {
+                    unreachable!()
+                };
+
+                params.push(Spanned::new_spanning(param.into(), span));
+            }
+
+            if !params.is_empty() {
+                self.expect(Special::Bar)?;
+            }
+        }
+
+        if let Some(right) = self.try_consume(right_matcher)? {
+            return Ok(Spanned::new_spanning(
+                ast::Block {
+                    params: vec![],
+                    locals: vec![],
+                    body: vec![],
+                },
+                left.span.convex_hull(&right.span),
+            ));
+        }
+
+        let locals = if self.peek(Special::Bar)? {
+            self.parse_var_list()?
+        } else {
+            vec![]
+        };
+
+        let mut body = vec![];
+
+        loop {
+            let (stmt, terminal) = self.parse_stmt()?;
+            body.push(stmt);
+
+            if terminal.is_yes() || self.peek(right_matcher)? {
+                break;
+            }
+        }
+
+        let right = self.expect(right_matcher)?;
+
+        Ok(Spanned::new_spanning(
+            ast::Block {
+                params,
+                locals,
+                body,
+            },
+            left.span.convex_hull(&right.span),
+        ))
+    }
+
+    fn parse_stmt(&mut self) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError<'buf>> {
+        lookahead!(self: {
+            Special::Circumflex => self.parse_return_stmt(),
+            _ => self.parse_expr_stmt(),
+        })
+    }
+
+    fn parse_return_stmt(
+        &mut self,
+    ) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError<'buf>> {
+        let circumflex = self.expect(Special::Circumflex).unwrap();
+        let ret_value = self.parse_expr()?;
+
+        let last_span = if let Some(dot) = self.try_consume(Special::Dot)? {
+            dot.span
+        } else {
+            ret_value.location().span().unwrap()
+        };
+
+        Ok((
+            ast::Stmt::Return(Spanned::new_spanning(
+                ret_value,
+                circumflex.span.convex_hull(&last_span),
+            )),
+            StatementFinal::Yes,
+        ))
+    }
+
+    fn parse_expr_stmt(&mut self) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError<'buf>> {
+        let expr = self.parse_expr()?;
+        let expr_span = expr.location().span().unwrap();
+
+        let (span, terminal) = if let Some(dot) = self.try_consume(Special::Dot)? {
+            (expr_span.convex_hull(&dot.span), StatementFinal::No)
+        } else {
+            (expr_span, StatementFinal::Yes)
+        };
+
+        Ok((ast::Stmt::Expr(Spanned::new_spanning(expr, span)), terminal))
+    }
+
+    fn parse_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        self.bounded()?.parse_assign_expr()
+    }
+
+    fn parse_assign_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        if self.peek(VarNameMatcher)? {
+            let var = self.parse_ident(PrimitiveAllowed::Yes)?;
+
+            if self.try_consume(Special::Assign)?.is_some() {
+                let value = self.bounded()?.parse_expr()?;
+                let span = var
+                    .span()
+                    .unwrap()
+                    .convex_hull(&value.location().span().unwrap());
+
+                Ok(ast::Expr::Assign(ast::Assign {
+                    location: Location::UserCode(span),
+                    var,
+                    value: Box::new(value),
+                }))
+            } else {
+                self.bounded()?.parse_kw_dispatch_expr(Some(var))
+            }
+        } else {
+            self.bounded()?.parse_kw_dispatch_expr(None)
+        }
+    }
+
+    fn parse_kw_dispatch_expr(
+        &mut self,
+        parsed_recv: Option<ast::Name<'buf>>,
+    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let recv = self.bounded()?.parse_bin_dispatch_expr(parsed_recv)?;
+
+        let mut kws = vec![];
+        let mut args = vec![];
+
+        while let Some(kw) = self.try_consume(TokenType::Keyword)? {
+            let Token {
+                span,
+                value: TokenValue::Keyword(kw),
+            } = kw
+            else {
+                unreachable!()
+            };
+            let arg = self.bounded()?.parse_bin_dispatch_expr(None)?;
+
+            kws.push(Spanned::new_spanning(kw.into(), span));
+            args.push(arg);
+        }
+
+        if let Some(kw) = kws.first() {
+            let span = kw
+                .span()
+                .unwrap()
+                .convex_hull(&args.last().unwrap().location().span().unwrap());
+            let selector = ast::Selector::Keyword(kws);
+
+            Ok(ast::Expr::Dispatch(ast::Dispatch {
+                location: Location::UserCode(span),
+                recv: Box::new(recv),
+                selector,
+                args,
+            }))
+        } else {
+            Ok(recv)
+        }
+    }
+
+    fn parse_bin_dispatch_expr(
+        &mut self,
+        parsed_recv: Option<ast::Name<'buf>>,
+    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let mut recv = self.bounded()?.parse_un_dispatch_expr(parsed_recv)?;
+
+        while let Some(Token {
+            span: op_span,
+            value: op_value,
+        }) = self.try_consume(BinOpMatcher)?
+        {
+            let op = op_value.as_bin_op().unwrap().into_owned().into_str();
+            let arg = self.bounded()?.parse_un_dispatch_expr(None)?;
+            let span = recv
+                .location()
+                .span()
+                .unwrap()
+                .convex_hull(&arg.location().span().unwrap());
+            let selector = ast::Selector::Binary(Spanned::new_spanning(op, op_span));
+
+            recv = ast::Expr::Dispatch(ast::Dispatch {
+                location: Location::UserCode(span),
+                recv: Box::new(recv),
+                selector,
+                args: vec![arg],
+            });
+        }
+
+        Ok(recv)
+    }
+
+    fn parse_un_dispatch_expr(
+        &mut self,
+        parsed_recv: Option<ast::Name<'buf>>,
+    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let mut recv = self.bounded()?.parse_primary_expr(parsed_recv)?;
+
+        while self.peek(VarNameMatcher)? {
+            let name = self.parse_ident(PrimitiveAllowed::Yes)?;
+            let name_span = name.location.span().unwrap();
+            let selector = ast::Selector::Unary(name);
+            let span = recv.location().span().unwrap().convex_hull(&name_span);
+
+            recv = ast::Expr::Dispatch(ast::Dispatch {
+                location: Location::UserCode(span),
+                recv: Box::new(recv),
+                selector,
+                args: vec![],
+            });
+        }
+
+        Ok(recv)
+    }
+
+    fn parse_primary_expr(
+        &mut self,
+        parsed_name: Option<ast::Name<'buf>>,
+    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        if parsed_name.is_some() {
+            self.bounded()?.parse_var_expr(parsed_name)
+        } else {
+            lookahead!(self: {
+                VarNameMatcher => self.bounded()?.parse_var_expr(None),
+                Special::ParenLeft => self.bounded()?.parse_paren_expr(),
+                Special::BracketLeft => self.bounded()?.parse_block_expr(),
+                _ => self.bounded()?.parse_lit_expr(),
+            })
+        }
+    }
+
+    fn parse_var_expr(
+        &mut self,
+        parsed_name: Option<ast::Name<'buf>>,
+    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let name = match parsed_name {
+            Some(name) => name,
+            None => self.parse_ident(PrimitiveAllowed::Yes)?,
+        };
+
+        Ok(ast::Expr::Var(ast::Var(name)))
+    }
+
+    fn parse_paren_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        self.expect(Special::ParenLeft).unwrap();
+        let expr = self.bounded()?.parse_expr()?;
+        self.expect(Special::ParenRight)?;
+
+        Ok(expr)
+    }
+
+    fn parse_block_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let block = self.bounded()?.parse_block_body(
+            BlockParamsAllowed::Yes,
+            Special::BracketLeft,
+            Special::BracketRight,
+        )?;
+
+        Ok(ast::Expr::Block(block))
+    }
+
+    fn parse_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        lookahead!(self: {
+            Special::ArrayLeft => self.bounded()?.parse_array_lit_expr(),
+            TokenType::Symbol => self.bounded()?.parse_symbol_lit_expr(),
+            TokenType::String => self.bounded()?.parse_string_lit_expr(),
+            TokenType::Int => self.bounded()?.parse_num_lit_expr(),
+            TokenType::Float => self.bounded()?.parse_num_lit_expr(),
+            _ => return #error,
+        })
+    }
+
+    fn parse_array_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let left = self.expect(Special::ArrayLeft).unwrap();
+        let mut values = vec![];
+
+        let right = loop {
+            if let Some(right) = self.try_consume(Special::ParenRight)? {
+                break right;
+            }
+
+            values.push(self.parse_lit_expr()?);
+        };
+
+        Ok(ast::Expr::Array(ast::ArrayLit(Spanned::new_spanning(values, left.span.convex_hull(&right.span)))))
+    }
+
+    fn parse_symbol_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let Token { span, value: TokenValue::Symbol(sym) } = self.expect(TokenType::Symbol).unwrap() else {
+            unreachable!()
+        };
+
+        let sym = match sym {
+            token::Symbol::String(s) => ast::SymbolLit::String(Spanned::new_spanning(s, span)),
+            token::Symbol::UnarySelector(s) => ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Unary(Spanned::new_spanning(s.into(), span)), span)),
+            token::Symbol::BinarySelector(op) => ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Binary(Spanned::new_spanning(op.into_str(), span)), span)),
+            token::Symbol::KeywordSelector(kws) => {
+                let kws = kws.into_iter().map(|token::Keyword { span, kw }| Spanned::new_spanning(kw.into(), span)).collect();
+
+                ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Keyword(kws), span))
+            },
+        };
+
+        Ok(ast::Expr::Symbol(sym))
+    }
+
+    fn parse_string_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let Token { span, value: TokenValue::String(s) } = self.expect(TokenType::String).unwrap() else { unreachable!() };
+
+        Ok(ast::Expr::String(ast::StringLit(Spanned::new_spanning(s, span))))
+    }
+
+    fn parse_num_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+        let Token { span, value } = self.expect([TokenType::Int, TokenType::Float]).unwrap();
+
+        Ok(match value {
+            TokenValue::Int(n) => ast::Expr::Int(ast::IntLit(Spanned::new_spanning(n, span))),
+            TokenValue::Float(n) => ast::Expr::Float(ast::FloatLit(Spanned::new_spanning(n, span))),
+            _ => unreachable!(),
+        })
     }
 
     fn parse_ident(
         &mut self,
         primitive_allowed: PrimitiveAllowed,
     ) -> Result<ast::Name<'buf>, ParserError<'buf>> {
-        todo!()
+        let Token { span, value } = match primitive_allowed {
+            PrimitiveAllowed::No => self.expect(TokenType::Ident)?,
+            PrimitiveAllowed::Yes => self.expect(VarNameMatcher)?,
+        };
+
+        let name = match value {
+            TokenValue::Special(s @ Special::Primitive) => s.as_str(),
+            TokenValue::Ident(id) => id,
+            _ => unreachable!(),
+        };
+
+        Ok(Spanned::new_spanning(name.into(), span))
     }
 }

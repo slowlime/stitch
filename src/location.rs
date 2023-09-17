@@ -101,7 +101,7 @@ impl From<Range<SourceOffset>> for Span {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Location {
     UserCode(Span),
     Builtin,

@@ -8,6 +8,13 @@ use miette::SourceSpan;
 
 use crate::location::Span;
 
+pub fn is_bin_op_char(c: char) -> bool {
+    matches!(
+        c,
+        '~' | '&' | '|' | '*' | '/' | '\\' | '+' | '=' | '>' | '<' | ',' | '@' | '%' | '-'
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token<'buf> {
     pub span: Span,
@@ -25,7 +32,10 @@ pub struct BinOp<'a>(Cow<'a, str>);
 
 impl<'a> BinOp<'a> {
     pub fn new(s: impl Into<Cow<'a, str>>) -> Self {
-        Self(s.into())
+        let s: Cow<_> = s.into();
+        debug_assert!(s.chars().all(is_bin_op_char));
+
+        Self(s)
     }
 
     pub fn is_separator(&self) -> bool {
@@ -35,6 +45,24 @@ impl<'a> BinOp<'a> {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn into_str(self) -> Cow<'a, str> {
+        self.0
+    }
+}
+
+impl TryFrom<Special> for BinOp<'static> {
+    type Error = ();
+
+    fn try_from(s: Special) -> Result<Self, Self::Error> {
+        let s = s.as_str();
+
+        if s.chars().all(is_bin_op_char) {
+            Ok(BinOp::new(s))
+        } else {
+            Err(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,6 +71,9 @@ pub enum TokenType<'a> {
     Float,
     String,
     Ident,
+    Keyword,
+    Symbol,
+    BlockParam,
     BinOp(BinOp<'a>),
     Special(Special),
     Eof,
@@ -58,6 +89,9 @@ impl Display for TokenType<'_> {
                 Self::Float => "float",
                 Self::String => "string",
                 Self::Ident => "identifier",
+                Self::Keyword => "keyword",
+                Self::Symbol => "symbol",
+                Self::BlockParam => "block parameter",
                 Self::BinOp(op) => op.as_str(),
                 Self::Special(s) => s.as_str(),
                 Self::Eof => "end of file",
@@ -72,12 +106,29 @@ impl<'buf> From<Token<'buf>> for SourceSpan {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Symbol<'buf> {
+    String(Cow<'buf, str>),
+    UnarySelector(&'buf str),
+    BinarySelector(BinOp<'buf>),
+    KeywordSelector(Vec<Keyword<'buf>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Keyword<'buf> {
+    pub span: Span,
+    pub kw: &'buf str,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenValue<'buf> {
     Int(i64),
     Float(f64),
     String(Cow<'buf, str>),
     Ident(&'buf str),
+    Keyword(&'buf str),
+    Symbol(Symbol<'buf>),
+    BlockParam(&'buf str),
     BinOp(BinOp<'buf>),
     Special(Special),
     Eof,
@@ -90,10 +141,21 @@ impl<'buf> TokenValue<'buf> {
             Self::Float(_) => TokenType::Float,
             Self::String(_) => TokenType::String,
             Self::Ident(_) => TokenType::Ident,
+            Self::Keyword(_) => TokenType::Keyword,
+            Self::Symbol(_) => TokenType::Symbol,
+            Self::BlockParam(_) => TokenType::BlockParam,
             Self::BinOp(ref op) => TokenType::BinOp(op.clone()),
             Self::Special(s) => TokenType::Special(s),
             Self::Eof => TokenType::Eof,
         }
+    }
+
+    pub fn as_bin_op(&self) -> Option<Cow<'_, BinOp<'buf>>> {
+        Some(match *self {
+            Self::BinOp(ref op) => Cow::Borrowed(op),
+            Self::Special(s) => Cow::Owned(BinOp::try_from(s).ok()?),
+            _ => return None,
+        })
     }
 }
 
@@ -165,8 +227,9 @@ specials! {
     "[" => BracketLeft,
     "]" => BracketRight,
     "." => Dot,
-    "#" => Octothorpe,
     "^" => Circumflex,
+    ":=" => Assign,
 
     "primitive" => Primitive,
+    "#(" => ArrayLeft,
 }
