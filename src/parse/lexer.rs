@@ -201,26 +201,28 @@ impl<'buf> Lexer<'buf> {
 
             match escape_pos {
                 Some(backslash_pos) => {
-                    token_value.to_mut().push(match c {
-                        't' => '\t',
-                        'b' => '\x08', // backspace
-                        'n' => '\n',
-                        'r' => '\r',
-                        'f' => '\x0c', // form feed
-                        '0' => '\0',
-                        '\'' | '|' => c,
+                    'push: {
+                        token_value.to_mut().push(match c {
+                            't' => '\t',
+                            'b' => '\x08', // backspace
+                            'n' => '\n',
+                            'r' => '\r',
+                            'f' => '\x0c', // form feed
+                            '0' => '\0',
+                            '\\' | '\'' | '|' => c,
 
-                        _ => {
-                            if invalid_escape.is_none() {
-                                invalid_escape = Some((
-                                    (backslash_pos.offset()..self.cursor.pos().offset()).into(),
-                                    c,
-                                ));
+                            _ => {
+                                if invalid_escape.is_none() {
+                                    invalid_escape = Some((
+                                        (backslash_pos.offset()..self.cursor.pos().offset()).into(),
+                                        c,
+                                    ));
+                                }
+
+                                break 'push;
                             }
-
-                            continue;
-                        }
-                    });
+                        });
+                    }
 
                     escape_pos = None;
                 }
@@ -259,11 +261,17 @@ impl<'buf> Lexer<'buf> {
 
         match self.cursor.peek() {
             Some('\'') => self.scan_string_symbol(),
-            Some('(') => Ok(TokenValue::Special(Special::ArrayLeft)),
+            Some('(') => self.scan_array(),
             Some(c) if is_bin_op_char(c) => self.scan_bin_selector(),
             Some(c) if is_ident_start(c) => self.scan_un_or_kw_selector(),
             Some(_) | None => Err(self.make_error_at_pos(LexerErrorKind::IllegalOctothorpe)),
         }
+    }
+
+    fn scan_array(&mut self) -> ScanResult<'buf> {
+        self.cursor.consume_expecting("(").unwrap();
+
+        Ok(TokenValue::Special(Special::ArrayLeft))
     }
 
     fn scan_string_symbol(&mut self) -> ScanResult<'buf> {

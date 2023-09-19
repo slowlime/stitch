@@ -25,14 +25,19 @@ fn test_parser(source_path: PathBuf, cfg: Option<ParserTest>) {
 
     let result = match stitch::parse::parse(&source) {
         Ok(class) => Ok(class),
-        Err(e) => Err(miette::Report::new(e).with_source_code(source.clone())),
+        Err(e) => Err(
+            miette::Report::new(e).with_source_code(miette::NamedSource::new(
+                source_path.to_string_lossy(),
+                source.clone(),
+            )),
+        ),
     };
 
     match result {
         Ok(_) if test.fail => panic!("Expected parsing failure but parsed successfully"),
-        Err(e) if !test.fail => panic!("Parsing failed: {e:?}"),
+        Err(e) if !test.fail => panic!("Parsing failed:\n{e:?}"),
 
-        Ok(_class) => {},
+        Ok(_class) => {}
 
         Err(e) => {
             if let Some(fail_message) = test.fail_message.as_ref() {
@@ -40,10 +45,10 @@ fn test_parser(source_path: PathBuf, cfg: Option<ParserTest>) {
 
                 assert!(
                     msg.contains(fail_message),
-                    "Parsing failed with message {msg} (expected the message to contain {fail_message})"
+                    "Parsing failed with message {msg} (expected the message to contain {fail_message}). Details:\n{e:?}"
                 );
             }
-        },
+        }
     }
 }
 
