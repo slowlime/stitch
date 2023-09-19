@@ -286,14 +286,14 @@ impl<'buf> Lexer<'buf> {
         let start = self.pos();
 
         match self.scan_ident()? {
-            TokenValue::Special(s @ Special::Primitive) => Ok(TokenValue::Symbol(Symbol::UnarySelector(s.as_str()))),
+            TokenValue::Special(s @ Special::Primitive) => Ok(TokenValue::Symbol(Symbol::UnarySelector(s.as_str().into()))),
             TokenValue::Ident(id) => Ok(TokenValue::Symbol(Symbol::UnarySelector(id))),
             TokenValue::Keyword(kw) => self.scan_kw_selector(start, kw),
             _ => unreachable!(),
         }
     }
 
-    fn scan_kw_selector(&mut self, first_kw_start: SourceOffset, first_kw: &'buf str) -> ScanResult<'buf> {
+    fn scan_kw_selector(&mut self, first_kw_start: SourceOffset, first_kw: Cow<'buf, str>) -> ScanResult<'buf> {
         let mut kws = vec![Keyword {
             span: (first_kw_start..self.pos()).into(),
             kw: first_kw,
@@ -337,7 +337,7 @@ impl<'buf> Lexer<'buf> {
         if id.is_empty() {
             Err(self.make_error_at_pos(LexerErrorKind::InvalidBlockParam))
         } else {
-            Ok(TokenValue::BlockParam(id))
+            Ok(TokenValue::BlockParam(id.into()))
         }
     }
 
@@ -348,9 +348,9 @@ impl<'buf> Lexer<'buf> {
         Ok(if let Some(s) = scan_special(ident, MatchMode::Exact) {
             s
         } else if self.cursor.consume_expecting(":").is_some() {
-            TokenValue::Keyword(ident)
+            TokenValue::Keyword(ident.into())
         } else {
-            TokenValue::Ident(ident)
+            TokenValue::Ident(ident.into())
         })
     }
 

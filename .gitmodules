@@ -1,0 +1,3 @@
+[submodule "third-party/SOM"]
+	path = third-party/SOM
+	url = https://github.com/SOM-st/SOM

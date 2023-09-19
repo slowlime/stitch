@@ -15,17 +15,22 @@ struct ParserTest {
     fail_message: Option<String>,
 }
 
-#[test_resources("tests/parser/*.som")]
-fn test_parser(source_path: PathBuf) {
+fn test_parser(source_path: PathBuf, cfg: Option<ParserTest>) {
+    miette::set_panic_hook();
+
     let source = fs::read_to_string(&source_path).expect("Failed to read the test source");
-    let mut test: ParserTest = common::parse_comment_header(&source);
+
+    let mut test = cfg.unwrap_or_else(|| common::parse_comment_header(&source));
     test.fail = test.fail || test.fail_message.is_some();
 
-    let result = stitch::parse::parse(&source);
+    let result = match stitch::parse::parse(&source) {
+        Ok(class) => Ok(class),
+        Err(e) => Err(miette::Report::new(e).with_source_code(source.clone())),
+    };
 
     match result {
         Ok(_) if test.fail => panic!("Expected parsing failure but parsed successfully"),
-        Err(e) if !test.fail => panic!("Parsing failed: {e}"),
+        Err(e) if !test.fail => panic!("Parsing failed: {e:?}"),
 
         Ok(_class) => {},
 
@@ -40,4 +45,14 @@ fn test_parser(source_path: PathBuf) {
             }
         },
     }
+}
+
+#[test_resources("tests/parser/*.som")]
+fn test_parser_stitch(source_path: PathBuf) {
+    test_parser(source_path, None);
+}
+
+#[test_resources("third-party/SOM/TestSuite/**/*.som")]
+fn test_parser_som_st(source_path: PathBuf) {
+    test_parser(source_path, Some(Default::default()))
 }

@@ -10,29 +10,29 @@ use super::{Lexer, LexerError};
 
 use crate::ast;
 use crate::location::{Location, Offset, Span, Spanned};
-use crate::util::{define_yes_no_options, format_list};
+use crate::util::{define_yes_no_options, format_list, CloneStatic};
 
 const RECURSION_LIMIT: usize = 8192;
 
 #[derive(Error, Diagnostic, Debug, Clone, PartialEq)]
-pub enum ParserError<'buf> {
-    #[error("encountered an unexpected token: {} (expected {})", .actual.ty(), format_list(&.expected, "or"))]
+pub enum ParserError {
+    #[error("encountered an unexpected token: `{}` (expected {})", .actual.ty(), format_list!("`{}`", &.expected, "or"))]
     #[diagnostic(code(parser::unexpected_token))]
     UnexpectedToken {
         expected: Vec<Cow<'static, str>>,
 
         #[label]
-        actual: Token<'buf>,
+        actual: Token<'static>,
     },
 
     #[error("multiple class member separators present in the definition")]
     #[diagnostic(code(parser::multiple_separators))]
     MultipleSeparators {
         #[label]
-        bad_separator: Token<'buf>,
+        bad_separator: Token<'static>,
 
         #[label = "first separator specified here"]
-        first_separator: Token<'buf>,
+        first_separator: Token<'static>,
     },
 
     #[error(
@@ -160,7 +160,7 @@ macro_rules! lookahead {
                 return match $self.lexer.peek().unwrap().clone() {
                     Ok(actual) => Err(ParserError::UnexpectedToken {
                         expected: expected.into_iter().collect(),
-                        actual,
+                        actual: actual.clone_static(),
                     }),
 
                     Err(e) => Err(ParserError::from(e)),
@@ -258,7 +258,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn bounded(&mut self) -> Result<BoundedParser<'buf, '_>, ParserError<'buf>> {
+    fn bounded(&mut self) -> Result<BoundedParser<'buf, '_>, ParserError> {
         self.recursion_limit =
             self.recursion_limit
                 .checked_sub(1)
@@ -286,14 +286,14 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn expect(&mut self, matcher: impl Matcher<'static>) -> Result<Token<'buf>, ParserError<'buf>> {
+    fn expect(&mut self, matcher: impl Matcher<'static>) -> Result<Token<'buf>, ParserError> {
         expect_impl! {
             match self.try_consume!(matcher) {
                 Ok(token) => Ok(token),
 
                 Err(token) => Err(ParserError::UnexpectedToken {
                     expected: mem::take(&mut self.attempted_tokens),
-                    actual: token.clone(),
+                    actual: token.clone_static(),
                 }),
             }
         }
@@ -302,7 +302,7 @@ impl<'buf> Parser<'buf> {
     fn try_consume(
         &mut self,
         matcher: impl Matcher<'static>,
-    ) -> Result<Option<Token<'buf>>, ParserError<'buf>> {
+    ) -> Result<Option<Token<'buf>>, ParserError> {
         expect_impl! {
             match self.try_consume!(matcher) {
                 Ok(token) => Ok(Some(token)),
@@ -311,7 +311,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn peek(&mut self, matcher: impl Matcher<'static>) -> Result<bool, ParserError<'buf>> {
+    fn peek(&mut self, matcher: impl Matcher<'static>) -> Result<bool, ParserError> {
         expect_impl! {
             match self.peek!(matcher) {
                 Ok(_) => Ok(true),
@@ -320,14 +320,14 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    pub fn parse(mut self) -> Result<ast::Class<'buf>, ParserError<'buf>> {
+    pub fn parse(mut self) -> Result<ast::Class<'buf>, ParserError> {
         let class = self.parse_class()?;
         self.expect(TokenType::Eof)?;
 
         Ok(class)
     }
 
-    fn parse_class(&mut self) -> Result<ast::Class<'buf>, ParserError<'buf>> {
+    fn parse_class(&mut self) -> Result<ast::Class<'buf>, ParserError> {
         let name = self.parse_ident(PrimitiveAllowed::No)?;
         self.expect(Special::Equals)?;
 
@@ -370,11 +370,11 @@ impl<'buf> Parser<'buf> {
                         Special::ParenRight => break,
 
                         SeparatorMatcher => {
-                            let bad_separator = self.expect(SeparatorMatcher).unwrap();
+                            let bad_separator = self.expect(SeparatorMatcher).unwrap().clone_static();
 
                             return Err(ParserError::MultipleSeparators {
                                 bad_separator,
-                                first_separator: separator,
+                                first_separator: separator.clone_static(),
                             });
                         },
 
@@ -400,7 +400,7 @@ impl<'buf> Parser<'buf> {
         })
     }
 
-    fn parse_var_list(&mut self) -> Result<Vec<ast::Name<'buf>>, ParserError<'buf>> {
+    fn parse_var_list(&mut self) -> Result<Vec<ast::Name<'buf>>, ParserError> {
         self.expect(Special::Bar)?;
 
         let mut vars = vec![];
@@ -412,7 +412,7 @@ impl<'buf> Parser<'buf> {
         Ok(vars)
     }
 
-    fn parse_method(&mut self) -> Result<ast::Method<'buf>, ParserError<'buf>> {
+    fn parse_method(&mut self) -> Result<ast::Method<'buf>, ParserError> {
         let (selector, params) = self.parse_pattern()?;
         self.expect(Special::Equals)?;
 
@@ -445,7 +445,7 @@ impl<'buf> Parser<'buf> {
 
     fn parse_pattern(
         &mut self,
-    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
+    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError> {
         lookahead!(self: {
             BinOpMatcher => self.parse_bin_pattern(),
             TokenType::Keyword => self.parse_kw_pattern(),
@@ -455,7 +455,7 @@ impl<'buf> Parser<'buf> {
 
     fn parse_bin_pattern(
         &mut self,
-    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
+    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError> {
         let Token { span, value } = self.expect(BinOpMatcher).unwrap();
         let name = Spanned::new_spanning(value.as_bin_op().unwrap().into_owned().into_str(), span);
         let param = self.parse_ident(PrimitiveAllowed::Yes)?;
@@ -468,7 +468,7 @@ impl<'buf> Parser<'buf> {
 
     fn parse_kw_pattern(
         &mut self,
-    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
+    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError> {
         let mut kws = vec![];
         let mut params = vec![];
 
@@ -499,7 +499,7 @@ impl<'buf> Parser<'buf> {
 
     fn parse_un_pattern(
         &mut self,
-    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError<'buf>> {
+    ) -> Result<(Spanned<ast::Selector<'buf>>, Vec<ast::Name<'buf>>), ParserError> {
         let selector = self.parse_ident(PrimitiveAllowed::Yes)?;
         let span = selector.span().unwrap();
 
@@ -514,7 +514,7 @@ impl<'buf> Parser<'buf> {
         params_allowed: BlockParamsAllowed,
         left_matcher: impl Matcher<'static>,
         right_matcher: impl Matcher<'static> + Copy,
-    ) -> Result<Spanned<ast::Block<'buf>>, ParserError<'buf>> {
+    ) -> Result<Spanned<ast::Block<'buf>>, ParserError> {
         let left = self.expect(left_matcher)?;
         let mut params = vec![];
 
@@ -572,7 +572,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
-    fn parse_stmt(&mut self) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError<'buf>> {
+    fn parse_stmt(&mut self) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError> {
         lookahead!(self: {
             Special::Circumflex => self.parse_return_stmt(),
             _ => self.parse_expr_stmt(),
@@ -581,7 +581,7 @@ impl<'buf> Parser<'buf> {
 
     fn parse_return_stmt(
         &mut self,
-    ) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError<'buf>> {
+    ) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError> {
         let circumflex = self.expect(Special::Circumflex).unwrap();
         let ret_value = self.parse_expr()?;
 
@@ -600,7 +600,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
-    fn parse_expr_stmt(&mut self) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError<'buf>> {
+    fn parse_expr_stmt(&mut self) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError> {
         let expr = self.parse_expr()?;
         let expr_span = expr.location().span().unwrap();
 
@@ -613,11 +613,11 @@ impl<'buf> Parser<'buf> {
         Ok((ast::Stmt::Expr(Spanned::new_spanning(expr, span)), terminal))
     }
 
-    fn parse_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         self.bounded()?.parse_assign_expr()
     }
 
-    fn parse_assign_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_assign_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         if self.peek(VarNameMatcher)? {
             let var = self.parse_ident(PrimitiveAllowed::Yes)?;
 
@@ -644,7 +644,7 @@ impl<'buf> Parser<'buf> {
     fn parse_kw_dispatch_expr(
         &mut self,
         parsed_recv: Option<ast::Name<'buf>>,
-    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    ) -> Result<ast::Expr<'buf>, ParserError> {
         let recv = self.bounded()?.parse_bin_dispatch_expr(parsed_recv)?;
 
         let mut kws = vec![];
@@ -685,7 +685,7 @@ impl<'buf> Parser<'buf> {
     fn parse_bin_dispatch_expr(
         &mut self,
         parsed_recv: Option<ast::Name<'buf>>,
-    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    ) -> Result<ast::Expr<'buf>, ParserError> {
         let mut recv = self.bounded()?.parse_un_dispatch_expr(parsed_recv)?;
 
         while let Some(Token {
@@ -716,7 +716,7 @@ impl<'buf> Parser<'buf> {
     fn parse_un_dispatch_expr(
         &mut self,
         parsed_recv: Option<ast::Name<'buf>>,
-    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    ) -> Result<ast::Expr<'buf>, ParserError> {
         let mut recv = self.bounded()?.parse_primary_expr(parsed_recv)?;
 
         while self.peek(VarNameMatcher)? {
@@ -739,7 +739,7 @@ impl<'buf> Parser<'buf> {
     fn parse_primary_expr(
         &mut self,
         parsed_name: Option<ast::Name<'buf>>,
-    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    ) -> Result<ast::Expr<'buf>, ParserError> {
         if parsed_name.is_some() {
             self.bounded()?.parse_var_expr(parsed_name)
         } else {
@@ -755,7 +755,7 @@ impl<'buf> Parser<'buf> {
     fn parse_var_expr(
         &mut self,
         parsed_name: Option<ast::Name<'buf>>,
-    ) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    ) -> Result<ast::Expr<'buf>, ParserError> {
         let name = match parsed_name {
             Some(name) => name,
             None => self.parse_ident(PrimitiveAllowed::Yes)?,
@@ -764,7 +764,7 @@ impl<'buf> Parser<'buf> {
         Ok(ast::Expr::Var(ast::Var(name)))
     }
 
-    fn parse_paren_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_paren_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         self.expect(Special::ParenLeft).unwrap();
         let expr = self.bounded()?.parse_expr()?;
         self.expect(Special::ParenRight)?;
@@ -772,7 +772,7 @@ impl<'buf> Parser<'buf> {
         Ok(expr)
     }
 
-    fn parse_block_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_block_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         let block = self.bounded()?.parse_block_body(
             BlockParamsAllowed::Yes,
             Special::BracketLeft,
@@ -782,7 +782,7 @@ impl<'buf> Parser<'buf> {
         Ok(ast::Expr::Block(block))
     }
 
-    fn parse_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         lookahead!(self: {
             Special::ArrayLeft => self.bounded()?.parse_array_lit_expr(),
             TokenType::Symbol => self.bounded()?.parse_symbol_lit_expr(),
@@ -793,7 +793,7 @@ impl<'buf> Parser<'buf> {
         })
     }
 
-    fn parse_array_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_array_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         let left = self.expect(Special::ArrayLeft).unwrap();
         let mut values = vec![];
 
@@ -808,7 +808,7 @@ impl<'buf> Parser<'buf> {
         Ok(ast::Expr::Array(ast::ArrayLit(Spanned::new_spanning(values, left.span.convex_hull(&right.span)))))
     }
 
-    fn parse_symbol_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_symbol_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         let Token { span, value: TokenValue::Symbol(sym) } = self.expect(TokenType::Symbol).unwrap() else {
             unreachable!()
         };
@@ -827,13 +827,13 @@ impl<'buf> Parser<'buf> {
         Ok(ast::Expr::Symbol(sym))
     }
 
-    fn parse_string_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_string_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         let Token { span, value: TokenValue::String(s) } = self.expect(TokenType::String).unwrap() else { unreachable!() };
 
         Ok(ast::Expr::String(ast::StringLit(Spanned::new_spanning(s, span))))
     }
 
-    fn parse_num_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError<'buf>> {
+    fn parse_num_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
         let Token { span, value } = self.expect([TokenType::Int, TokenType::Float]).unwrap();
 
         Ok(match value {
@@ -846,14 +846,14 @@ impl<'buf> Parser<'buf> {
     fn parse_ident(
         &mut self,
         primitive_allowed: PrimitiveAllowed,
-    ) -> Result<ast::Name<'buf>, ParserError<'buf>> {
+    ) -> Result<ast::Name<'buf>, ParserError> {
         let Token { span, value } = match primitive_allowed {
             PrimitiveAllowed::No => self.expect(TokenType::Ident)?,
             PrimitiveAllowed::Yes => self.expect(VarNameMatcher)?,
         };
 
         let name = match value {
-            TokenValue::Special(s @ Special::Primitive) => s.as_str(),
+            TokenValue::Special(s @ Special::Primitive) => s.as_str().into(),
             TokenValue::Ident(id) => id,
             _ => unreachable!(),
         };

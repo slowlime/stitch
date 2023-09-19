@@ -9,7 +9,7 @@ pub use parser::{Parser, ParserError};
 
 use crate::ast;
 
-pub fn parse<'buf>(buf: &'buf str) -> Result<ast::Class<'buf>, ParserError<'buf>> {
+pub fn parse<'buf>(buf: &'buf str) -> Result<ast::Class<'buf>, ParserError> {
     let cursor = Cursor::new(buf);
     let lexer = Lexer::new(cursor);
     let parser = Parser::new(lexer);

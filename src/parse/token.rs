@@ -7,6 +7,7 @@ use phf::phf_map;
 use miette::SourceSpan;
 
 use crate::location::Span;
+use crate::util::CloneStatic;
 
 pub fn is_bin_op_char(c: char) -> bool {
     matches!(
@@ -24,6 +25,21 @@ pub struct Token<'buf> {
 impl<'buf> Token<'buf> {
     pub fn ty(&self) -> TokenType<'buf> {
         self.value.ty()
+    }
+}
+
+impl CloneStatic<Token<'static>> for Token<'_> {
+    fn clone_static(&self) -> Token<'static> {
+        Token {
+            span: self.span,
+            value: self.value.clone_static(),
+        }
+    }
+}
+
+impl<'buf> From<Token<'buf>> for SourceSpan {
+    fn from(token: Token<'buf>) -> SourceSpan {
+        token.span.into()
     }
 }
 
@@ -48,6 +64,12 @@ impl<'a> BinOp<'a> {
 
     pub fn into_str(self) -> Cow<'a, str> {
         self.0
+    }
+}
+
+impl CloneStatic<BinOp<'static>> for BinOp<'_> {
+    fn clone_static(&self) -> BinOp<'static> {
+        BinOp(self.0.clone_static())
     }
 }
 
@@ -100,24 +122,55 @@ impl Display for TokenType<'_> {
     }
 }
 
-impl<'buf> From<Token<'buf>> for SourceSpan {
-    fn from(token: Token<'buf>) -> SourceSpan {
-        token.span.into()
+impl CloneStatic<TokenType<'static>> for TokenType<'_> {
+    fn clone_static(&self) -> TokenType<'static> {
+        match self {
+            Self::Int => TokenType::Int,
+            Self::Float => TokenType::Float,
+            Self::String => TokenType::String,
+            Self::Ident => TokenType::Ident,
+            Self::Keyword => TokenType::Keyword,
+            Self::Symbol => TokenType::Symbol,
+            Self::BlockParam => TokenType::BlockParam,
+            Self::BinOp(op) => TokenType::BinOp(op.clone_static()),
+            Self::Special(s) => TokenType::Special(*s),
+            Self::Eof => TokenType::Eof,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Symbol<'buf> {
     String(Cow<'buf, str>),
-    UnarySelector(&'buf str),
+    UnarySelector(Cow<'buf, str>),
     BinarySelector(BinOp<'buf>),
     KeywordSelector(Vec<Keyword<'buf>>),
+}
+
+impl CloneStatic<Symbol<'static>> for Symbol<'_> {
+    fn clone_static(&self) -> Symbol<'static> {
+        match self {
+            Self::String(s) => Symbol::String(s.clone_static()),
+            Self::UnarySelector(id) => Symbol::UnarySelector(id.clone_static()),
+            Self::BinarySelector(op) => Symbol::BinarySelector(op.clone_static()),
+            Self::KeywordSelector(kws) => Symbol::KeywordSelector(kws.clone_static()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Keyword<'buf> {
     pub span: Span,
-    pub kw: &'buf str,
+    pub kw: Cow<'buf, str>,
+}
+
+impl CloneStatic<Keyword<'static>> for Keyword<'_> {
+    fn clone_static(&self) -> Keyword<'static> {
+        Keyword {
+            span: self.span,
+            kw: self.kw.clone_static(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,10 +178,10 @@ pub enum TokenValue<'buf> {
     Int(i64),
     Float(f64),
     String(Cow<'buf, str>),
-    Ident(&'buf str),
-    Keyword(&'buf str),
+    Ident(Cow<'buf, str>),
+    Keyword(Cow<'buf, str>),
     Symbol(Symbol<'buf>),
-    BlockParam(&'buf str),
+    BlockParam(Cow<'buf, str>),
     BinOp(BinOp<'buf>),
     Special(Special),
     Eof,
@@ -156,6 +209,23 @@ impl<'buf> TokenValue<'buf> {
             Self::Special(s) => Cow::Owned(BinOp::try_from(s).ok()?),
             _ => return None,
         })
+    }
+}
+
+impl CloneStatic<TokenValue<'static>> for TokenValue<'_> {
+    fn clone_static(&self) -> TokenValue<'static> {
+        match self {
+            Self::Int(i) => TokenValue::Int(*i),
+            Self::Float(f) => TokenValue::Float(*f),
+            Self::String(s) => TokenValue::String(s.clone_static()),
+            Self::Ident(id) => TokenValue::Ident(id.clone_static()),
+            Self::Keyword(kw) => TokenValue::Keyword(kw.clone_static()),
+            Self::Symbol(s) => TokenValue::Symbol(s.clone_static()),
+            Self::BlockParam(p) => TokenValue::BlockParam(p.clone_static()),
+            Self::BinOp(op) => TokenValue::BinOp(op.clone_static()),
+            Self::Special(s) => TokenValue::Special(*s),
+            Self::Eof => TokenValue::Eof,
+        }
     }
 }
 
