@@ -1,0 +1,13 @@
+"
+# this is a comment
+"
+
+"comment 0" Hello "comment 1" = "comment 2" (
+  "comment 3" run "comment 4" = "comment 5" (
+    "comment 6" 'Hello comments!' "comment 7" println "comment 8" . "comment 9"
+  ) "comment 10"
+) "comment 11"
+
+"
+this is also a comment
+"

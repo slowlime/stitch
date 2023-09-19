@@ -16,7 +16,7 @@ impl Offset for usize {
 
 impl Offset for SourceOffset {
     fn offset(self) -> usize {
-        self.offset()
+        SourceOffset::offset(&self)
     }
 }
 

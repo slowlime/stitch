@@ -176,11 +176,11 @@ impl<'buf> Lexer<'buf> {
     }
 
     fn skip_comment(&mut self) -> Result<(), PosLexerError> {
-        self.cursor.consume_expecting("'").unwrap();
-        self.cursor.consume_while(|c| c != '\'');
+        self.cursor.consume_expecting("\"").unwrap();
+        self.cursor.consume_while(|c| c != '"');
 
         self.cursor
-            .consume_expecting("'")
+            .consume_expecting("\"")
             .map(|_| ())
             .ok_or_else(|| self.make_error_at_pos(LexerErrorKind::UnterminatedComment))
     }

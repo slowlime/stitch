@@ -59,6 +59,16 @@ impl<'buf> Cursor<'buf> {
     pub fn consume_while(&mut self, mut predicate: impl FnMut(char) -> bool) -> &'buf str {
         self.consume_n(self.iter.clone().take_while(|&c| predicate(c)).count())
     }
+
+    pub fn consume_newline(&mut self) -> Option<&'buf str> {
+        if self.starts_with("\r\n") {
+            Some(self.consume_n(2))
+        } else if self.starts_with("\n") {
+            Some(self.consume_n(1))
+        } else {
+            None
+        }
+    }
 }
 
 impl<'buf> Iterator for Cursor<'buf> {
