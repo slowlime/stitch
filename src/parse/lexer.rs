@@ -352,7 +352,8 @@ impl<'buf> Lexer<'buf> {
 
         Ok(if let Some(s) = scan_special(ident, MatchMode::Exact) {
             s
-        } else if self.cursor.consume_expecting(":").is_some() {
+        } else if !self.cursor.starts_with(":=") && self.cursor.consume_expecting(":").is_some() {
+            // the condition ensures x:=y is not tokenized as Keyword("x") Equals Ident("y")
             TokenValue::Keyword(ident.into())
         } else {
             TokenValue::Ident(ident.into())

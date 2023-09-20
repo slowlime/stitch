@@ -1,7 +1,2 @@
-Whitespace = (
-  run = (
-    #().
-    #(help).
-    [(-1-2+3.0/4*5)]value.
-  )
-)
+"Not the language."
+Whitespace=(||run=(||#().[:a|]value:#x.[(-1-2+3.0/4*5)]value.[:x| |y|y:=x].[:z| ||0].)---- ||x=())

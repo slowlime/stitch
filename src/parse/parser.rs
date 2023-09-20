@@ -7,7 +7,7 @@ use std::ops::{Deref, DerefMut};
 use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
 
-use super::token::{self, Special, Token, TokenType, TokenValue};
+use super::token::{self, Special, Token, TokenType, TokenValue, BinOp};
 use super::{BigNumberBehavior, Lexer, LexerError, ParserOptions};
 
 use crate::ast;
@@ -106,6 +106,16 @@ impl Matcher for Special {
 
     fn expected(&self) -> Vec<Cow<'static, str>> {
         vec![format!("{:#}", TokenType::Special(*self)).into()]
+    }
+}
+
+impl Matcher for BinOp<'_> {
+    fn matches(&self, token: &Token<'_>) -> bool {
+        token.value.as_bin_op().is_some_and(|bin_op| &*bin_op == self)
+    }
+
+    fn expected(&self) -> Vec<Cow<'static, str>> {
+        vec![format!("{:#}", TokenType::BinOp(self.clone())).into()]
     }
 }
 
@@ -360,12 +370,7 @@ impl<'buf> Parser<'buf> {
 
         self.expect(Special::ParenLeft)?;
 
-        let object_fields = if self.peek(Special::Bar)? {
-            self.parse_var_list()?
-        } else {
-            vec![]
-        };
-
+        let object_fields = self.parse_opt_var_list()?.unwrap_or_default();
         let mut object_methods = vec![];
 
         loop {
@@ -378,12 +383,7 @@ impl<'buf> Parser<'buf> {
 
         let (class_fields, class_methods) =
             if let Some(separator) = self.try_consume(SeparatorMatcher)? {
-                let class_fields = if self.peek(Special::Bar)? {
-                    self.parse_var_list()?
-                } else {
-                    vec![]
-                };
-
+                let class_fields = self.parse_opt_var_list()?.unwrap_or_default();
                 let mut class_methods = vec![];
 
                 loop {
@@ -419,6 +419,20 @@ impl<'buf> Parser<'buf> {
             class_fields,
             class_methods,
         })
+    }
+
+    fn parse_opt_var_list(&mut self) -> Result<Option<Vec<ast::Name<'buf>>>, ParserError> {
+        Ok(lookahead!(self: (format!("{:#}", TokenType::Special(Special::Bar))) {
+            BinOp::new("||") => {
+                self.expect(BinOp::new("||")).unwrap();
+
+                Some(vec![])
+            },
+
+            Special::Bar => Some(self.parse_var_list()?),
+
+            _ => None,
+        }))
     }
 
     fn parse_var_list(&mut self) -> Result<Vec<ast::Name<'buf>>, ParserError> {
@@ -564,12 +578,7 @@ impl<'buf> Parser<'buf> {
             ));
         }
 
-        let locals = if self.peek(Special::Bar)? {
-            self.parse_var_list()?
-        } else {
-            vec![]
-        };
-
+        let locals = self.parse_opt_var_list()?.unwrap_or_default();
         let mut body = vec![];
 
         loop {
