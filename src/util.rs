@@ -11,6 +11,26 @@ macro_rules! try_match {
 
 pub(crate) use try_match;
 
+macro_rules! macro_cond {
+    {
+        if non_empty!( $( $cond:tt )+ ) {
+            $( $true:tt )*
+        } else {
+            $( $false:tt )*
+        }
+    } => { $( $true )* };
+
+    {
+        if non_empty!() {
+            $( $true:tt )*
+        } else {
+            $( $false:tt )*
+        }
+    } => { $( $false )* };
+}
+
+pub(crate) use macro_cond;
+
 macro_rules! format_list {
     ($item_fmt:literal, $items:expr, $conjunction:expr) => ({
         struct ListFormatter<'a, T> {

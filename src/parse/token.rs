@@ -103,22 +103,20 @@ pub enum TokenType<'a> {
 
 impl Display for TokenType<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Int => "integer",
-                Self::Float => "float",
-                Self::String => "string",
-                Self::Ident => "identifier",
-                Self::Keyword => "keyword",
-                Self::Symbol => "symbol",
-                Self::BlockParam => "block parameter",
-                Self::BinOp(op) => op.as_str(),
-                Self::Special(s) => s.as_str(),
-                Self::Eof => "end of file",
-            }
-        )
+        match self {
+            Self::Int => write!(f, "integer"),
+            Self::Float => write!(f, "float"),
+            Self::String => write!(f, "string"),
+            Self::Ident => write!(f, "identifier"),
+            Self::Keyword => write!(f, "keyword"),
+            Self::Symbol => write!(f, "symbol"),
+            Self::BlockParam => write!(f, "block parameter"),
+            Self::BinOp(op) if f.alternate() => write!(f, "`{}`", op.as_str()),
+            Self::BinOp(op) => write!(f, "{}", op.as_str()),
+            Self::Special(s) if f.alternate() => write!(f, "`{}`", s.as_str()),
+            Self::Special(s) => write!(f, "{}", s.as_str()),
+            Self::Eof => write!(f, "end of file"),
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 
@@ -7,17 +8,17 @@ use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
 
 use super::token::{self, Special, Token, TokenType, TokenValue};
-use super::{Lexer, LexerError, ParserOptions, BigNumberBehavior};
+use super::{BigNumberBehavior, Lexer, LexerError, ParserOptions};
 
 use crate::ast;
 use crate::location::{Location, Offset, Span, Spanned};
-use crate::util::{define_yes_no_options, format_list, CloneStatic};
+use crate::util::{define_yes_no_options, format_list, macro_cond, CloneStatic};
 
 const RECURSION_LIMIT: usize = 8192;
 
 #[derive(Error, Diagnostic, Debug, Clone, PartialEq)]
 pub enum ParserError {
-    #[error("encountered an unexpected token: `{}` (expected {})", .actual.ty(), format_list!("`{}`", &.expected, "or"))]
+    #[error("encountered an unexpected token: {:#} (expected {})", .actual.ty(), format_list!("{}", &.expected, "or"))]
     #[diagnostic(code(parser::unexpected_token))]
     UnexpectedToken {
         expected: Vec<Cow<'static, str>>,
@@ -57,23 +58,23 @@ define_yes_no_options! {
     enum StatementFinal;
 }
 
-trait Matcher<'a> {
+trait Matcher {
     fn matches(&self, token: &Token<'_>) -> bool;
 
-    fn expected_tokens(&self) -> Vec<Cow<'static, str>>;
+    fn expected(&self) -> Vec<Cow<'static, str>>;
 }
 
-impl<'a, const N: usize> Matcher<'a> for [TokenType<'a>; N] {
+impl<const N: usize> Matcher for [TokenType<'_>; N] {
     fn matches(&self, token: &Token<'_>) -> bool {
         self.contains(&token.ty())
     }
 
-    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
-        self.iter().map(|t| t.to_string().into()).collect()
+    fn expected(&self) -> Vec<Cow<'static, str>> {
+        self.iter().map(|t| format!("{:#}", t).into()).collect()
     }
 }
 
-impl<const N: usize> Matcher<'static> for [Special; N] {
+impl<const N: usize> Matcher for [Special; N] {
     fn matches(&self, token: &Token<'_>) -> bool {
         match token.ty() {
             TokenType::Special(sym) => self.contains(&sym),
@@ -81,35 +82,37 @@ impl<const N: usize> Matcher<'static> for [Special; N] {
         }
     }
 
-    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
-        self.iter().map(|s| s.as_str().into()).collect()
+    fn expected(&self) -> Vec<Cow<'static, str>> {
+        self.iter()
+            .map(|s| format!("{:#}", s.as_str()).into())
+            .collect()
     }
 }
 
-impl<'a> Matcher<'a> for TokenType<'a> {
+impl Matcher for TokenType<'_> {
     fn matches(&self, token: &Token<'_>) -> bool {
         self == &token.ty()
     }
 
-    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
-        vec![self.to_string().into()]
+    fn expected(&self) -> Vec<Cow<'static, str>> {
+        vec![format!("{:#}", self).into()]
     }
 }
 
-impl Matcher<'static> for Special {
+impl Matcher for Special {
     fn matches(&self, token: &Token<'_>) -> bool {
         TokenType::Special(*self) == token.ty()
     }
 
-    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
-        vec![self.as_str().into()]
+    fn expected(&self) -> Vec<Cow<'static, str>> {
+        vec![format!("{:#}", TokenType::Special(*self)).into()]
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SeparatorMatcher;
 
-impl Matcher<'static> for SeparatorMatcher {
+impl Matcher for SeparatorMatcher {
     fn matches(&self, token: &Token<'_>) -> bool {
         match token.value {
             TokenValue::BinOp(ref op) => op.is_separator(),
@@ -117,7 +120,7 @@ impl Matcher<'static> for SeparatorMatcher {
         }
     }
 
-    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+    fn expected(&self) -> Vec<Cow<'static, str>> {
         vec!["separator".into()]
     }
 }
@@ -125,12 +128,12 @@ impl Matcher<'static> for SeparatorMatcher {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BinOpMatcher;
 
-impl Matcher<'static> for BinOpMatcher {
+impl Matcher for BinOpMatcher {
     fn matches(&self, token: &Token<'_>) -> bool {
         token.value.as_bin_op().is_some()
     }
 
-    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+    fn expected(&self) -> Vec<Cow<'static, str>> {
         vec!["binary operator".into()]
     }
 }
@@ -138,7 +141,7 @@ impl Matcher<'static> for BinOpMatcher {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct VarNameMatcher;
 
-impl Matcher<'static> for VarNameMatcher {
+impl Matcher for VarNameMatcher {
     fn matches(&self, token: &Token<'_>) -> bool {
         match token.value {
             TokenValue::Special(Special::Primitive) => true,
@@ -147,25 +150,19 @@ impl Matcher<'static> for VarNameMatcher {
         }
     }
 
-    fn expected_tokens(&self) -> Vec<Cow<'static, str>> {
+    fn expected(&self) -> Vec<Cow<'static, str>> {
         vec!["identifier".into()]
     }
 }
 
 macro_rules! lookahead {
-    ($self:ident : { $( $matcher:expr => $arm:expr, )+ _ => return #error $(,)? }) => ({
-        lookahead!($self: {
+    ($self:ident : $( ( $expected:expr ) )? { $( $matcher:expr => $arm:expr, )+ _ => return #error $(,)? }) => ({
+        lookahead!($self: $( ( $expected ) )? {
             $( $matcher => $arm, )+
 
             _ => {
-                let mut expected = ::std::collections::HashSet::new();
-                $( expected.extend($matcher.expected_tokens()); )+
-
                 return match $self.lexer.peek().unwrap().clone() {
-                    Ok(actual) => Err(ParserError::UnexpectedToken {
-                        expected: expected.into_iter().collect(),
-                        actual: actual.clone_static(),
-                    }),
+                    Ok(actual) => Err($self.make_unexpected_token_err(actual.clone_static())),
 
                     Err(e) => Err(ParserError::from(e)),
                 };
@@ -173,10 +170,20 @@ macro_rules! lookahead {
         })
     });
 
-    ($self:ident : { $( $matcher:expr => $arm:expr, )+ _ => $default:expr $(,)? }) => ({
+    ($self:ident : $( ( $expected:expr ) )? { $( $matcher:expr => $arm:expr, )+ _ => $default:expr $(,)? }) => ({
         match $self.lexer.peek() {
             $( Some(Ok(token)) if $matcher.matches(token) => $arm, )+
-            _ => $default,
+            _ => {
+                macro_cond! {
+                    if non_empty!($( $expected )?) {
+                        $self.attempted_tokens.insert($( $expected.into() )?);
+                    } else {
+                        $( $self.attempted_tokens.extend($matcher.expected()); )+
+                    }
+                };
+
+                $default
+            }
         }
     });
 }
@@ -223,7 +230,7 @@ macro_rules! expect_impl {
             }
 
             Some(Ok($token_err)) => {
-                $self.attempted_tokens.extend_from_slice(&$matcher.expected_tokens());
+                $self.attempted_tokens.extend($matcher.expected());
 
                 $on_fail
             }
@@ -247,7 +254,7 @@ pub struct Parser<'buf> {
     lexer: std::iter::Peekable<Lexer<'buf>>,
     recursion_limit: usize,
     layer_start: SourceOffset,
-    attempted_tokens: Vec<Cow<'static, str>>,
+    attempted_tokens: HashSet<Cow<'static, str>>,
     options: ParserOptions,
 }
 
@@ -259,7 +266,7 @@ impl<'buf> Parser<'buf> {
             lexer: lexer.peekable(),
             recursion_limit: RECURSION_LIMIT,
             layer_start,
-            attempted_tokens: vec![],
+            attempted_tokens: Default::default(),
             options,
         }
     }
@@ -292,23 +299,31 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn expect(&mut self, matcher: impl Matcher<'static>) -> Result<Token<'buf>, ParserError> {
+    fn make_unexpected_token_err(&mut self, actual: Token<'static>) -> ParserError {
+        let mut expected: Vec<_> = mem::take(&mut self.attempted_tokens).into_iter().collect();
+        expected.sort();
+
+        ParserError::UnexpectedToken {
+            expected,
+            actual: actual.clone_static(),
+        }
+    }
+
+    fn expect(&mut self, matcher: impl Matcher) -> Result<Token<'buf>, ParserError> {
         expect_impl! {
             match self.try_consume!(matcher) {
                 Ok(token) => Ok(token),
 
-                Err(token) => Err(ParserError::UnexpectedToken {
-                    expected: mem::take(&mut self.attempted_tokens),
-                    actual: token.clone_static(),
-                }),
+                Err(token) => {
+                    let token = token.clone_static();
+
+                    Err(self.make_unexpected_token_err(token))
+                },
             }
         }
     }
 
-    fn try_consume(
-        &mut self,
-        matcher: impl Matcher<'static>,
-    ) -> Result<Option<Token<'buf>>, ParserError> {
+    fn try_consume(&mut self, matcher: impl Matcher) -> Result<Option<Token<'buf>>, ParserError> {
         expect_impl! {
             match self.try_consume!(matcher) {
                 Ok(token) => Ok(Some(token)),
@@ -317,7 +332,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn peek(&mut self, matcher: impl Matcher<'static>) -> Result<bool, ParserError> {
+    fn peek(&mut self, matcher: impl Matcher) -> Result<bool, ParserError> {
         expect_impl! {
             match self.peek!(matcher) {
                 Ok(_) => Ok(true),
@@ -373,19 +388,19 @@ impl<'buf> Parser<'buf> {
 
                 loop {
                     class_methods.push(lookahead!(self: {
-                        Special::ParenRight => break,
+                    Special::ParenRight => break,
 
-                        SeparatorMatcher => {
-                            let bad_separator = self.expect(SeparatorMatcher).unwrap().clone_static();
+                    SeparatorMatcher => {
+                        let bad_separator = self.expect(SeparatorMatcher).unwrap().clone_static();
 
-                            return Err(ParserError::MultipleSeparators {
-                                bad_separator,
-                                first_separator: separator.clone_static(),
-                            });
-                        },
+                        return Err(ParserError::MultipleSeparators {
+                            bad_separator,
+                            first_separator: separator.clone_static(),
+                        });
+                    },
 
-                        _ => self.parse_method()?,
-                    }));
+                    _ => self.parse_method()?,
+                }));
                 }
 
                 (class_fields, class_methods)
@@ -518,8 +533,8 @@ impl<'buf> Parser<'buf> {
     fn parse_block_body(
         &mut self,
         params_allowed: BlockParamsAllowed,
-        left_matcher: impl Matcher<'static>,
-        right_matcher: impl Matcher<'static> + Copy,
+        left_matcher: impl Matcher,
+        right_matcher: impl Matcher + Copy,
     ) -> Result<Spanned<ast::Block<'buf>>, ParserError> {
         let left = self.expect(left_matcher)?;
         let mut params = vec![];
@@ -585,9 +600,7 @@ impl<'buf> Parser<'buf> {
         })
     }
 
-    fn parse_return_stmt(
-        &mut self,
-    ) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError> {
+    fn parse_return_stmt(&mut self) -> Result<(ast::Stmt<'buf>, StatementFinal), ParserError> {
         let circumflex = self.expect(Special::Circumflex).unwrap();
         let ret_value = self.parse_expr()?;
 
@@ -789,7 +802,7 @@ impl<'buf> Parser<'buf> {
     }
 
     fn parse_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
-        lookahead!(self: {
+        lookahead!(self: ("literal") {
             Special::ArrayLeft => self.bounded()?.parse_array_lit_expr(),
             TokenType::Symbol => self.bounded()?.parse_symbol_lit_expr(),
             TokenType::String => self.bounded()?.parse_string_lit_expr(),
@@ -812,32 +825,56 @@ impl<'buf> Parser<'buf> {
             values.push(self.parse_lit_expr()?);
         };
 
-        Ok(ast::Expr::Array(ast::ArrayLit(Spanned::new_spanning(values, left.span.convex_hull(&right.span)))))
+        Ok(ast::Expr::Array(ast::ArrayLit(Spanned::new_spanning(
+            values,
+            left.span.convex_hull(&right.span),
+        ))))
     }
 
     fn parse_symbol_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
-        let Token { span, value: TokenValue::Symbol(sym) } = self.expect(TokenType::Symbol).unwrap() else {
+        let Token {
+            span,
+            value: TokenValue::Symbol(sym),
+        } = self.expect(TokenType::Symbol).unwrap()
+        else {
             unreachable!()
         };
 
         let sym = match sym {
             token::Symbol::String(s) => ast::SymbolLit::String(Spanned::new_spanning(s, span)),
-            token::Symbol::UnarySelector(s) => ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Unary(Spanned::new_spanning(s.into(), span)), span)),
-            token::Symbol::BinarySelector(op) => ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Binary(Spanned::new_spanning(op.into_str(), span)), span)),
+            token::Symbol::UnarySelector(s) => ast::SymbolLit::Selector(Spanned::new_spanning(
+                ast::Selector::Unary(Spanned::new_spanning(s.into(), span)),
+                span,
+            )),
+            token::Symbol::BinarySelector(op) => ast::SymbolLit::Selector(Spanned::new_spanning(
+                ast::Selector::Binary(Spanned::new_spanning(op.into_str(), span)),
+                span,
+            )),
             token::Symbol::KeywordSelector(kws) => {
-                let kws = kws.into_iter().map(|token::Keyword { span, kw }| Spanned::new_spanning(kw.into(), span)).collect();
+                let kws = kws
+                    .into_iter()
+                    .map(|token::Keyword { span, kw }| Spanned::new_spanning(kw.into(), span))
+                    .collect();
 
                 ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Keyword(kws), span))
-            },
+            }
         };
 
         Ok(ast::Expr::Symbol(sym))
     }
 
     fn parse_string_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
-        let Token { span, value: TokenValue::String(s) } = self.expect(TokenType::String).unwrap() else { unreachable!() };
+        let Token {
+            span,
+            value: TokenValue::String(s),
+        } = self.expect(TokenType::String).unwrap()
+        else {
+            unreachable!()
+        };
 
-        Ok(ast::Expr::String(ast::StringLit(Spanned::new_spanning(s, span))))
+        Ok(ast::Expr::String(ast::StringLit(Spanned::new_spanning(
+            s, span,
+        ))))
     }
 
     fn parse_num_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
@@ -865,9 +902,13 @@ impl<'buf> Parser<'buf> {
                 };
 
                 ast::Expr::Int(ast::IntLit(Spanned::new_spanning(n, span)))
-            },
+            }
 
-            TokenValue::Float(n) => ast::Expr::Float(ast::FloatLit(Spanned::new_spanning(n, span))),
+            TokenValue::Float(n) => {
+                let n = if minus.is_some() { -n } else { n };
+
+                ast::Expr::Float(ast::FloatLit(Spanned::new_spanning(n, span)))
+            }
 
             _ => unreachable!(),
         })
