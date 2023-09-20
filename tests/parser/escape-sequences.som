@@ -1,0 +1,5 @@
+EscapeSequences = (
+  run = (
+    '\t\b\n\r\f\0\\\'\|'.
+  )
+)

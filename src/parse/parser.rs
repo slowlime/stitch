@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 
@@ -6,7 +7,7 @@ use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
 
 use super::token::{self, Special, Token, TokenType, TokenValue};
-use super::{Lexer, LexerError};
+use super::{Lexer, LexerError, ParserOptions, BigNumberBehavior};
 
 use crate::ast;
 use crate::location::{Location, Offset, Span, Spanned};
@@ -41,6 +42,9 @@ pub enum ParserError {
     )]
     #[diagnostic(code(parser::recursion_limit))]
     RecursionLimit(#[label] Span),
+
+    #[error("the number literal is too large")]
+    NumberTooLarge(#[label] Span),
 
     #[error(transparent)]
     #[diagnostic(transparent)]
@@ -244,10 +248,11 @@ pub struct Parser<'buf> {
     recursion_limit: usize,
     layer_start: SourceOffset,
     attempted_tokens: Vec<Cow<'static, str>>,
+    options: ParserOptions,
 }
 
 impl<'buf> Parser<'buf> {
-    pub fn new(lexer: Lexer<'buf>) -> Self {
+    pub fn new(lexer: Lexer<'buf>, options: ParserOptions) -> Self {
         let layer_start = lexer.pos();
 
         Self {
@@ -255,6 +260,7 @@ impl<'buf> Parser<'buf> {
             recursion_limit: RECURSION_LIMIT,
             layer_start,
             attempted_tokens: vec![],
+            options,
         }
     }
 
@@ -787,6 +793,7 @@ impl<'buf> Parser<'buf> {
             Special::ArrayLeft => self.bounded()?.parse_array_lit_expr(),
             TokenType::Symbol => self.bounded()?.parse_symbol_lit_expr(),
             TokenType::String => self.bounded()?.parse_string_lit_expr(),
+            Special::Minus => self.bounded()?.parse_num_lit_expr(),
             TokenType::Int => self.bounded()?.parse_num_lit_expr(),
             TokenType::Float => self.bounded()?.parse_num_lit_expr(),
             _ => return #error,
@@ -834,11 +841,34 @@ impl<'buf> Parser<'buf> {
     }
 
     fn parse_num_lit_expr(&mut self) -> Result<ast::Expr<'buf>, ParserError> {
-        let Token { span, value } = self.expect([TokenType::Int, TokenType::Float]).unwrap();
+        let minus = self.try_consume(Special::Minus)?;
+        let Token { span, value } = self.expect([TokenType::Int, TokenType::Float])?;
+
+        let span = match minus {
+            Some(ref minus) => minus.span.convex_hull(&span),
+            None => span,
+        };
 
         Ok(match value {
-            TokenValue::Int(n) => ast::Expr::Int(ast::IntLit(Spanned::new_spanning(n, span))),
+            TokenValue::Int(n) => {
+                let n = match (n.cmp(&(1 << 63)), minus.is_some()) {
+                    (Ordering::Less, false) => n as i64,
+                    (Ordering::Less, true) => -(n as i64),
+                    (Ordering::Equal, true) => i64::MIN,
+
+                    (_, _) if self.options.big_numbers == BigNumberBehavior::Error => {
+                        return Err(ParserError::NumberTooLarge(span))
+                    }
+
+                    (Ordering::Equal | Ordering::Greater, false) => i64::MAX,
+                    (Ordering::Greater, true) => i64::MIN,
+                };
+
+                ast::Expr::Int(ast::IntLit(Spanned::new_spanning(n, span)))
+            },
+
             TokenValue::Float(n) => ast::Expr::Float(ast::FloatLit(Spanned::new_spanning(n, span))),
+
             _ => unreachable!(),
         })
     }

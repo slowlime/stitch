@@ -1,0 +1,8 @@
+"test:
+failMessage:
+  regex: string .+ not terminated
+"
+
+UnterminatedString = (
+  init = ('i am not terminated!)
+)

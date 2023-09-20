@@ -175,7 +175,8 @@ impl CloneStatic<Keyword<'static>> for Keyword<'_> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenValue<'buf> {
-    Int(i64),
+    // the lexer treats integer literals as unsigned, but it'll get reduced to i64 during parsing
+    Int(u64),
     Float(f64),
     String(Cow<'buf, str>),
     Ident(Cow<'buf, str>),

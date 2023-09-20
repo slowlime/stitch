@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fmt::{self, Display};
 use std::iter::FusedIterator;
-use std::num::{IntErrorKind, ParseIntError};
+use std::num::IntErrorKind;
 
 use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
@@ -10,7 +10,7 @@ use crate::location::Span;
 use crate::parse::cursor::Cursor;
 use crate::parse::token::{is_bin_op_char, BinOp};
 
-use super::token::{Special, Symbol, Token, TokenValue, Keyword};
+use super::token::{Keyword, Special, Symbol, Token, TokenValue};
 
 type ScanResult<'buf> = Result<TokenValue<'buf>, PosLexerError>;
 
@@ -31,12 +31,14 @@ fn is_ident_continuation(c: char) -> bool {
 fn make_ident_matcher() -> impl FnMut(char) -> bool {
     let mut first = true;
 
-    move |c| if first {
-        first = false;
+    move |c| {
+        if first {
+            first = false;
 
-        is_ident_start(c)
-    } else {
-        is_ident_continuation(c)
+            is_ident_start(c)
+        } else {
+            is_ident_continuation(c)
+        }
     }
 }
 
@@ -73,10 +75,6 @@ fn format_char(c: char) -> impl Display {
 
 #[derive(Error, Diagnostic, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LexerErrorKind {
-    #[error("the number literal is too large")]
-    #[diagnostic(code(lexer::number_too_large))]
-    NumberTooLarge,
-
     #[error("the comment is not terminated")]
     #[diagnostic(code(lexer::unterminated_comment))]
     UnterminatedComment,
@@ -102,22 +100,9 @@ pub enum LexerErrorKind {
     #[diagnostic(code(lexer::malformed_kw_selector))]
     MalformedKwSelector,
 
-    #[error("invalid block param specification: expected `:varname`")]
-    #[diagnostic(code(lexer::invalid_block_param))]
-    InvalidBlockParam,
-
     #[error("encountered an unrecognized character {}", format_char(*.0))]
     #[diagnostic(code(lexer::unrecognized_character))]
     UnrecognizedCharacter(char),
-}
-
-impl From<ParseIntError> for LexerErrorKind {
-    fn from(err: ParseIntError) -> Self {
-        match err.kind() {
-            IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => Self::NumberTooLarge,
-            _ => unimplemented!(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -157,7 +142,10 @@ pub struct Lexer<'buf> {
 
 impl<'buf> Lexer<'buf> {
     pub fn new(cursor: Cursor<'buf>) -> Self {
-        Self { cursor, eof: false }
+        Self {
+            cursor,
+            eof: false,
+        }
     }
 
     pub fn pos(&self) -> SourceOffset {
@@ -294,14 +282,20 @@ impl<'buf> Lexer<'buf> {
         let start = self.pos();
 
         match self.scan_ident()? {
-            TokenValue::Special(s @ Special::Primitive) => Ok(TokenValue::Symbol(Symbol::UnarySelector(s.as_str().into()))),
+            TokenValue::Special(s @ Special::Primitive) => {
+                Ok(TokenValue::Symbol(Symbol::UnarySelector(s.as_str().into())))
+            }
             TokenValue::Ident(id) => Ok(TokenValue::Symbol(Symbol::UnarySelector(id))),
             TokenValue::Keyword(kw) => self.scan_kw_selector(start, kw),
             _ => unreachable!(),
         }
     }
 
-    fn scan_kw_selector(&mut self, first_kw_start: SourceOffset, first_kw: Cow<'buf, str>) -> ScanResult<'buf> {
+    fn scan_kw_selector(
+        &mut self,
+        first_kw_start: SourceOffset,
+        first_kw: Cow<'buf, str>,
+    ) -> ScanResult<'buf> {
         let mut kws = vec![Keyword {
             span: (first_kw_start..self.pos()).into(),
             kw: first_kw,
@@ -318,11 +312,15 @@ impl<'buf> Lexer<'buf> {
                             kw,
                         }),
 
-                        _ => return Err(self.make_error_at_pos(LexerErrorKind::MalformedKwSelector)),
+                        _ => {
+                            return Err(self.make_error_at_pos(LexerErrorKind::MalformedKwSelector))
+                        }
                     }
-                },
+                }
 
-                Some(c) if is_bin_op_char(c) => return Err(self.make_error_at_pos(LexerErrorKind::MalformedKwSelector)),
+                Some(c) if is_bin_op_char(c) => {
+                    return Err(self.make_error_at_pos(LexerErrorKind::MalformedKwSelector))
+                }
 
                 _ => break,
             }
@@ -342,11 +340,10 @@ impl<'buf> Lexer<'buf> {
         self.cursor.consume_expecting(":").unwrap();
         let id = self.cursor.consume_while(make_ident_matcher());
 
-        if id.is_empty() {
-            Err(self.make_error_at_pos(LexerErrorKind::InvalidBlockParam))
-        } else {
-            Ok(TokenValue::BlockParam(id.into()))
-        }
+        // guaranteed by the main scan loop
+        debug_assert!(!id.is_empty());
+
+        Ok(TokenValue::BlockParam(id.into()))
     }
 
     fn scan_ident(&mut self) -> ScanResult<'buf> {
@@ -363,8 +360,8 @@ impl<'buf> Lexer<'buf> {
     }
 
     fn scan_number(&mut self) -> ScanResult<'buf> {
-        let negative = self.cursor.consume_expecting("-").is_some();
         let buf = self.cursor.remaining();
+        let start_pos = self.cursor.pos().offset();
         let integer_part = self.cursor.consume_while(|c| c.is_ascii_digit());
         debug_assert!(!integer_part.is_empty());
 
@@ -376,22 +373,22 @@ impl<'buf> Lexer<'buf> {
             let fractional_part = self.cursor.consume_while(|c| c.is_ascii_digit());
             debug_assert!(!fractional_part.is_empty());
 
-            let literal = &buf[0..integer_part.len() + 1 + fractional_part.len()];
-            let mut value = literal.parse::<f64>().unwrap();
-
-            if negative {
-                value = -value;
-            }
+            let end_pos = self.cursor.pos().offset();
+            let literal = &buf[0..(end_pos - start_pos)];
+            let value = literal.parse::<f64>().unwrap();
 
             Ok(TokenValue::Float(value))
         } else {
-            let mut value = integer_part
-                .parse::<i64>()
-                .map_err(|e| self.make_error_at_pos(e.into()))?;
+            let end_pos = self.cursor.pos().offset();
 
-            if negative {
-                value = -value;
-            }
+            let value = match buf[0..(end_pos - start_pos)].parse::<u64>() {
+                Ok(value) => value,
+
+                Err(e) => match e.kind() {
+                    IntErrorKind::PosOverflow => u64::MAX,
+                    _ => unreachable!(),
+                },
+            };
 
             Ok(TokenValue::Int(value))
         }
@@ -438,7 +435,9 @@ impl<'buf> Iterator for Lexer<'buf> {
 
                 Some('#') => self.scan_symbol_or_array(),
 
-                Some(':') if self.cursor.peek_nth(1).is_some_and(is_ident_start) => self.scan_block_param(),
+                Some(':') if self.cursor.peek_nth(1).is_some_and(is_ident_start) => {
+                    self.scan_block_param()
+                }
 
                 Some(c)
                     if is_bin_op_char(c) && self.cursor.peek_nth(1).is_some_and(is_bin_op_char) =>
@@ -447,7 +446,6 @@ impl<'buf> Iterator for Lexer<'buf> {
                 }
 
                 Some(c) if c.is_ascii_digit() => self.scan_number(),
-                Some('-') if self.cursor.peek_nth(1).is_some_and(|c| c.is_ascii_digit()) => self.scan_number(),
 
                 Some(c) if is_ident_start(c) => self.scan_ident(),
 

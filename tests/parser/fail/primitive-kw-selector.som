@@ -1,0 +1,10 @@
+"test:
+fail: true
+"
+
+"`primitive` is not a legal keyword"
+PrimitiveKwSelector = (
+  test = (
+    #this #is #wrong: #primitive:
+  )
+)

@@ -1,0 +1,24 @@
+"tests that `primitive` is allowed as a variable/method name."
+PrimitiveIds = (
+  |primitive|
+
+  realPrimitive = primitive
+
+  primitive = (
+    |primitive|
+    primitive := primitive.
+    ^primitive primitive.
+  )
+
+  ----
+
+  |primitive|
+
+  classPrimitive = primitive
+
+  primitive = (
+    |primitive|
+    primitive := primitive.
+    ^primitive test: primitive primitive.
+  )
+)

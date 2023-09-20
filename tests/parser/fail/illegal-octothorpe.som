@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  contains: '`#`'
+"
+
+IllegalOctothorpe = (
+  run = (
+    |v|
+    v := #{}
+  )
+)

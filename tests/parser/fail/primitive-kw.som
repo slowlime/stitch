@@ -1,0 +1,10 @@
+"test:
+fail: true
+"
+
+"`primitive` is illegal in keyword methods"
+PrimitiveKw = (
+  test: that primitive: is_illegal = (
+    ^42
+  )
+)

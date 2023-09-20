@@ -1,0 +1,10 @@
+"test:
+failMessage:
+  contains: keyword selector
+"
+
+MalformedKwUnary = (
+  run = (
+    #foo:bar.
+  )
+)

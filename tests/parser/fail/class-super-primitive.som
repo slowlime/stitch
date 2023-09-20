@@ -1,0 +1,6 @@
+"test:
+fail: true
+"
+
+" `primitive` is not a valid class name "
+SuperPrimitive = primitive ()

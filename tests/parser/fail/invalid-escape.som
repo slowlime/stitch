@@ -1,0 +1,10 @@
+"test:
+failMessage:
+  regex: escape sequence .+ invalid
+"
+
+InvalidEscape = (
+  run = (
+    'this is an invalid escape sequence: \u'.
+  )
+)

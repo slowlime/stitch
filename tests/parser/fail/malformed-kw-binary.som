@@ -1,0 +1,10 @@
+"test:
+failMessage:
+  contains: keyword selector
+"
+
+MalformedKwBinary = (
+  run = (
+    #c:++.
+  )
+)

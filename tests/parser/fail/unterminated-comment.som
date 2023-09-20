@@ -1,0 +1,10 @@
+"test:
+failMessage:
+  regex: comment .+ not terminated
+"
+
+UnterminatedComment = (
+  test = ()
+)
+
+"hello world...

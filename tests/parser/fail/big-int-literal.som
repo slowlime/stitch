@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  - contains: number literal
+  - contains: too large
+"
+
+BigIntLiteral = (
+  run = (
+    ^9223372036854775808.
+  )
+)
