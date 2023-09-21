@@ -350,14 +350,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn parse(mut self) -> Result<ast::Class<'a>, ParserError> {
+    pub fn parse(mut self) -> Result<ast::Class, ParserError> {
         let class = self.parse_class()?;
         self.expect(TokenType::Eof)?;
 
         Ok(class)
     }
 
-    fn parse_class(&mut self) -> Result<ast::Class<'a>, ParserError> {
+    fn parse_class(&mut self) -> Result<ast::Class, ParserError> {
         let name = self.parse_ident(PrimitiveAllowed::No)?;
         self.expect(Special::Equals)?;
 
@@ -420,7 +420,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_opt_var_list(&mut self) -> Result<Option<Vec<ast::Name<'a>>>, ParserError> {
+    fn parse_opt_var_list(&mut self) -> Result<Option<Vec<ast::Name>>, ParserError> {
         Ok(
             lookahead!(self: (format!("{:#}", TokenType::Special(Special::Bar))) {
                 BinOp::new("||") => {
@@ -436,7 +436,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn parse_var_list(&mut self) -> Result<Vec<ast::Name<'a>>, ParserError> {
+    fn parse_var_list(&mut self) -> Result<Vec<ast::Name>, ParserError> {
         self.expect(Special::Bar)?;
 
         let mut vars = vec![];
@@ -448,7 +448,7 @@ impl<'a> Parser<'a> {
         Ok(vars)
     }
 
-    fn parse_method(&mut self) -> Result<ast::Method<'a>, ParserError> {
+    fn parse_method(&mut self) -> Result<ast::Method, ParserError> {
         let (selector, params) = self.parse_pattern()?;
         self.expect(Special::Equals)?;
 
@@ -481,7 +481,7 @@ impl<'a> Parser<'a> {
 
     fn parse_pattern(
         &mut self,
-    ) -> Result<(Spanned<ast::Selector<'a>>, Vec<ast::Name<'a>>), ParserError> {
+    ) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
         lookahead!(self: {
             BinOpMatcher => self.parse_bin_pattern(),
             TokenType::Keyword => self.parse_kw_pattern(),
@@ -491,20 +491,20 @@ impl<'a> Parser<'a> {
 
     fn parse_bin_pattern(
         &mut self,
-    ) -> Result<(Spanned<ast::Selector<'a>>, Vec<ast::Name<'a>>), ParserError> {
+    ) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
         let Token { span, value } = self.expect(BinOpMatcher).unwrap();
         let name = Spanned::new_spanning(value.as_bin_op().unwrap().into_owned().into_str(), span);
         let param = self.parse_ident(PrimitiveAllowed::Yes)?;
 
         Ok((
-            Spanned::new_spanning(ast::Selector::Binary(name), span),
+            Spanned::new_spanning(ast::Selector::Binary(name.into_owned()), span),
             vec![param],
         ))
     }
 
     fn parse_kw_pattern(
         &mut self,
-    ) -> Result<(Spanned<ast::Selector<'a>>, Vec<ast::Name<'a>>), ParserError> {
+    ) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
         let mut kws = vec![];
         let mut params = vec![];
 
@@ -517,7 +517,7 @@ impl<'a> Parser<'a> {
                 unreachable!()
             };
 
-            kws.push(Spanned::new_spanning(kw, span));
+            kws.push(Spanned::new_spanning(kw.into_owned(), span));
             params.push(self.parse_ident(PrimitiveAllowed::Yes)?);
         }
 
@@ -535,7 +535,7 @@ impl<'a> Parser<'a> {
 
     fn parse_un_pattern(
         &mut self,
-    ) -> Result<(Spanned<ast::Selector<'a>>, Vec<ast::Name<'a>>), ParserError> {
+    ) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
         let selector = self.parse_ident(PrimitiveAllowed::Yes)?;
         let span = selector.span().unwrap();
 
@@ -550,7 +550,7 @@ impl<'a> Parser<'a> {
         params_allowed: BlockParamsAllowed,
         left_matcher: impl Matcher,
         right_matcher: impl Matcher + Copy,
-    ) -> Result<Spanned<ast::Block<'a>>, ParserError> {
+    ) -> Result<Spanned<ast::Block>, ParserError> {
         let left = self.expect(left_matcher)?;
         let mut params = vec![];
 
@@ -560,7 +560,7 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 };
 
-                params.push(Spanned::new_spanning(param, span));
+                params.push(Spanned::new_spanning(param.into_owned(), span));
             }
 
             if !params.is_empty() {
@@ -603,14 +603,14 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn parse_stmt(&mut self) -> Result<(ast::Stmt<'a>, StatementFinal), ParserError> {
+    fn parse_stmt(&mut self) -> Result<(ast::Stmt, StatementFinal), ParserError> {
         lookahead!(self: {
             Special::Circumflex => self.parse_return_stmt(),
             _ => self.parse_expr_stmt(),
         })
     }
 
-    fn parse_return_stmt(&mut self) -> Result<(ast::Stmt<'a>, StatementFinal), ParserError> {
+    fn parse_return_stmt(&mut self) -> Result<(ast::Stmt, StatementFinal), ParserError> {
         let circumflex = self.expect(Special::Circumflex).unwrap();
         let ret_value = self.parse_expr()?;
 
@@ -629,7 +629,7 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn parse_expr_stmt(&mut self) -> Result<(ast::Stmt<'a>, StatementFinal), ParserError> {
+    fn parse_expr_stmt(&mut self) -> Result<(ast::Stmt, StatementFinal), ParserError> {
         let expr = self.parse_expr()?;
         let expr_span = expr.location().span().unwrap();
 
@@ -642,11 +642,11 @@ impl<'a> Parser<'a> {
         Ok((ast::Stmt::Expr(Spanned::new_spanning(expr, span)), terminal))
     }
 
-    fn parse_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_expr(&mut self) -> Result<ast::Expr, ParserError> {
         self.bounded()?.parse_assign_expr()
     }
 
-    fn parse_assign_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_assign_expr(&mut self) -> Result<ast::Expr, ParserError> {
         if self.peek(VarNameMatcher)? {
             let var = self.parse_ident(PrimitiveAllowed::Yes)?;
 
@@ -672,8 +672,8 @@ impl<'a> Parser<'a> {
 
     fn parse_kw_dispatch_expr(
         &mut self,
-        parsed_recv: Option<ast::Name<'a>>,
-    ) -> Result<ast::Expr<'a>, ParserError> {
+        parsed_recv: Option<ast::Name>,
+    ) -> Result<ast::Expr, ParserError> {
         let recv = self.bounded()?.parse_bin_dispatch_expr(parsed_recv)?;
 
         let mut kws = vec![];
@@ -689,7 +689,7 @@ impl<'a> Parser<'a> {
             };
             let arg = self.bounded()?.parse_bin_dispatch_expr(None)?;
 
-            kws.push(Spanned::new_spanning(kw, span));
+            kws.push(Spanned::new_spanning(kw.into_owned(), span));
             args.push(arg);
         }
 
@@ -713,8 +713,8 @@ impl<'a> Parser<'a> {
 
     fn parse_bin_dispatch_expr(
         &mut self,
-        parsed_recv: Option<ast::Name<'a>>,
-    ) -> Result<ast::Expr<'a>, ParserError> {
+        parsed_recv: Option<ast::Name>,
+    ) -> Result<ast::Expr, ParserError> {
         let mut recv = self.bounded()?.parse_un_dispatch_expr(parsed_recv)?;
 
         while let Some(Token {
@@ -729,7 +729,7 @@ impl<'a> Parser<'a> {
                 .span()
                 .unwrap()
                 .convex_hull(&arg.location().span().unwrap());
-            let selector = ast::Selector::Binary(Spanned::new_spanning(op, op_span));
+            let selector = ast::Selector::Binary(Spanned::new_spanning(op.into_owned(), op_span));
 
             recv = ast::Expr::Dispatch(ast::Dispatch {
                 location: Location::UserCode(span),
@@ -744,8 +744,8 @@ impl<'a> Parser<'a> {
 
     fn parse_un_dispatch_expr(
         &mut self,
-        parsed_recv: Option<ast::Name<'a>>,
-    ) -> Result<ast::Expr<'a>, ParserError> {
+        parsed_recv: Option<ast::Name>,
+    ) -> Result<ast::Expr, ParserError> {
         let mut recv = self.bounded()?.parse_primary_expr(parsed_recv)?;
 
         while self.peek(VarNameMatcher)? {
@@ -767,8 +767,8 @@ impl<'a> Parser<'a> {
 
     fn parse_primary_expr(
         &mut self,
-        parsed_name: Option<ast::Name<'a>>,
-    ) -> Result<ast::Expr<'a>, ParserError> {
+        parsed_name: Option<ast::Name>,
+    ) -> Result<ast::Expr, ParserError> {
         if parsed_name.is_some() {
             self.bounded()?.parse_var_expr(parsed_name)
         } else {
@@ -783,8 +783,8 @@ impl<'a> Parser<'a> {
 
     fn parse_var_expr(
         &mut self,
-        parsed_name: Option<ast::Name<'a>>,
-    ) -> Result<ast::Expr<'a>, ParserError> {
+        parsed_name: Option<ast::Name>,
+    ) -> Result<ast::Expr, ParserError> {
         let name = match parsed_name {
             Some(name) => name,
             None => self.parse_ident(PrimitiveAllowed::Yes)?,
@@ -793,7 +793,7 @@ impl<'a> Parser<'a> {
         Ok(ast::Expr::Var(ast::Var(name)))
     }
 
-    fn parse_paren_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_paren_expr(&mut self) -> Result<ast::Expr, ParserError> {
         self.expect(Special::ParenLeft).unwrap();
         let expr = self.bounded()?.parse_expr()?;
         self.expect(Special::ParenRight)?;
@@ -801,7 +801,7 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    fn parse_block_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_block_expr(&mut self) -> Result<ast::Expr, ParserError> {
         let block = self.bounded()?.parse_block_body(
             BlockParamsAllowed::Yes,
             Special::BracketLeft,
@@ -811,7 +811,7 @@ impl<'a> Parser<'a> {
         Ok(ast::Expr::Block(block))
     }
 
-    fn parse_lit_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_lit_expr(&mut self) -> Result<ast::Expr, ParserError> {
         lookahead!(self: ("literal") {
             Special::ArrayLeft => self.bounded()?.parse_array_lit_expr(),
             TokenType::Symbol => self.bounded()?.parse_symbol_lit_expr(),
@@ -823,7 +823,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_array_lit_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_array_lit_expr(&mut self) -> Result<ast::Expr, ParserError> {
         let left = self.expect(Special::ArrayLeft).unwrap();
         let mut values = vec![];
 
@@ -841,7 +841,7 @@ impl<'a> Parser<'a> {
         ))))
     }
 
-    fn parse_symbol_lit_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_symbol_lit_expr(&mut self) -> Result<ast::Expr, ParserError> {
         let Token {
             span,
             value: TokenValue::Symbol(sym),
@@ -851,19 +851,19 @@ impl<'a> Parser<'a> {
         };
 
         let sym = match sym {
-            token::Symbol::String(s) => ast::SymbolLit::String(Spanned::new_spanning(s, span)),
+            token::Symbol::String(s) => ast::SymbolLit::String(Spanned::new_spanning(s.into_owned(), span)),
             token::Symbol::UnarySelector(s) => ast::SymbolLit::Selector(Spanned::new_spanning(
-                ast::Selector::Unary(Spanned::new_spanning(s, span)),
+                ast::Selector::Unary(Spanned::new_spanning(s.into_owned(), span)),
                 span,
             )),
             token::Symbol::BinarySelector(op) => ast::SymbolLit::Selector(Spanned::new_spanning(
-                ast::Selector::Binary(Spanned::new_spanning(op.into_str(), span)),
+                ast::Selector::Binary(Spanned::new_spanning(op.into_str().into_owned(), span)),
                 span,
             )),
             token::Symbol::KeywordSelector(kws) => {
                 let kws = kws
                     .into_iter()
-                    .map(|token::Keyword { span, kw }| Spanned::new_spanning(kw, span))
+                    .map(|token::Keyword { span, kw }| Spanned::new_spanning(kw.into_owned(), span))
                     .collect();
 
                 ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Keyword(kws), span))
@@ -873,7 +873,7 @@ impl<'a> Parser<'a> {
         Ok(ast::Expr::Symbol(sym))
     }
 
-    fn parse_string_lit_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_string_lit_expr(&mut self) -> Result<ast::Expr, ParserError> {
         let Token {
             span,
             value: TokenValue::String(s),
@@ -883,11 +883,11 @@ impl<'a> Parser<'a> {
         };
 
         Ok(ast::Expr::String(ast::StringLit(Spanned::new_spanning(
-            s, span,
+            s.into_owned(), span,
         ))))
     }
 
-    fn parse_num_lit_expr(&mut self) -> Result<ast::Expr<'a>, ParserError> {
+    fn parse_num_lit_expr(&mut self) -> Result<ast::Expr, ParserError> {
         let minus = self.try_consume(Special::Minus)?;
         let Token { span, value } = self.expect([TokenType::Int, TokenType::Float])?;
 
@@ -927,7 +927,7 @@ impl<'a> Parser<'a> {
     fn parse_ident(
         &mut self,
         primitive_allowed: PrimitiveAllowed,
-    ) -> Result<ast::Name<'a>, ParserError> {
+    ) -> Result<ast::Name, ParserError> {
         let Token { span, value } = match primitive_allowed {
             PrimitiveAllowed::No => self.expect(TokenType::Ident)?,
             PrimitiveAllowed::Yes => self.expect(VarNameMatcher)?,
@@ -939,6 +939,6 @@ impl<'a> Parser<'a> {
             _ => unreachable!(),
         };
 
-        Ok(Spanned::new_spanning(name, span))
+        Ok(Spanned::new_spanning(name.into_owned(), span))
     }
 }

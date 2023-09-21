@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::{Range, RangeBounds};
 
 use miette::{SourceOffset, SourceSpan};
@@ -152,5 +153,24 @@ impl<T> Spanned<T> {
 
     pub fn span(&self) -> Option<Span> {
         self.location.span()
+    }
+
+    pub fn map<F, U>(self, f: F) -> Spanned<U>
+    where
+        F: FnOnce(T) -> U,
+    {
+        Spanned {
+            location: self.location,
+            value: f(self.value),
+        }
+    }
+}
+
+impl<T: ?Sized> Spanned<Cow<'_, T>>
+where
+    T: ToOwned,
+{
+    pub fn into_owned(self) -> Spanned<T::Owned> {
+        self.map(Cow::into_owned)
     }
 }

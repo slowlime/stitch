@@ -23,7 +23,7 @@ pub struct ParserOptions {
     pub big_numbers: BigNumberBehavior,
 }
 
-pub fn parse(file: &SourceFile, options: ParserOptions) -> Result<ast::Class<'_>, ParserError> {
+pub fn parse(file: &SourceFile, options: ParserOptions) -> Result<ast::Class, ParserError> {
     let cursor = Cursor::new(file);
     let lexer = Lexer::new(cursor);
     let parser = Parser::new(lexer, options);
