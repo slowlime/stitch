@@ -12,7 +12,7 @@ use crate::parse::token::{is_bin_op_char, BinOp};
 
 use super::token::{Keyword, Special, Symbol, Token, TokenValue};
 
-type ScanResult<'buf> = Result<TokenValue<'buf>, PosLexerError>;
+type ScanResult<'a> = Result<TokenValue<'a>, PosLexerError>;
 
 fn is_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r' | '\n')
@@ -135,13 +135,13 @@ impl Display for LexerError {
 }
 
 #[derive(Debug, Clone)]
-pub struct Lexer<'buf> {
-    cursor: Cursor<'buf>,
+pub struct Lexer<'a> {
+    cursor: Cursor<'a>,
     eof: bool,
 }
 
-impl<'buf> Lexer<'buf> {
-    pub fn new(cursor: Cursor<'buf>) -> Self {
+impl<'a> Lexer<'a> {
+    pub fn new(cursor: Cursor<'a>) -> Self {
         Self {
             cursor,
             eof: false,
@@ -173,7 +173,7 @@ impl<'buf> Lexer<'buf> {
             .ok_or_else(|| self.make_error_at_pos(LexerErrorKind::UnterminatedComment))
     }
 
-    fn scan_string(&mut self) -> ScanResult<'buf> {
+    fn scan_string(&mut self) -> ScanResult<'a> {
         self.cursor.consume_expecting("'").unwrap();
 
         let buf = self.cursor.remaining();
@@ -244,7 +244,7 @@ impl<'buf> Lexer<'buf> {
         }
     }
 
-    fn scan_symbol_or_array(&mut self) -> ScanResult<'buf> {
+    fn scan_symbol_or_array(&mut self) -> ScanResult<'a> {
         self.cursor.consume_expecting("#").unwrap();
 
         match self.cursor.peek() {
@@ -256,13 +256,13 @@ impl<'buf> Lexer<'buf> {
         }
     }
 
-    fn scan_array(&mut self) -> ScanResult<'buf> {
+    fn scan_array(&mut self) -> ScanResult<'a> {
         self.cursor.consume_expecting("(").unwrap();
 
         Ok(TokenValue::Special(Special::ArrayLeft))
     }
 
-    fn scan_string_symbol(&mut self) -> ScanResult<'buf> {
+    fn scan_string_symbol(&mut self) -> ScanResult<'a> {
         let TokenValue::String(value) = self.scan_string()? else {
             unreachable!()
         };
@@ -270,7 +270,7 @@ impl<'buf> Lexer<'buf> {
         Ok(TokenValue::Symbol(Symbol::String(value)))
     }
 
-    fn scan_bin_selector(&mut self) -> ScanResult<'buf> {
+    fn scan_bin_selector(&mut self) -> ScanResult<'a> {
         let TokenValue::BinOp(bin_op) = self.scan_bin_op()? else {
             unreachable!()
         };
@@ -278,7 +278,7 @@ impl<'buf> Lexer<'buf> {
         Ok(TokenValue::Symbol(Symbol::BinarySelector(bin_op)))
     }
 
-    fn scan_un_or_kw_selector(&mut self) -> ScanResult<'buf> {
+    fn scan_un_or_kw_selector(&mut self) -> ScanResult<'a> {
         let start = self.pos();
 
         match self.scan_ident()? {
@@ -294,8 +294,8 @@ impl<'buf> Lexer<'buf> {
     fn scan_kw_selector(
         &mut self,
         first_kw_start: SourceOffset,
-        first_kw: Cow<'buf, str>,
-    ) -> ScanResult<'buf> {
+        first_kw: Cow<'a, str>,
+    ) -> ScanResult<'a> {
         let mut kws = vec![Keyword {
             span: (first_kw_start..self.pos()).into(),
             kw: first_kw,
@@ -329,14 +329,14 @@ impl<'buf> Lexer<'buf> {
         Ok(TokenValue::Symbol(Symbol::KeywordSelector(kws)))
     }
 
-    fn scan_bin_op(&mut self) -> ScanResult<'buf> {
+    fn scan_bin_op(&mut self) -> ScanResult<'a> {
         let op = self.cursor.consume_while(is_bin_op_char);
         assert!(op.len() >= 1);
 
         Ok(TokenValue::BinOp(BinOp::new(op)))
     }
 
-    fn scan_block_param(&mut self) -> ScanResult<'buf> {
+    fn scan_block_param(&mut self) -> ScanResult<'a> {
         self.cursor.consume_expecting(":").unwrap();
         let id = self.cursor.consume_while(make_ident_matcher());
 
@@ -346,7 +346,7 @@ impl<'buf> Lexer<'buf> {
         Ok(TokenValue::BlockParam(id.into()))
     }
 
-    fn scan_ident(&mut self) -> ScanResult<'buf> {
+    fn scan_ident(&mut self) -> ScanResult<'a> {
         let ident = self.cursor.consume_while(make_ident_matcher());
         debug_assert!(!ident.is_empty());
 
@@ -360,7 +360,7 @@ impl<'buf> Lexer<'buf> {
         })
     }
 
-    fn scan_number(&mut self) -> ScanResult<'buf> {
+    fn scan_number(&mut self) -> ScanResult<'a> {
         let buf = self.cursor.remaining();
         let start_pos = self.cursor.pos().offset();
         let integer_part = self.cursor.consume_while(|c| c.is_ascii_digit());
@@ -396,8 +396,8 @@ impl<'buf> Lexer<'buf> {
     }
 }
 
-impl<'buf> Iterator for Lexer<'buf> {
-    type Item = Result<Token<'buf>, LexerError>;
+impl<'a> Iterator for Lexer<'a> {
+    type Item = Result<Token<'a>, LexerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.eof {
@@ -480,4 +480,4 @@ impl<'buf> Iterator for Lexer<'buf> {
     }
 }
 
-impl<'buf> FusedIterator for Lexer<'buf> {}
+impl<'a> FusedIterator for Lexer<'a> {}

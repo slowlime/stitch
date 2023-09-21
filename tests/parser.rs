@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use stitch::parse::{BigNumberBehavior, ParserOptions};
+use stitch::sourcemap::SourceMap;
 use test_generator::test_resources;
 
 use common::Matchers;
@@ -26,19 +27,18 @@ struct ParserTest {
 fn test_parser(source_path: PathBuf, cfg: Option<ParserTest>) {
     miette::set_panic_hook();
 
+    let mut source_map = SourceMap::new();
     let source = fs::read_to_string(&source_path).expect("Failed to read the test source");
+    let source = source_map.add_source(source_path.to_string_lossy().into_owned(), source);
 
-    let mut test = cfg.unwrap_or_else(|| common::parse_comment_header(&source));
+    let mut test = cfg.unwrap_or_else(|| common::parse_comment_header(source));
     test.fail = test.fail || !test.fail_message.is_empty();
 
     let result = match stitch::parse::parse(&source, test.parser_options) {
         Ok(class) => Ok(class),
 
         Err(e) => Err(
-            miette::Report::new(e).with_source_code(miette::NamedSource::new(
-                source_path.to_string_lossy(),
-                source.clone(),
-            )),
+            miette::Report::new(e).with_source_code(source_map),
         ),
     };
 

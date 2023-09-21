@@ -3,8 +3,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
 use stitch::parse::Cursor;
+use stitch::sourcemap::SourceFile;
 
-pub fn parse_comment_header<T: DeserializeOwned + Default>(source: &str) -> T {
+pub fn parse_comment_header<T: DeserializeOwned + Default>(source: &SourceFile) -> T {
     let mut cursor = Cursor::new(source);
 
     if cursor.consume_expecting("\"test:").is_none() {

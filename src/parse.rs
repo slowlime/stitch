@@ -8,6 +8,7 @@ pub use lexer::{Lexer, LexerError};
 pub use parser::{Parser, ParserError};
 
 use crate::ast;
+use crate::sourcemap::SourceFile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BigNumberBehavior {
@@ -26,11 +27,11 @@ pub struct ParserOptions {
     pub big_numbers: BigNumberBehavior,
 }
 
-pub fn parse<'buf>(
-    buf: &'buf str,
+pub fn parse<'a>(
+    file: &'a SourceFile,
     options: ParserOptions,
-) -> Result<ast::Class<'buf>, ParserError> {
-    let cursor = Cursor::new(buf);
+) -> Result<ast::Class<'a>, ParserError> {
+    let cursor = Cursor::new(file);
     let lexer = Lexer::new(cursor);
     let parser = Parser::new(lexer, options);
 

@@ -1,17 +1,19 @@
 use miette::SourceOffset;
 
+use crate::sourcemap::SourceFile;
+
 #[derive(Debug, Clone)]
-pub struct Cursor<'buf> {
-    iter: std::str::Chars<'buf>,
+pub struct Cursor<'a> {
+    iter: std::str::Chars<'a>,
     pos: SourceOffset,
     eof: bool,
 }
 
-impl<'buf> Cursor<'buf> {
-    pub fn new(buf: &'buf str) -> Self {
+impl<'a> Cursor<'a> {
+    pub fn new(file: &'a SourceFile) -> Self {
         Self {
-            iter: buf.chars(),
-            pos: 0.into(),
+            iter: file.contents().chars(),
+            pos: file.base_offset().into(),
             eof: false,
         }
     }
@@ -29,7 +31,7 @@ impl<'buf> Cursor<'buf> {
         self.iter.clone().nth(n)
     }
 
-    pub fn remaining(&self) -> &'buf str {
+    pub fn remaining(&self) -> &'a str {
         self.iter.as_str()
     }
 
@@ -38,12 +40,12 @@ impl<'buf> Cursor<'buf> {
     }
 
     #[must_use = "the method returns None if the expected string is not matched"]
-    pub fn consume_expecting(&mut self, expected: &str) -> Option<&'buf str> {
+    pub fn consume_expecting(&mut self, expected: &str) -> Option<&'a str> {
         self.starts_with(expected)
             .then(|| self.consume_n(expected.len()))
     }
 
-    pub fn consume_n(&mut self, n: usize) -> &'buf str {
+    pub fn consume_n(&mut self, n: usize) -> &'a str {
         let remaining = self.remaining();
         let start = self.pos.offset();
 
@@ -56,11 +58,11 @@ impl<'buf> Cursor<'buf> {
         &remaining[0..(end - start)]
     }
 
-    pub fn consume_while(&mut self, mut predicate: impl FnMut(char) -> bool) -> &'buf str {
+    pub fn consume_while(&mut self, mut predicate: impl FnMut(char) -> bool) -> &'a str {
         self.consume_n(self.iter.clone().take_while(|&c| predicate(c)).count())
     }
 
-    pub fn consume_newline(&mut self) -> Option<&'buf str> {
+    pub fn consume_newline(&mut self) -> Option<&'a str> {
         if self.starts_with("\r\n") {
             Some(self.consume_n(2))
         } else if self.starts_with("\n") {
@@ -71,7 +73,7 @@ impl<'buf> Cursor<'buf> {
     }
 }
 
-impl<'buf> Iterator for Cursor<'buf> {
+impl<'a> Iterator for Cursor<'a> {
     type Item = char;
 
     fn next(&mut self) -> Option<Self::Item> {

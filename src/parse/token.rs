@@ -17,13 +17,13 @@ pub fn is_bin_op_char(c: char) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Token<'buf> {
+pub struct Token<'a> {
     pub span: Span,
-    pub value: TokenValue<'buf>,
+    pub value: TokenValue<'a>,
 }
 
-impl<'buf> Token<'buf> {
-    pub fn ty(&self) -> TokenType<'buf> {
+impl<'a> Token<'a> {
+    pub fn ty(&self) -> TokenType<'a> {
         self.value.ty()
     }
 }
@@ -37,8 +37,8 @@ impl CloneStatic<Token<'static>> for Token<'_> {
     }
 }
 
-impl<'buf> From<Token<'buf>> for SourceSpan {
-    fn from(token: Token<'buf>) -> SourceSpan {
+impl<'a> From<Token<'a>> for SourceSpan {
+    fn from(token: Token<'a>) -> SourceSpan {
         token.span.into()
     }
 }
@@ -138,11 +138,11 @@ impl CloneStatic<TokenType<'static>> for TokenType<'_> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Symbol<'buf> {
-    String(Cow<'buf, str>),
-    UnarySelector(Cow<'buf, str>),
-    BinarySelector(BinOp<'buf>),
-    KeywordSelector(Vec<Keyword<'buf>>),
+pub enum Symbol<'a> {
+    String(Cow<'a, str>),
+    UnarySelector(Cow<'a, str>),
+    BinarySelector(BinOp<'a>),
+    KeywordSelector(Vec<Keyword<'a>>),
 }
 
 impl CloneStatic<Symbol<'static>> for Symbol<'_> {
@@ -157,9 +157,9 @@ impl CloneStatic<Symbol<'static>> for Symbol<'_> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Keyword<'buf> {
+pub struct Keyword<'a> {
     pub span: Span,
-    pub kw: Cow<'buf, str>,
+    pub kw: Cow<'a, str>,
 }
 
 impl CloneStatic<Keyword<'static>> for Keyword<'_> {
@@ -172,22 +172,22 @@ impl CloneStatic<Keyword<'static>> for Keyword<'_> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TokenValue<'buf> {
+pub enum TokenValue<'a> {
     // the lexer treats integer literals as unsigned, but it'll get reduced to i64 during parsing
     Int(u64),
     Float(f64),
-    String(Cow<'buf, str>),
-    Ident(Cow<'buf, str>),
-    Keyword(Cow<'buf, str>),
-    Symbol(Symbol<'buf>),
-    BlockParam(Cow<'buf, str>),
-    BinOp(BinOp<'buf>),
+    String(Cow<'a, str>),
+    Ident(Cow<'a, str>),
+    Keyword(Cow<'a, str>),
+    Symbol(Symbol<'a>),
+    BlockParam(Cow<'a, str>),
+    BinOp(BinOp<'a>),
     Special(Special),
     Eof,
 }
 
-impl<'buf> TokenValue<'buf> {
-    pub fn ty(&self) -> TokenType<'buf> {
+impl<'a> TokenValue<'a> {
+    pub fn ty(&self) -> TokenType<'a> {
         match *self {
             Self::Int(_) => TokenType::Int,
             Self::Float(_) => TokenType::Float,
@@ -202,7 +202,7 @@ impl<'buf> TokenValue<'buf> {
         }
     }
 
-    pub fn as_bin_op(&self) -> Option<Cow<'_, BinOp<'buf>>> {
+    pub fn as_bin_op(&self) -> Option<Cow<'_, BinOp<'a>>> {
         Some(match *self {
             Self::BinOp(ref op) => Cow::Borrowed(op),
             Self::Special(s) => Cow::Owned(BinOp::try_from(s).ok()?),
