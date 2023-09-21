@@ -7,7 +7,7 @@ use std::ops::{Deref, DerefMut};
 use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
 
-use super::token::{self, Special, Token, TokenType, TokenValue, BinOp};
+use super::token::{self, BinOp, Special, Token, TokenType, TokenValue};
 use super::{BigNumberBehavior, Lexer, LexerError, ParserOptions};
 
 use crate::ast;
@@ -18,7 +18,7 @@ const RECURSION_LIMIT: usize = 8192;
 
 #[derive(Error, Diagnostic, Debug, Clone, PartialEq)]
 pub enum ParserError {
-    #[error("encountered an unexpected token: {:#} (expected {})", .actual.ty(), format_list!("{}", &.expected, "or"))]
+    #[error("encountered an unexpected token: {:#} (expected {})", .actual.ty(), format_list!("{}", .expected, "or"))]
     #[diagnostic(code(parser::unexpected_token))]
     UnexpectedToken {
         expected: Vec<Cow<'static, str>>,
@@ -111,7 +111,10 @@ impl Matcher for Special {
 
 impl Matcher for BinOp<'_> {
     fn matches(&self, token: &Token<'_>) -> bool {
-        token.value.as_bin_op().is_some_and(|bin_op| &*bin_op == self)
+        token
+            .value
+            .as_bin_op()
+            .is_some_and(|bin_op| &*bin_op == self)
     }
 
     fn expected(&self) -> Vec<Cow<'static, str>> {
@@ -153,11 +156,7 @@ struct VarNameMatcher;
 
 impl Matcher for VarNameMatcher {
     fn matches(&self, token: &Token<'_>) -> bool {
-        match token.value {
-            TokenValue::Special(Special::Primitive) => true,
-            TokenValue::Ident(_) => true,
-            _ => false,
-        }
+        matches!(token.value, TokenValue::Special(Special::Primitive) | TokenValue::Ident(_))
     }
 
     fn expected(&self) -> Vec<Cow<'static, str>> {
@@ -422,17 +421,19 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_opt_var_list(&mut self) -> Result<Option<Vec<ast::Name<'a>>>, ParserError> {
-        Ok(lookahead!(self: (format!("{:#}", TokenType::Special(Special::Bar))) {
-            BinOp::new("||") => {
-                self.expect(BinOp::new("||")).unwrap();
+        Ok(
+            lookahead!(self: (format!("{:#}", TokenType::Special(Special::Bar))) {
+                BinOp::new("||") => {
+                    self.expect(BinOp::new("||")).unwrap();
 
-                Some(vec![])
-            },
+                    Some(vec![])
+                },
 
-            Special::Bar => Some(self.parse_var_list()?),
+                Special::Bar => Some(self.parse_var_list()?),
 
-            _ => None,
-        }))
+                _ => None,
+            }),
+        )
     }
 
     fn parse_var_list(&mut self) -> Result<Vec<ast::Name<'a>>, ParserError> {
@@ -516,7 +517,7 @@ impl<'a> Parser<'a> {
                 unreachable!()
             };
 
-            kws.push(Spanned::new_spanning(kw.into(), span));
+            kws.push(Spanned::new_spanning(kw, span));
             params.push(self.parse_ident(PrimitiveAllowed::Yes)?);
         }
 
@@ -559,7 +560,7 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 };
 
-                params.push(Spanned::new_spanning(param.into(), span));
+                params.push(Spanned::new_spanning(param, span));
             }
 
             if !params.is_empty() {
@@ -688,7 +689,7 @@ impl<'a> Parser<'a> {
             };
             let arg = self.bounded()?.parse_bin_dispatch_expr(None)?;
 
-            kws.push(Spanned::new_spanning(kw.into(), span));
+            kws.push(Spanned::new_spanning(kw, span));
             args.push(arg);
         }
 
@@ -852,7 +853,7 @@ impl<'a> Parser<'a> {
         let sym = match sym {
             token::Symbol::String(s) => ast::SymbolLit::String(Spanned::new_spanning(s, span)),
             token::Symbol::UnarySelector(s) => ast::SymbolLit::Selector(Spanned::new_spanning(
-                ast::Selector::Unary(Spanned::new_spanning(s.into(), span)),
+                ast::Selector::Unary(Spanned::new_spanning(s, span)),
                 span,
             )),
             token::Symbol::BinarySelector(op) => ast::SymbolLit::Selector(Spanned::new_spanning(
@@ -862,7 +863,7 @@ impl<'a> Parser<'a> {
             token::Symbol::KeywordSelector(kws) => {
                 let kws = kws
                     .into_iter()
-                    .map(|token::Keyword { span, kw }| Spanned::new_spanning(kw.into(), span))
+                    .map(|token::Keyword { span, kw }| Spanned::new_spanning(kw, span))
                     .collect();
 
                 ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Keyword(kws), span))
@@ -938,6 +939,6 @@ impl<'a> Parser<'a> {
             _ => unreachable!(),
         };
 
-        Ok(Spanned::new_spanning(name.into(), span))
+        Ok(Spanned::new_spanning(name, span))
     }
 }

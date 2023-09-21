@@ -62,6 +62,10 @@ impl Span {
         (self.start + self.len).into()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -101,9 +105,11 @@ impl From<Range<SourceOffset>> for Span {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Location {
     UserCode(Span),
+
+    #[default]
     Builtin,
 }
 
@@ -116,12 +122,6 @@ impl Location {
 impl From<Location> for Option<SourceSpan> {
     fn from(location: Location) -> Self {
         try_match!(location, Location::UserCode(span) => span.into())
-    }
-}
-
-impl Default for Location {
-    fn default() -> Self {
-        Location::Builtin
     }
 }
 

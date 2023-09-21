@@ -37,9 +37,7 @@ fn test_parser(source_path: PathBuf, cfg: Option<ParserTest>) {
     let result = match stitch::parse::parse(&source, test.parser_options) {
         Ok(class) => Ok(class),
 
-        Err(e) => Err(
-            miette::Report::new(e).with_source_code(source_map),
-        ),
+        Err(e) => Err(miette::Report::new(e).with_source_code(source_map)),
     };
 
     match result {

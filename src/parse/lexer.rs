@@ -142,10 +142,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(cursor: Cursor<'a>) -> Self {
-        Self {
-            cursor,
-            eof: false,
-        }
+        Self { cursor, eof: false }
     }
 
     pub fn pos(&self) -> SourceOffset {
@@ -160,7 +157,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        self.cursor.consume_while(|c| is_whitespace(c));
+        self.cursor.consume_while(is_whitespace);
     }
 
     fn skip_comment(&mut self) -> Result<(), PosLexerError> {
@@ -331,7 +328,7 @@ impl<'a> Lexer<'a> {
 
     fn scan_bin_op(&mut self) -> ScanResult<'a> {
         let op = self.cursor.consume_while(is_bin_op_char);
-        assert!(op.len() >= 1);
+        assert!(!op.is_empty());
 
         Ok(TokenValue::BinOp(BinOp::new(op)))
     }

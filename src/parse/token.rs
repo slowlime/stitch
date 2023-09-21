@@ -1,10 +1,10 @@
-use std::collections::HashSet;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::sync::OnceLock;
 
-use phf::phf_map;
 use miette::SourceSpan;
+use phf::phf_map;
 
 use crate::location::Span;
 use crate::util::CloneStatic;

@@ -32,21 +32,22 @@ macro_rules! macro_cond {
 pub(crate) use macro_cond;
 
 macro_rules! format_list {
-    ($item_fmt:literal, $items:expr, $conjunction:expr) => ({
+    ($item_fmt:literal, $items:expr, $conjunction:expr) => {{
         struct ListFormatter<'a, T> {
             items: &'a [T],
             conjunction: &'a str,
         }
 
         impl<T: ::std::fmt::Display> ::std::fmt::Display for ListFormatter<'_, T> {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_> ) -> ::std::fmt::Result {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 match self.items {
                     [] => Ok(()),
 
                     [item] => format_args!($item_fmt, item).fmt(f),
 
                     [first, second] => write!(
-                        f, "{} {} {}",
+                        f,
+                        "{} {} {}",
                         format_args!($item_fmt, first),
                         self.conjunction,
                         format_args!($item_fmt, second)
@@ -59,7 +60,12 @@ macro_rules! format_list {
                             write!(f, ", {}", format_args!($item_fmt, item))?;
                         }
 
-                        write!(f, ", {} {}", self.conjunction, format_args!($item_fmt, last))
+                        write!(
+                            f,
+                            ", {} {}",
+                            self.conjunction,
+                            format_args!($item_fmt, last)
+                        )
                     }
                 }
             }
@@ -69,7 +75,7 @@ macro_rules! format_list {
             items: $items,
             conjunction: $conjunction,
         }
-    });
+    }};
 }
 
 pub(crate) use format_list;
