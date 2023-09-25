@@ -81,8 +81,9 @@ macro_rules! format_list {
 pub(crate) use format_list;
 
 macro_rules! define_yes_no_options {
-    { $($vis:vis enum $name:ident ;)* } => {
+    { $($( #[ $attr:meta ] )* $vis:vis enum $name:ident ;)* } => {
         $(
+            $( #[ $attr ] )*
             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
             $vis enum $name {
                 Yes,
@@ -98,6 +99,12 @@ macro_rules! define_yes_no_options {
                 #[allow(dead_code)]
                 pub fn is_no(self) -> bool {
                     self == Self::No
+                }
+            }
+
+            impl From<bool> for $name {
+                fn from(value: bool) -> Self {
+                    if value { Self::Yes } else { Self::No }
                 }
             }
         )*
