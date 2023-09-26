@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of_val};
 use std::ops::{Deref, DerefMut};
-use std::ptr::NonNull;
+use std::ptr::{addr_of, NonNull};
 
 use crate::util::define_yes_no_options;
 
@@ -41,7 +41,7 @@ impl<T: Collect> HasVTable for T {
     const VTABLE: &'static GcVTable = &GcVTable::new_for::<T>();
 }
 
-type NextCell = Cell<Option<NonNull<Header>>>;
+type NextCell = Cell<Option<GcErasedBox>>;
 
 pub struct GarbageCollector {
     // gc values are arranged in an intrusive linked list; this is the head of that list
@@ -95,44 +95,37 @@ impl GarbageCollector {
         let unmarked = self.get_unmarked();
 
         // run finalizers
-        for &(_, header) in &unmarked {
+        for &(_, obj) in &unmarked {
             unsafe {
-                let header = &*header;
-                let vtable = header.vtable;
-                let value_ptr = header.value_ptr();
-                (vtable.finalize)(value_ptr);
+                obj.finalize();
             }
         }
 
         // do another marking because finalizers could have changed anything...
         self.mark();
-        let mut condemned =
-            self.get_condemned(unmarked.into_iter().map(|(_, header)| header).collect());
+        let mut condemned = self.get_condemned(unmarked.into_iter().map(|(_, obj)| obj).collect());
 
         // drop the condemned and fix the linked list
         // (must do it in reverse order, or the cell will point elsewhere)
-        while let Some((cell, header)) = condemned.pop() {
+        while let Some((cell, obj)) = condemned.pop() {
             unsafe {
                 let cell = &*cell;
                 debug_assert_eq!(
-                    cell.get().unwrap().as_ptr().cast_const(),
-                    header,
+                    cell.get().unwrap(),
+                    obj,
                     "linked list was broken while deallocating"
                 );
 
-                let header = &*header;
                 assert!(
-                    header.marked().is_no(),
+                    obj.header_ref().marked().is_no(),
                     "trying to deallocate a marked object"
                 );
 
                 // remove from the linked list
-                cell.set(header.next.get());
+                cell.set(obj.header_ref().next.get());
 
                 // drop the box and update the used size
-                let vtable = header.vtable;
-                let gc_box = header as *const _ as *mut ();
-                let size = (vtable.drop)(gc_box);
+                let size = obj.drop();
                 self.used.set(
                     self.used
                         .get()
@@ -148,65 +141,68 @@ impl GarbageCollector {
     fn mark(&self) {
         let mut next = self.head.get();
 
-        while let Some(header) = next {
+        while let Some(obj) = next {
             unsafe {
-                let header = &*header.as_ptr();
-                next = header.next.get();
+                next = obj.next();
 
-                if header.ref_count() == 0 {
+                if obj.ref_count() == 0 {
                     // not directly referenced by a root
                     continue;
                 }
 
-                let vtable = header.vtable;
-                let value_ptr = header.value_ptr();
-
-                header.mark();
-                (vtable.mark)(value_ptr);
+                obj.mark_header();
+                obj.mark_value();
             }
         }
     }
 
     fn foreach_unmarked<F>(&self, mut unmarked: F)
     where
-        F: FnMut(*const NextCell, *const Header),
+        F: FnMut(*const NextCell, GcErasedBox),
     {
         let mut next = &self.head as *const NextCell;
 
         unsafe {
-            while let Some(header) = (*next).get() {
+            while let Some(obj) = (*next).get() {
                 let current = next;
-                let header = &*header.as_ptr();
-                next = &header.next as _;
+                next = addr_of!((*obj.header_ptr()).next);
 
-                if header.set_marked(Marked::No).is_no() {
-                    unmarked(current, header);
+                if obj.header_ref().set_marked(Marked::No).is_no() {
+                    unmarked(current, obj);
                 }
             }
         }
     }
 
-    fn get_unmarked(&self) -> Vec<(*const NextCell, *const Header)> {
+    fn get_unmarked(&self) -> Vec<(*const NextCell, GcErasedBox)> {
         let mut unmarked = vec![];
 
-        self.foreach_unmarked(|cell, header| unmarked.push((cell, header)));
+        self.foreach_unmarked(|cell, obj| unmarked.push((cell, obj)));
 
         unmarked
     }
 
     fn get_condemned(
         &self,
-        finalized: HashSet<*const Header>,
-    ) -> Vec<(*const NextCell, *const Header)> {
+        finalized: HashSet<GcErasedBox>,
+    ) -> Vec<(*const NextCell, GcErasedBox)> {
         let mut condemned = vec![];
 
-        self.foreach_unmarked(|cell, header| {
-            if finalized.contains(&header) {
-                condemned.push((cell, header));
+        self.foreach_unmarked(|cell, obj| {
+            if finalized.contains(&obj) {
+                condemned.push((cell, obj));
             }
         });
 
         condemned
+    }
+}
+
+impl Drop for GarbageCollector {
+    fn drop(&mut self) {
+        // since Gc<T>s are bound to GarbageCollector by a lifetime parameter,
+        // they should all be dead or forgotten at this point
+        self.collect();
     }
 }
 
@@ -226,14 +222,6 @@ impl Header {
             vtable,
             ref_mark: Cell::new(1),
             next: Cell::new(None),
-        }
-    }
-
-    fn value_ptr(&self) -> *const () {
-        unsafe {
-            (self as *const _ as *const u8)
-                .add(self.vtable.offset)
-                .cast()
         }
     }
 
@@ -351,10 +339,67 @@ impl<T> GcBox<'_, T> {
     }
 }
 
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GcErasedBox(NonNull<()>);
+
+impl GcErasedBox {
+    fn new<'gc, T>(gc_box: NonNull<GcBox<'gc, T>>) -> Self {
+        GcErasedBox(gc_box.cast())
+    }
+
+    fn header_ptr(&self) -> *const Header {
+        self.0.as_ptr() as *const Header
+    }
+
+    unsafe fn header_ref(&self) -> &Header {
+        unsafe { &*self.header_ptr() }
+    }
+
+    unsafe fn next(&self) -> Option<GcErasedBox> {
+        unsafe { (*self.header_ptr()).next.get() }
+    }
+
+    unsafe fn vtable(&self) -> &'static GcVTable {
+        unsafe { (*self.header_ptr()).vtable }
+    }
+
+    unsafe fn ref_count(&self) -> usize {
+        unsafe { (*self.header_ptr()).ref_count() }
+    }
+
+    unsafe fn value_ptr(&self) -> *const () {
+        unsafe {
+            (self.0.as_ptr() as *const u8)
+                .add(self.vtable().offset)
+                .cast()
+        }
+    }
+
+    unsafe fn mark_header(&self) -> Marked {
+        unsafe { (*self.header_ptr()).mark() }
+    }
+
+    unsafe fn mark_value(&self) {
+        let vtable = self.vtable();
+        (vtable.mark)(self.value_ptr());
+    }
+
+    unsafe fn finalize(&self) {
+        let vtable = self.vtable();
+        (vtable.finalize)(self.value_ptr());
+    }
+
+    unsafe fn drop(self) -> usize {
+        let vtable = self.vtable();
+        (vtable.drop)(self.0.as_ptr())
+    }
+}
+
 pub struct Gc<'gc, T: ?Sized> {
     inner: NonNull<GcBox<'gc, T>>,
 
-    // basically tracks if we need to dec_ref_count on the contents on Drop
+    // basically tracks if we need to dec_ref_count on the header on Drop
     strong: Cell<Strong>,
 
     // to avoid dropck fiascoes
@@ -363,28 +408,28 @@ pub struct Gc<'gc, T: ?Sized> {
 
 impl<'gc, T: Collect> Gc<'gc, T> {
     pub fn new(gc: &'gc GarbageCollector, value: T) -> Self {
-        // first make sure we aren't putting this guy in a pile of garbage
-        gc.used.set(gc.used.get() + size_of_val(&value));
-        gc.try_collect();
-
         // allocate the actual box that's gonna store the value
-        let mut inner = NonNull::new(Box::into_raw(Box::new(GcBox {
+        let inner = NonNull::new(Box::into_raw(Box::new(GcBox {
             header: Header::new(T::VTABLE),
             _marker: PhantomData,
             value,
         })))
         .unwrap();
 
+        // make sure we aren't putting this guy in a pile of garbage
+        gc.used
+            .set(gc.used.get() + size_of_val(unsafe { inner.as_ref() }));
+        gc.try_collect();
+
         // stick it into the list
-        let mut header =
-            NonNull::new(unsafe { &mut inner.as_mut().header as *mut Header }).unwrap();
-        let next = gc.head.replace(Some(header));
+        let obj = GcErasedBox::new(inner);
+        let next = gc.head.replace(Some(obj));
 
         unsafe {
-            header.as_mut().next.set(next);
+            obj.header_ref().next.set(next);
 
             // this one's important: roots inside the value should no longer be treated as such
-            inner.as_mut().value.dec_ref_count();
+            inner.as_ref().value.dec_ref_count();
         }
 
         Gc {
@@ -451,7 +496,6 @@ unsafe impl<T: Collect> Collect for Gc<'_, T> {
 
         let inner = self.inner();
         inner.header.inc_ref_count();
-        inner.value.inc_ref_count();
 
         self.strong.set(Strong::Yes);
     }
@@ -461,13 +505,15 @@ unsafe impl<T: Collect> Collect for Gc<'_, T> {
 
         let inner = self.inner();
         inner.header.dec_ref_count();
-        inner.value.dec_ref_count();
 
         self.strong.set(Strong::No);
     }
 
     unsafe fn finalize(&self) {
-        self.inner().value.finalize();
+        // if T holds the only reference to a Gc, that Gc will be collected anyway (cause it won't get marked),
+        // so we don't need to run finalize on it here.
+        // otherwise that Gc, if any, would be still alive and thus must not be finalized here.
+        // so in either case the only reasonable course of action here is doing absolutely nothing.
     }
 }
 
@@ -586,7 +632,10 @@ unsafe impl<T: Collect> Collect for GcRefCell<T> {
     }
 
     unsafe fn inc_ref_count(&self) {
-        assert!(self.status.get().strong().is_no(), "trying to upgrade a root");
+        assert!(
+            self.status.get().strong().is_no(),
+            "trying to upgrade a root"
+        );
 
         self.status.set(self.status.get().with_strong(Strong::Yes));
 
@@ -598,7 +647,10 @@ unsafe impl<T: Collect> Collect for GcRefCell<T> {
     }
 
     unsafe fn dec_ref_count(&self) {
-        assert!(self.status.get().strong().is_yes(), "trying to downgrade a non-root");
+        assert!(
+            self.status.get().strong().is_yes(),
+            "trying to downgrade a non-root"
+        );
 
         self.status.set(self.status.get().with_strong(Strong::No));
 
