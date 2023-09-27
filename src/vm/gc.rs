@@ -27,14 +27,26 @@ pub trait HasVTable {
     const VTABLE: &'static GcVTable;
 }
 
-pub unsafe trait Collect {
-    fn mark(&self);
+pub trait Finalize {
+    unsafe fn finalize(&self) {}
+}
 
+pub unsafe trait Collect: Finalize {
+    /// Marks all contained objects.
+    unsafe fn mark(&self);
+
+    /// Calls `inc_ref_count` on all contained objects.
+    ///
+    /// The caller ensures this method is not called twice consecutively.
     unsafe fn inc_ref_count(&self);
 
+    /// Calls `dec_ref_count` on all contained objects.
+    ///
+    /// The caller ensures this method is not called twice consecutively.
     unsafe fn dec_ref_count(&self);
 
-    unsafe fn finalize(&self);
+    /// Runs `Finalize::finalize` on self and calls `run_finalizers` on all contained objects.
+    unsafe fn run_finalizers(&self);
 }
 
 impl<T: Collect> HasVTable for T {
@@ -97,7 +109,7 @@ impl GarbageCollector {
         // run finalizers
         for &(_, obj) in &unmarked {
             unsafe {
-                obj.finalize();
+                obj.run_finalizers();
             }
         }
 
@@ -276,7 +288,7 @@ impl Header {
 pub struct GcVTable {
     offset: usize,
     mark: unsafe fn(value: *const ()),
-    finalize: unsafe fn(value: *const ()),
+    run_finalizers: unsafe fn(value: *const ()),
     drop: unsafe fn(gc_box: *mut ()) -> usize,
 }
 
@@ -287,9 +299,9 @@ impl GcVTable {
             this.as_ref().unwrap().mark();
         }
 
-        unsafe fn finalize<T: Collect>(this: *const ()) {
+        unsafe fn run_finalizers<T: Collect>(this: *const ()) {
             let this = this as *const T;
-            this.as_ref().unwrap().finalize()
+            this.as_ref().unwrap().run_finalizers()
         }
 
         unsafe fn drop<T: Collect>(gc_box: *mut ()) -> usize {
@@ -307,7 +319,7 @@ impl GcVTable {
         GcVTable {
             offset,
             mark: mark::<T>,
-            finalize: finalize::<T>,
+            run_finalizers: run_finalizers::<T>,
             drop: drop::<T>,
         }
     }
@@ -385,9 +397,9 @@ impl GcErasedBox {
         (vtable.mark)(self.value_ptr());
     }
 
-    unsafe fn finalize(&self) {
+    unsafe fn run_finalizers(&self) {
         let vtable = self.vtable();
-        (vtable.finalize)(self.value_ptr());
+        (vtable.run_finalizers)(self.value_ptr());
     }
 
     unsafe fn drop(self) -> usize {
@@ -482,12 +494,12 @@ impl<T: ?Sized> Deref for Gc<'_, T> {
     }
 }
 
+impl<T> Finalize for Gc<'_, T> {}
+
 unsafe impl<T: Collect> Collect for Gc<'_, T> {
-    fn mark(&self) {
-        unsafe {
-            if self.inner().header.mark().is_no() {
-                self.inner().value.mark()
-            }
+    unsafe fn mark(&self) {
+        if self.inner().header.mark().is_no() {
+            self.inner().value.mark()
         }
     }
 
@@ -509,7 +521,7 @@ unsafe impl<T: Collect> Collect for Gc<'_, T> {
         self.strong.set(Strong::No);
     }
 
-    unsafe fn finalize(&self) {
+    unsafe fn run_finalizers(&self) {
         // if T holds the only reference to a Gc, that Gc will be collected anyway (cause it won't get marked),
         // so we don't need to run finalize on it here.
         // otherwise that Gc, if any, would be still alive and thus must not be finalized here.
@@ -621,13 +633,13 @@ impl<T: Collect + ?Sized> GcRefCell<T> {
     }
 }
 
+impl<T> Finalize for GcRefCell<T> {}
+
 unsafe impl<T: Collect> Collect for GcRefCell<T> {
-    fn mark(&self) {
+    unsafe fn mark(&self) {
         // if writing, the contents are treated as a root, so it'll be fine
         if !self.status.get().writing() {
-            unsafe {
-                (*self.inner.get()).mark();
-            }
+            (*self.inner.get()).mark();
         }
     }
 
@@ -661,10 +673,12 @@ unsafe impl<T: Collect> Collect for GcRefCell<T> {
         }
     }
 
-    unsafe fn finalize(&self) {
+    unsafe fn run_finalizers(&self) {
+        self.finalize();
+
         if !self.status.get().writing() {
             unsafe {
-                (*self.inner.get()).finalize();
+                (*self.inner.get()).run_finalizers();
             }
         }
     }
@@ -797,9 +811,9 @@ macro_rules! impl_collect {
     {
         fn visit(&$self:ident) $body:block
     } => {
-        fn mark(&$self) {
-            fn visit<T: Collect>(v: &T) {
-                <T as Collect>::mark(v)
+        unsafe fn mark(&$self) {
+            unsafe fn visit<T: Collect>(v: &T) {
+                <T as $crate::vm::gc::Collect>::mark(v)
             }
 
             $body
@@ -807,7 +821,7 @@ macro_rules! impl_collect {
 
         unsafe fn inc_ref_count(&$self) {
             unsafe fn visit<T: Collect>(v: &T) {
-                <T as Collect>::inc_ref_count(v)
+                <T as $crate::vm::gc::Collect>::inc_ref_count(v)
             }
 
             $body
@@ -815,16 +829,18 @@ macro_rules! impl_collect {
 
         unsafe fn dec_ref_count(&$self) {
             unsafe fn visit<T: Collect>(v: &T) {
-                <T as Collect>::dec_ref_count(v)
+                <T as $crate::vm::gc::Collect>::dec_ref_count(v)
             }
 
             $body
         }
 
-        unsafe fn finalize(&$self) {
+        unsafe fn run_finalizers(&$self) {
             unsafe fn visit<T: Collect>(v: &T) {
-                <T as Collect>::finalize(v)
+                <T as $crate::vm::gc::Collect>::run_finalizers(v)
             }
+
+            <Self as $crate::vm::gc::Finalize>::finalize($self);
 
             $body
         }
@@ -833,13 +849,18 @@ macro_rules! impl_collect {
 
 macro_rules! impl_empty_collect {
     (unsafe impl Collect for $( $ty:ty ),+;) => {
-        $( unsafe impl Collect for $ty { impl_collect!(); } )+
+        $(
+            impl Finalize for $ty {}
+            unsafe impl Collect for $ty { impl_collect!(); }
+        )+
     };
 }
 
 macro_rules! impl_tuple_collect {
     ($( ( $( $param:ident ),+ ) ),+ $(,)?) => {
         $(
+            impl<$( $param ),+> Finalize for ($( $param, )+) {}
+
             unsafe impl<$( $param: Collect ),+> Collect for ($( $param, )+) {
                 impl_collect! {
                     fn visit(&self) {
@@ -869,6 +890,8 @@ impl_tuple_collect! {
     (A, B, C, D, E, F),
 }
 
+impl<T> Finalize for Box<T> {}
+
 unsafe impl<T: Collect> Collect for Box<T> {
     impl_collect! {
         fn visit(&self) {
@@ -876,6 +899,8 @@ unsafe impl<T: Collect> Collect for Box<T> {
         }
     }
 }
+
+impl<T> Finalize for Option<T> {}
 
 unsafe impl<T: Collect> Collect for Option<T> {
     impl_collect! {
@@ -887,6 +912,8 @@ unsafe impl<T: Collect> Collect for Option<T> {
         }
     }
 }
+
+impl<T> Finalize for Vec<T> {}
 
 unsafe impl<T: Collect> Collect for Vec<T> {
     impl_collect! {
