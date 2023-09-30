@@ -5,14 +5,19 @@
 //! - `GcCell` allows mutation by enforcing the borrowing rules at runtime
 
 use std::alloc::Layout;
+use std::borrow::Borrow;
 use std::cell::{Cell, UnsafeCell};
 use std::collections::HashSet;
+use std::fmt::{self, Debug, Display};
+use std::hash::{self, Hash};
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of_val};
 use std::ops::{Deref, DerefMut};
 use std::ptr::{addr_of, NonNull};
 
 use crate::util::define_yes_no_options;
+
+use thiserror::Error;
 
 define_yes_no_options! {
     enum Marked;
@@ -494,6 +499,76 @@ impl<T: ?Sized> Deref for Gc<'_, T> {
     }
 }
 
+impl<T: ?Sized> AsRef<T> for Gc<'_, T> {
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+
+impl<T: ?Sized> Borrow<T> for Gc<'_, T> {
+    fn borrow(&self) -> &T {
+        self
+    }
+}
+
+impl<T: Debug + ?Sized> Debug for Gc<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Gc").field(&&**self).finish()
+    }
+}
+
+impl<T: Display + ?Sized> Display for Gc<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        <T as Display>::fmt(self, f)
+    }
+}
+
+impl<T: Hash + ?Sized> Hash for Gc<'_, T> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        <T as Hash>::hash(self, state)
+    }
+}
+
+impl<T: Ord> Ord for Gc<'_, T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        <T as Ord>::cmp(self, other)
+    }
+}
+
+impl<'a, 'b, T: PartialOrd + ?Sized> PartialOrd<Gc<'a, T>> for Gc<'b, T> {
+    fn partial_cmp(&self, other: &Gc<'a, T>) -> Option<std::cmp::Ordering> {
+        <T as PartialOrd>::partial_cmp(self, other)
+    }
+
+    fn lt(&self, other: &Gc<'a, T>) -> bool {
+        <T as PartialOrd>::lt(self, other)
+    }
+
+    fn le(&self, other: &Gc<'a, T>) -> bool {
+        <T as PartialOrd>::le(self, other)
+    }
+
+    fn gt(&self, other: &Gc<'a, T>) -> bool {
+        <T as PartialOrd>::gt(self, other)
+    }
+
+    fn ge(&self, other: &Gc<'a, T>) -> bool {
+        <T as PartialOrd>::ge(self, other)
+    }
+}
+
+impl<T: Eq + ?Sized> Eq for Gc<'_, T> {}
+
+impl<'a, 'b, T: PartialEq + ?Sized> PartialEq<Gc<'a, T>> for Gc<'b, T> {
+    fn eq(&self, other: &Gc<'a, T>) -> bool {
+        <T as PartialEq>::eq(self, other)
+    }
+
+    fn ne(&self, other: &Gc<'a, T>) -> bool {
+        <T as PartialEq>::ne(self, other)
+    }
+}
+
 impl<T> Finalize for Gc<'_, T> {}
 
 unsafe impl<T: Collect> Collect for Gc<'_, T> {
@@ -527,6 +602,22 @@ unsafe impl<T: Collect> Collect for Gc<'_, T> {
         // otherwise that Gc, if any, would be still alive and thus must not be finalized here.
         // so in either case the only reasonable course of action here is doing absolutely nothing.
     }
+}
+
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BorrowError {
+    #[error("already mutably borrowed")]
+    MutablyBorrowed,
+    #[error("reader borrow count overflow")]
+    TooManyBorrows,
+}
+
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BorrowMutError {
+    #[error("already mutably borrowed")]
+    MutablyBorrowed,
+    #[error("already immutably borrowed")]
+    ImmutablyBorrowed,
 }
 
 #[repr(transparent)]
@@ -622,14 +713,58 @@ impl<T> GcRefCell<T> {
 }
 
 impl<T: ?Sized> GcRefCell<T> {
-    pub fn borrow(&self) -> GcRef<'_, T> {
+    pub fn try_borrow(&self) -> Result<GcRef<'_, T>, BorrowError> {
         GcRef::new(self)
+    }
+
+    pub fn borrow(&self) -> GcRef<'_, T> {
+        self.try_borrow().unwrap()
     }
 }
 
 impl<T: Collect + ?Sized> GcRefCell<T> {
-    pub fn borrow_mut(&self) -> GcRefMut<'_, T> {
+    pub fn try_borrow_mut(&self) -> Result<GcRefMut<'_, T>, BorrowMutError> {
         GcRefMut::new(self)
+    }
+
+    pub fn borrow_mut(&self) -> GcRefMut<'_, T> {
+        self.try_borrow_mut().unwrap()
+    }
+}
+
+impl<T: Debug + ?Sized> Debug for GcRefCell<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("GcRefCell")
+            .field(match self.try_borrow() {
+                Ok(value) => &&*value,
+                Err(BorrowError::MutablyBorrowed) => &"<mutably borrowed>",
+                Err(BorrowError::TooManyBorrows) => &"<too many borrows>",
+            })
+            .finish()
+    }
+}
+
+impl<T: Ord + ?Sized> Ord for GcRefCell<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        <T as Ord>::cmp(&self.borrow(), &other.borrow())
+    }
+}
+
+impl<T: PartialOrd + ?Sized> PartialOrd for GcRefCell<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        <T as PartialOrd>::partial_cmp(&self.borrow(), &other.borrow())
+    }
+}
+
+impl<T: Eq + ?Sized> Eq for GcRefCell<T> {}
+
+impl<T: PartialEq + ?Sized> PartialEq for GcRefCell<T> {
+    fn eq(&self, other: &Self) -> bool {
+        <T as PartialEq>::eq(&self.borrow(), &other.borrow())
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        <T as PartialEq>::ne(&self.borrow(), &other.borrow())
     }
 }
 
@@ -690,23 +825,24 @@ pub struct GcRef<'a, T: ?Sized> {
 }
 
 impl<'a, T: ?Sized> GcRef<'a, T> {
-    fn new(cell: &'a GcRefCell<T>) -> Self {
+    fn new(cell: &'a GcRefCell<T>) -> Result<Self, BorrowError> {
         let status = &cell.status;
-        assert!(
-            !status.get().writing(),
-            "GcRefCell is already mutably borrowed"
-        );
+
+        if status.get().writing() {
+            return Err(BorrowError::MutablyBorrowed);
+        }
+
         status.set(
             status
                 .get()
                 .with_reader_added()
-                .expect("GcRefCell reader count overflow"),
+                .ok_or(BorrowError::TooManyBorrows)?,
         );
 
-        Self {
+        Ok(Self {
             cell,
             value: NonNull::new(cell.inner.get()).unwrap(),
-        }
+        })
     }
 }
 
@@ -737,17 +873,18 @@ pub struct GcRefMut<'a, T: Collect + ?Sized> {
 }
 
 impl<'a, T: Collect + ?Sized> GcRefMut<'a, T> {
-    fn new(cell: &'a GcRefCell<T>) -> Self {
+    fn new(cell: &'a GcRefCell<T>) -> Result<Self, BorrowMutError> {
         let status = &cell.status;
-        assert!(
-            !status.get().writing(),
-            "GcRefCell is already mutably borrowed"
-        );
+
+        if status.get().writing() {
+            return Err(BorrowMutError::MutablyBorrowed);
+        }
+
         status.set(
             status
                 .get()
                 .with_writer_added()
-                .expect("cannot borrow GcRefCell as mutable while it's immutably borrowed"),
+                .ok_or(BorrowMutError::ImmutablyBorrowed)?,
         );
 
         unsafe {
@@ -756,11 +893,11 @@ impl<'a, T: Collect + ?Sized> GcRefMut<'a, T> {
             }
         }
 
-        Self {
+        Ok(Self {
             cell,
             value: NonNull::new(cell.inner.get()).unwrap(),
             _marker: PhantomData,
-        }
+        })
     }
 }
 
