@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use crate::location::{Location, Spanned};
 
 pub type Name = Spanned<String>;
@@ -49,7 +51,6 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Assign(Assign),
-    Var(Var),
     Block(Spanned<Block>),
     Array(ArrayLit),
     Symbol(SymbolLit),
@@ -57,13 +58,18 @@ pub enum Expr {
     Int(IntLit),
     Float(FloatLit),
     Dispatch(Dispatch),
+
+    UnresolvedName(UnresolvedName),
+    Local(Local),
+    Upvalue(Upvalue),
+    Field(Field),
+    Global(Global),
 }
 
 impl Expr {
     pub fn location(&self) -> Location {
         match self {
             Self::Assign(expr) => expr.location,
-            Self::Var(expr) => expr.0.location,
             Self::Block(expr) => expr.location,
             Self::Array(expr) => expr.0.location,
             Self::Symbol(expr) => expr.location(),
@@ -71,6 +77,12 @@ impl Expr {
             Self::Int(expr) => expr.0.location,
             Self::Float(expr) => expr.0.location,
             Self::Dispatch(expr) => expr.location,
+
+            Self::UnresolvedName(expr) => expr.0.location,
+            Self::Local(expr) => expr.0.location,
+            Self::Upvalue(expr) => expr.name.location,
+            Self::Field(expr) => expr.0.location,
+            Self::Global(expr) => expr.0.location,
         }
     }
 }
@@ -81,9 +93,6 @@ pub struct Assign {
     pub var: Name,
     pub value: Box<Expr>,
 }
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Var(pub Name);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArrayLit(pub Spanned<Vec<Expr>>);
@@ -116,6 +125,26 @@ pub struct FloatLit(pub Spanned<f64>);
 pub struct Dispatch {
     pub location: Location,
     pub recv: Box<Expr>,
+    pub supercall: bool,
     pub selector: Selector,
     pub args: Vec<Expr>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Local(pub Name);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Upvalue {
+    pub name: Name,
+    pub up_frames: NonZeroUsize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field(pub Name);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Global(pub Name);
+
+/// A name lookup pending resolution: either a global or a field defined in a superclass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnresolvedName(pub Name);
