@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: super
+"
+
+SuperBlockParam = (
+  test = (
+    [ :super | 42 ] value.
+  )
+)

@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  - contains: assign
+  - contains: self
+"
+
+AssignToSelf = (
+  run = (
+    self := 42.
+  )
+)

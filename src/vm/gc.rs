@@ -734,13 +734,15 @@ impl<T: Collect + ?Sized> GcRefCell<T> {
 
 impl<T: Debug + ?Sized> Debug for GcRefCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("GcRefCell")
-            .field(match self.try_borrow() {
-                Ok(value) => &&*value,
-                Err(BorrowError::MutablyBorrowed) => &"<mutably borrowed>",
-                Err(BorrowError::TooManyBorrows) => &"<too many borrows>",
-            })
-            .finish()
+        let mut r = f.debug_tuple("GcRefCell");
+
+        let r = match self.try_borrow() {
+            Ok(value) => r.field(&&*value),
+            Err(BorrowError::MutablyBorrowed) => r.field(&"<mutably borrowed>"),
+            Err(BorrowError::TooManyBorrows) => r.field(&"<too many borrows>"),
+        };
+
+        r.finish()
     }
 }
 

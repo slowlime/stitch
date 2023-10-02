@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut};
@@ -50,6 +50,14 @@ pub enum ParserError {
 
     #[error("cannot define a variable `{name}`")]
     RecvRedefined {
+        name: String,
+
+        #[label]
+        span: Span,
+    },
+
+    #[error("cannot assign to `{name}`")]
+    AssignmentToRecv {
         name: String,
 
         #[label]
@@ -177,7 +185,10 @@ struct VarNameMatcher;
 
 impl Matcher for VarNameMatcher {
     fn matches(&self, token: &Token<'_>) -> bool {
-        matches!(token.value, TokenValue::Special(Special::Primitive) | TokenValue::Ident(_))
+        matches!(
+            token.value,
+            TokenValue::Special(Special::Primitive) | TokenValue::Ident(_)
+        )
     }
 
     fn expected(&self) -> Vec<Cow<'static, str>> {
@@ -313,8 +324,8 @@ enum ResolvedVar {
 }
 
 #[derive(Default)]
-struct Scope<'a> {
-    vars: HashMap<Cow<'a, str>, Var>,
+struct Scope {
+    vars: HashMap<String, Var>,
 }
 
 pub struct Parser<'a> {
@@ -322,7 +333,7 @@ pub struct Parser<'a> {
     recursion_limit: usize,
     layer_start: SourceOffset,
     attempted_tokens: HashSet<Cow<'static, str>>,
-    scopes: Vec<Scope<'a>>,
+    scopes: Vec<Scope>,
     options: ParserOptions,
 }
 
@@ -410,16 +421,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn define_var(&mut self, name: Cow<'a, str>, kind: Var) -> Result<(), ParserError> {
+    fn define_var(&mut self, name: String, kind: Var) -> Result<(), ParserError> {
         use std::collections::hash_map::Entry;
-
-        assert_ne!(name, "super");
 
         let scope = self.scopes.last_mut().unwrap();
 
-        if kind != Var::Recv && name == "self" {
+        if kind != Var::Recv && (name == "self" || name == "super") {
             return Err(ParserError::RecvRedefined {
-                name: name.into_owned(),
+                name,
                 span: kind.location().span().unwrap(),
             });
         }
@@ -431,13 +440,11 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
 
-            Entry::Occupied(e) => {
-                Err(ParserError::NameCollision {
-                    name: name.into_owned(),
-                    prev_span: e.get().location().span(),
-                    span: kind.location().span().unwrap(),
-                })
-            }
+            Entry::Occupied(e) => Err(ParserError::NameCollision {
+                name: e.key().clone(),
+                prev_span: e.get().location().span(),
+                span: kind.location().span().unwrap(),
+            }),
         }
     }
 
@@ -449,7 +456,9 @@ impl<'a> Parser<'a> {
             if let Some(var) = scope.vars.get(name) {
                 return match var {
                     Var::Local(_) | Var::Recv if i == 0 => ResolvedVar::Local,
-                    Var::Local(_) | Var::Recv => ResolvedVar::Upvalue { up_frames: i.try_into().unwrap() },
+                    Var::Local(_) | Var::Recv => ResolvedVar::Upvalue {
+                        up_frames: i.try_into().unwrap(),
+                    },
                     Var::Field(_) => ResolvedVar::Field,
                 };
             }
@@ -511,19 +520,19 @@ impl<'a> Parser<'a> {
 
                 loop {
                     class_methods.push(lookahead!(self: {
-                        Special::ParenRight => break,
+                    Special::ParenRight => break,
 
-                        SeparatorMatcher => {
-                            let bad_separator = self.expect(SeparatorMatcher).unwrap().clone_static();
+                    SeparatorMatcher => {
+                        let bad_separator = self.expect(SeparatorMatcher).unwrap().clone_static();
 
-                            return Err(ParserError::MultipleSeparators {
-                                bad_separator,
-                                first_separator: separator.clone_static(),
-                            });
-                        },
+                        return Err(ParserError::MultipleSeparators {
+                            bad_separator,
+                            first_separator: separator.clone_static(),
+                        });
+                    },
 
-                        _ => self.parse_method()?,
-                    }));
+                    _ => self.parse_method()?,
+                }));
                 }
 
                 self.scopes.pop();
@@ -579,6 +588,12 @@ impl<'a> Parser<'a> {
         let (selector, params) = self.parse_pattern()?;
         self.expect(Special::Equals)?;
 
+        self.scopes.push(Default::default());
+
+        for param in &params {
+            self.define_var(param.value.clone(), Var::Local(param.location))?;
+        }
+
         let def = lookahead!(self: {
             Special::Primitive => {
                 let token = self.expect(Special::Primitive).unwrap();
@@ -587,20 +602,19 @@ impl<'a> Parser<'a> {
             },
 
             Special::ParenLeft => {
-                self.scopes.push(Default::default());
-                self.define_var("self".into(), Var::Recv);
+                self.define_var("self".into(), Var::Recv).unwrap();
 
                 let mut block = self.parse_block_body(BlockParamsAllowed::No, Special::ParenLeft, Special::ParenRight)?;
                 block.value.params = params;
                 let span = block.span().unwrap();
-
-                self.scopes.pop();
 
                 Spanned::new_spanning(ast::MethodDef::Block(block.value), span)
             },
 
             _ => return #error,
         });
+
+        self.scopes.pop();
 
         Ok(ast::Method {
             location: Location::UserCode(
@@ -611,9 +625,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_pattern(
-        &mut self,
-    ) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
+    fn parse_pattern(&mut self) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
         lookahead!(self: {
             BinOpMatcher => self.parse_bin_pattern(),
             TokenType::Keyword => self.parse_kw_pattern(),
@@ -692,7 +704,10 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 };
 
-                self.define_var(param, Var::Local(Location::UserCode(span)))?;
+                self.define_var(
+                    param.clone().into_owned(),
+                    Var::Local(Location::UserCode(span)),
+                )?;
                 params.push(Spanned::new_spanning(param.into_owned(), span));
             }
 
@@ -788,20 +803,43 @@ impl<'a> Parser<'a> {
         if self.peek(VarNameMatcher)? {
             let var = self.parse_ident(PrimitiveAllowed::Yes)?;
 
-            // FIXME: forbid assignment to self / super.
-
             if self.try_consume(Special::Assign)?.is_some() {
+                if var.value == "self" || var.value == "super" {
+                    let span = var.span().unwrap();
+
+                    return Err(ParserError::AssignmentToRecv {
+                        name: var.value,
+                        span,
+                    });
+                }
+
+                let var = match self.resolve_var(&var.value) {
+                    ResolvedVar::Local => ast::AssignVar::Local(ast::Local(var)),
+                    ResolvedVar::Upvalue { up_frames } => ast::AssignVar::Upvalue(ast::Upvalue {
+                        name: var,
+                        up_frames,
+                    }),
+                    ResolvedVar::Field => ast::AssignVar::Field(ast::Field(var)),
+                    ResolvedVar::Unresolved => {
+                        ast::AssignVar::UnresolvedName(ast::UnresolvedName(var))
+                    }
+                };
+
                 let (value, _) = self.bounded()?.parse_expr()?;
                 let span = var
+                    .location()
                     .span()
                     .unwrap()
                     .convex_hull(&value.location().span().unwrap());
 
-                Ok((ast::Expr::Assign(ast::Assign {
-                    location: Location::UserCode(span),
-                    var,
-                    value: Box::new(value),
-                }), SuperRecv::No))
+                Ok((
+                    ast::Expr::Assign(ast::Assign {
+                        location: Location::UserCode(span),
+                        var,
+                        value: Box::new(value),
+                    }),
+                    SuperRecv::No,
+                ))
             } else {
                 self.bounded()?.parse_kw_dispatch_expr(Some(var))
             }
@@ -840,13 +878,16 @@ impl<'a> Parser<'a> {
                 .convex_hull(&args.last().unwrap().location().span().unwrap());
             let selector = ast::Selector::Keyword(kws);
 
-            Ok((ast::Expr::Dispatch(ast::Dispatch {
-                location: Location::UserCode(span),
-                recv: Box::new(recv),
-                supercall: super_recv.is_yes(),
-                selector,
-                args,
-            }), SuperRecv::No))
+            Ok((
+                ast::Expr::Dispatch(ast::Dispatch {
+                    location: Location::UserCode(span),
+                    recv: Box::new(recv),
+                    supercall: super_recv.is_yes(),
+                    selector,
+                    args,
+                }),
+                SuperRecv::No,
+            ))
         } else {
             Ok((recv, super_recv))
         }
@@ -935,17 +976,18 @@ impl<'a> Parser<'a> {
             None => self.parse_ident(PrimitiveAllowed::Yes)?,
         };
 
+        let super_recv = (name.value == "super").into();
+
         let expr = match self.resolve_var(&name.value) {
             ResolvedVar::Local => ast::Expr::Local(ast::Local(name)),
             ResolvedVar::Field => ast::Expr::Field(ast::Field(name)),
-            ResolvedVar::Upvalue { up_frames } => ast::Expr::Upvalue(ast::Upvalue {
-                name,
-                up_frames,
-            }),
+            ResolvedVar::Upvalue { up_frames } => {
+                ast::Expr::Upvalue(ast::Upvalue { name, up_frames })
+            }
             ResolvedVar::Unresolved => ast::Expr::UnresolvedName(ast::UnresolvedName(name)),
         };
 
-        Ok((expr, (name.value == "super").into()))
+        Ok((expr, super_recv))
     }
 
     fn parse_paren_expr(&mut self) -> Result<(ast::Expr, SuperRecv), ParserError> {
@@ -1010,7 +1052,9 @@ impl<'a> Parser<'a> {
         };
 
         let sym = match sym {
-            token::Symbol::String(s) => ast::SymbolLit::String(Spanned::new_spanning(s.into_owned(), span)),
+            token::Symbol::String(s) => {
+                ast::SymbolLit::String(Spanned::new_spanning(s.into_owned(), span))
+            }
             token::Symbol::UnarySelector(s) => ast::SymbolLit::Selector(Spanned::new_spanning(
                 ast::Selector::Unary(Spanned::new_spanning(s.into_owned(), span)),
                 span,
@@ -1042,7 +1086,8 @@ impl<'a> Parser<'a> {
         };
 
         Ok(ast::Expr::String(ast::StringLit(Spanned::new_spanning(
-            s.into_owned(), span,
+            s.into_owned(),
+            span,
         ))))
     }
 

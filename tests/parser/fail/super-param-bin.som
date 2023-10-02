@@ -1,0 +1,10 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: super
+"
+
+SuperParamBin = (
+  / super = ('rip')
+)
+

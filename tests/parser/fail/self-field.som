@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: self
+"
+
+SelfField = (
+  |a b c self d e f|
+
+  run = (42)
+)

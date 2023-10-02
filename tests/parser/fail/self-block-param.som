@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: self
+"
+
+SelfBlockParam = (
+  test = (
+    [ :self | 42 ] value.
+  )
+)

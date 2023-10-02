@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: super
+"
+
+SuperClassParamKw = (
+  ----
+
+  test: super makes: errors = ('yes')
+)

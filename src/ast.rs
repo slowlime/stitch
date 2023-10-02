@@ -88,9 +88,30 @@ impl Expr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum AssignVar {
+    UnresolvedName(UnresolvedName),
+    Local(Local),
+    Upvalue(Upvalue),
+    Field(Field),
+    Global(Global),
+}
+
+impl AssignVar {
+    pub fn location(&self) -> Location {
+        match self {
+            AssignVar::UnresolvedName(name) => name.0.location,
+            AssignVar::Local(name) => name.0.location,
+            AssignVar::Upvalue(name) => name.name.location,
+            AssignVar::Field(name) => name.0.location,
+            AssignVar::Global(name) => name.0.location,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Assign {
     pub location: Location,
-    pub var: Name,
+    pub var: AssignVar,
     pub value: Box<Expr>,
 }
 

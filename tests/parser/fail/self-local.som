@@ -1,0 +1,13 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: self
+"
+
+SelfLocal = (
+  test = (
+    |self|
+
+    'you shant pass'
+  )
+)

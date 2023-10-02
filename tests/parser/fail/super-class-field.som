@@ -1,0 +1,13 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: super
+"
+
+SuperClassField = (
+  ----
+
+  |a b c super d e f|
+
+  run = (42)
+)

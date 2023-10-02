@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  - contains: assign
+  - contains: super
+"
+
+AssignToSuper = (
+  run = (
+    super := 42.
+  )
+)

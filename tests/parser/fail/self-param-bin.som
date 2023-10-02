@@ -1,0 +1,9 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: self
+"
+
+SelfParamBin = (
+  / self = ('rip')
+)

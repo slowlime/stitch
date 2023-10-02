@@ -1,0 +1,11 @@
+"test:
+failMessage:
+  - contains: define
+  - contains: super
+"
+
+SuperField = (
+  |a b c super d e f|
+
+  run = (42)
+)
