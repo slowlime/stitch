@@ -1,0 +1,12 @@
+"test:
+failMessage:
+  - contains: foo
+  - contains: defined twice
+"
+
+LocalNameCollision = (
+  run = (
+    |a foo b c foo d|
+    42.
+  )
+)

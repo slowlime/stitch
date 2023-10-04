@@ -1,0 +1,9 @@
+"test:
+failMessage:
+  - contains: foo
+  - contains: defined twice
+"
+
+FieldNameCollision = (
+  |a foo b c foo d|
+)

@@ -1,0 +1,9 @@
+"test:
+failMessage:
+  - contains: foo
+  - contains: defined twice
+"
+
+ParamNameCollision = (
+  bar: foo bar: spam bar: foo = (42)
+)
