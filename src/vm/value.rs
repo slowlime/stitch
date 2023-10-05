@@ -5,12 +5,13 @@ use std::rc::Rc;
 
 use crate::ast::{self, SymbolLit as Symbol};
 use crate::impl_collect;
-use crate::location::Span;
+use crate::location::{Span, Spanned, Location};
 
 use super::error::VmError;
 use super::gc::GcRefCell;
 use super::gc::{Collect, Gc};
 use super::gc::{Finalize, GarbageCollector};
+use super::method::MethodDef;
 
 #[derive(Debug, Clone)]
 pub struct Value<'gc>(Gc<'gc, ValueKind<'gc>>);
@@ -163,7 +164,6 @@ define_value_kind! {
         Block("block", Block<'gc> => &'a Block<'gc>): ref blk => blk,
         Class("class", Class<'gc> => &'a Class<'gc>): ref cls => cls,
         Method("method", Method<'gc> => &'a Method<'gc>): ref method => method,
-        Primitive("primitive", Primitive => &'a Primitive): ref p => p,
         Symbol("symbol", Symbol => &'a Symbol): ref sym => sym,
         Object("object", Object<'gc> => &'a Object<'gc>): ref obj => obj,
         String("string", String => &'a str): ref s => s,
@@ -182,7 +182,7 @@ unsafe impl Collect for ValueKind<'_> {
                 Self::Method(method) => visit(method),
                 Self::Object(obj) => visit(obj),
 
-                Self::Int(_) | Self::Float(_) | Self::String(_) | Self::Primitive(_) | Self::Symbol(_) => {},
+                Self::Int(_) | Self::Float(_) | Self::String(_) | Self::Symbol(_) => {},
             }
         }
     }
@@ -203,6 +203,10 @@ impl<'gc, T: Tag> TypedValue<'gc, T> {
 
     pub fn as_value(&self) -> &Value<'gc> {
         &self.0
+    }
+
+    pub fn into_value(self) -> Value<'gc> {
+        self.0
     }
 }
 
@@ -236,9 +240,11 @@ unsafe impl Collect for Block<'_> {
 
 #[derive(Debug, Clone)]
 pub struct Class<'gc> {
-    obj: TypedValue<'gc, tag::Object>,
-    superclass: Option<TypedValue<'gc, tag::Class>>,
-    methods: Vec<TypedValue<'gc, tag::Method>>,
+    pub name: Spanned<String>,
+    pub obj: TypedValue<'gc, tag::Object>,
+    pub superclass: Option<TypedValue<'gc, tag::Class>>,
+    pub methods: Vec<TypedValue<'gc, tag::Method>>,
+    pub instance_fields: Vec<ast::Name>,
 }
 
 impl Finalize for Class<'_> {}
@@ -255,8 +261,11 @@ unsafe impl Collect for Class<'_> {
 
 #[derive(Debug, Clone)]
 pub struct Method<'gc> {
-    obj: TypedValue<'gc, tag::Object>,
-    code: ast::Block,
+    pub selector: Spanned<ast::Selector>,
+    pub location: Location,
+    pub obj: TypedValue<'gc, tag::Object>,
+    pub holder: TypedValue<'gc, tag::Class>,
+    pub def: Spanned<MethodDef>,
 }
 
 impl Finalize for Method<'_> {}
@@ -265,17 +274,9 @@ unsafe impl Collect for Method<'_> {
     impl_collect! {
         fn visit(&self) {
             visit(&self.obj);
+            visit(&self.holder);
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum Primitive {}
-
-impl Finalize for Primitive {}
-
-unsafe impl Collect for Primitive {
-    impl_collect!();
 }
 
 #[derive(Debug, Clone)]

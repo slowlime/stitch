@@ -26,4 +26,25 @@ pub enum VmError {
         expected: Cow<'static, [Ty]>,
         actual: Ty,
     },
+
+    #[error("{}method `{name}` defined twice", if *.class_method { "class "} else { "" })]
+    MethodCollision {
+        #[label]
+        span: Option<Span>,
+
+        #[label = "first definition here"]
+        prev_span: Option<Span>,
+
+        name: String,
+        class_method: bool,
+    },
+
+    #[error("unknown primitive {name} for class {class_name}")]
+    UnknownPrimitive {
+        #[label]
+        span: Option<Span>,
+
+        name: String,
+        class_name: String,
+    },
 }
