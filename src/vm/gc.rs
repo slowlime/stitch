@@ -732,6 +732,18 @@ impl<T: Collect + ?Sized> GcRefCell<T> {
     }
 }
 
+impl<T: Clone> Clone for GcRefCell<T> {
+    fn clone(&self) -> Self {
+        GcRefCell::new(self.borrow().clone())
+    }
+}
+
+impl<T: Default> Default for GcRefCell<T> {
+    fn default() -> Self {
+        GcRefCell::new(T::default())
+    }
+}
+
 impl<T: Debug + ?Sized> Debug for GcRefCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut r = f.debug_tuple("GcRefCell");

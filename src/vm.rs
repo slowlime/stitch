@@ -13,9 +13,9 @@ use crate::location::{Location, Spanned};
 
 use self::error::VmError;
 use self::frame::Frame;
-use self::gc::GarbageCollector;
+use self::gc::{GarbageCollector, GcRefCell};
 use self::method::{MethodDef, Primitive};
-use self::value::{tag, Class, IntoValue, Method, TypedValue, Value};
+use self::value::{tag, Class, IntoValue, Method, TypedValue, Value, Object};
 
 fn check_method_name_collisions(
     class_method: bool,
@@ -45,6 +45,7 @@ pub struct Builtins<'gc> {
     pub object_class: TypedValue<'gc, tag::Class>,
     pub metaclass: TypedValue<'gc, tag::Class>,
     pub metaclass_class: TypedValue<'gc, tag::Class>,
+    pub method: TypedValue<'gc, tag::Class>,
     pub nil_object: TypedValue<'gc, tag::Object>,
 }
 
@@ -118,24 +119,30 @@ impl<'gc> Vm<'gc> {
             .map(|method| self.load_method(method, &class.name.value, &object_field_set))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // TODO: set fields
         let metaclass = self.make_class(
+            Spanned::new(format!("{} class", class.name.value), class.name.location),
             self.builtins().metaclass.clone(),
             Some(self.builtins().object_class.clone()),
             class_methods,
-            // TODO: add fields required by Object class
-            vec![],
-            class_fields.clone(),
+            class_fields,
         );
-        let metaclass = metaclass.into_value(self.gc);
+
+        for method in &metaclass.get().methods {
+            *method.get().holder.borrow_mut() = metaclass.clone();
+        }
 
         let cls = self.make_class(
+            class.name,
             metaclass,
             Some(superclass),
             object_methods,
-            class_fields,
             object_fields,
         );
-        let cls = cls.into_value(self.gc);
+
+        for method in &cls.get().methods {
+            *method.get().holder.borrow_mut() = cls.clone();
+        }
 
         self.set_global(cls.get().name.value.clone(), cls.clone().into_value());
 
@@ -160,9 +167,7 @@ impl<'gc> Vm<'gc> {
             }
         };
         let def = Spanned::new(code, def_location);
-        let method = self
-            .make_method(method.selector, method.location, def)
-            .into_value(self.gc);
+        let method = self.make_method(method.selector, method.location, def);
 
         Ok(method)
     }
@@ -251,26 +256,75 @@ impl<'gc> Vm<'gc> {
         selector: Spanned<ast::Selector>,
         location: Location,
         def: Spanned<MethodDef>,
-    ) -> Method<'gc> {
-        todo!()
+    ) -> TypedValue<'gc, tag::Method> {
+        let method = Method {
+            selector,
+            location,
+            obj: Default::default(),
+            holder: Default::default(),
+            def,
+        };
+
+        let value = method.into_value(self.gc);
+
+        // TODO: make sure field assignments are consistent
+        let obj = self.make_object(self.builtins().method.clone());
+        obj.get().fields.borrow_mut()[obj.get().field_idx("$method").unwrap()] = value.clone().into_value();
+
+        *value.get().obj.borrow_mut() = obj;
+
+        value
     }
 
     fn make_class(
-        &mut self,
+        &self,
+        name: Spanned<String>,
         metaclass: TypedValue<'gc, tag::Class>,
         superclass: Option<TypedValue<'gc, tag::Class>>,
         methods: Vec<TypedValue<'gc, tag::Method>>,
-        class_fields: Vec<ast::Name>,
         instance_fields: Vec<ast::Name>,
-    ) -> Class<'gc> {
-        todo!()
+    ) -> TypedValue<'gc, tag::Class> {
+        let cls = Class {
+            name,
+            // TODO: put an actual object here
+            obj: Default::default(),
+            superclass,
+            methods,
+            instance_fields,
+        };
+
+        let value = cls.into_value(self.gc);
+
+        // TODO: make sure field assignments are consistent
+        let obj = self.make_object(metaclass);
+        obj.get().fields.borrow_mut()[obj.get().field_idx("$class").unwrap()] = value.clone().into_value();
+
+        *value.get().obj.borrow_mut() = obj;
+
+        value
+    }
+
+    fn make_object(&self, class: TypedValue<'gc, tag::Class>) -> TypedValue<'gc, tag::Object> {
+        let field_count = class.get().instance_fields.len();
+        let mut fields = Vec::with_capacity(field_count);
+
+        for _ in 0..field_count {
+            fields.push(self.builtins().nil_object.clone().into_value());
+        }
+
+        let obj = Object {
+            class,
+            fields: GcRefCell::new(fields),
+        };
+
+        obj.into_value(self.gc)
     }
 
     fn set_global(&mut self, name: String, value: Value<'gc>) {
-        todo!()
+        self.globals.insert(name, value);
     }
 
     fn get_global(&self, name: &str) -> Option<&Value<'gc>> {
-        todo!()
+        self.globals.get(name)
     }
 }

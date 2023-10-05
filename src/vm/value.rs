@@ -13,16 +13,33 @@ use super::gc::{Collect, Gc};
 use super::gc::{Finalize, GarbageCollector};
 use super::method::MethodDef;
 
-#[derive(Debug, Clone)]
-pub struct Value<'gc>(Gc<'gc, ValueKind<'gc>>);
+#[derive(Debug, Clone, Default)]
+pub struct Value<'gc>(Option<Gc<'gc, ValueKind<'gc>>>);
 
 impl<'gc> Value<'gc> {
+    pub fn new_illegal() -> Self {
+        Self::default()
+    }
+
+    pub fn is_legal(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub fn ensure_legal(&self) -> &Self {
+        assert!(self.0.is_some(), "Value is illegal");
+
+        self
+    }
+
     pub fn is<T: Tag>(&self) -> bool {
-        T::is_tag_of(self)
+        match self.0 {
+            Some(ref gc) => T::is_tag_of(gc),
+            None => true,
+        }
     }
 
     pub fn downcast<T: Tag>(self) -> Option<TypedValue<'gc, T>> {
-        if T::is_tag_of(&self) {
+        if self.is::<T>() {
             Some(unsafe { TypedValue::new(self) })
         } else {
             None
@@ -33,13 +50,13 @@ impl<'gc> Value<'gc> {
         self,
         span: impl Into<Option<Span>>,
     ) -> Result<TypedValue<'gc, T>, VmError> {
-        if T::is_tag_of(&self) {
+        if self.is::<T>() {
             Ok(unsafe { TypedValue::new(self) })
         } else {
             Err(VmError::IllegalTy {
                 span: span.into(),
                 expected: [T::TY].as_slice().into(),
-                actual: self.0.ty(),
+                actual: self.0.as_ref().unwrap().ty(),
             })
         }
     }
@@ -112,11 +129,11 @@ macro_rules! define_value_kind {
 
             const TY: Ty;
 
-            fn is_tag_of(val: &Value<'_>) -> bool;
+            fn is_tag_of(val: &ValueKind<'_>) -> bool;
 
-            fn get<'a, 'gc>(val: &'a Value<'gc>) -> Self::Value<'a, 'gc>;
+            fn get<'a, 'gc>(val: &'a ValueKind<'gc>) -> Self::Value<'a, 'gc>;
 
-            unsafe fn get_unchecked<'a, 'gc>(val: &'a Value<'gc>) -> Self::Value<'a, 'gc>;
+            unsafe fn get_unchecked<'a, 'gc>(val: &'a ValueKind<'gc>) -> Self::Value<'a, 'gc>;
         }
 
         $(
@@ -125,19 +142,19 @@ macro_rules! define_value_kind {
 
                 const TY: Ty = Ty::$name;
 
-                fn is_tag_of(val: &Value) -> bool {
-                    matches!(*val.0, ValueKind::$name(_))
+                fn is_tag_of(val: &ValueKind) -> bool {
+                    matches!(val, ValueKind::$name(_))
                 }
 
-                fn get<'a, 'gc>(val: &'a Value<'gc>) -> Self::Value<'a, 'gc> {
-                    match *val.0 {
+                fn get<'a, 'gc>(val: &'a ValueKind<'gc>) -> Self::Value<'a, 'gc> {
+                    match *val {
                         ValueKind::$name($pat) => $arm,
                         _ => panic!("invalid tag"),
                     }
                 }
 
-                unsafe fn get_unchecked<'a, 'gc>(val: &'a Value<'gc>) -> Self::Value<'a, 'gc> {
-                    match *val.0 {
+                unsafe fn get_unchecked<'a, 'gc>(val: &'a ValueKind<'gc>) -> Self::Value<'a, 'gc> {
+                    match *val {
                         ValueKind::$name($pat) => $arm,
                         _ => std::hint::unreachable_unchecked(),
                     }
@@ -148,7 +165,7 @@ macro_rules! define_value_kind {
                 type Tag = tag::$name;
 
                 fn into_value(self, gc: &'gc GarbageCollector) -> TypedValue<'gc, Self::Tag> {
-                    TypedValue(Value(Gc::new(gc, ValueKind::$name(self))), PhantomData)
+                    TypedValue(Value(Some(Gc::new(gc, ValueKind::$name(self)))), PhantomData)
                 }
             }
         )+
@@ -197,8 +214,23 @@ impl<'gc, T: Tag> TypedValue<'gc, T> {
         Self(val, PhantomData)
     }
 
+    pub fn new_illegal() -> Self {
+        Default::default()
+    }
+
+    pub fn is_legal(&self) -> bool {
+        self.0.is_legal()
+    }
+
+    pub fn ensure_legal(&self) -> &Self {
+        self.0.ensure_legal();
+        self
+    }
+
     pub fn get(&self) -> T::Value<'_, 'gc> {
-        unsafe { T::get_unchecked(&self.0) }
+        assert!(self.0.is_legal(), "attempt to get the value of an illegal Value");
+
+        unsafe { T::get_unchecked(self.0.0.as_ref().unwrap()) }
     }
 
     pub fn as_value(&self) -> &Value<'gc> {
@@ -207,6 +239,12 @@ impl<'gc, T: Tag> TypedValue<'gc, T> {
 
     pub fn into_value(self) -> Value<'gc> {
         self.0
+    }
+}
+
+impl<'gc, T: Tag> Default for TypedValue<'gc, T> {
+    fn default() -> Self {
+        Self(Value::new_illegal(), PhantomData)
     }
 }
 
@@ -241,7 +279,7 @@ unsafe impl Collect for Block<'_> {
 #[derive(Debug, Clone)]
 pub struct Class<'gc> {
     pub name: Spanned<String>,
-    pub obj: TypedValue<'gc, tag::Object>,
+    pub obj: GcRefCell<TypedValue<'gc, tag::Object>>,
     pub superclass: Option<TypedValue<'gc, tag::Class>>,
     pub methods: Vec<TypedValue<'gc, tag::Method>>,
     pub instance_fields: Vec<ast::Name>,
@@ -263,8 +301,8 @@ unsafe impl Collect for Class<'_> {
 pub struct Method<'gc> {
     pub selector: Spanned<ast::Selector>,
     pub location: Location,
-    pub obj: TypedValue<'gc, tag::Object>,
-    pub holder: TypedValue<'gc, tag::Class>,
+    pub obj: GcRefCell<TypedValue<'gc, tag::Object>>,
+    pub holder: GcRefCell<TypedValue<'gc, tag::Class>>,
     pub def: Spanned<MethodDef>,
 }
 
@@ -281,8 +319,14 @@ unsafe impl Collect for Method<'_> {
 
 #[derive(Debug, Clone)]
 pub struct Object<'gc> {
-    class: TypedValue<'gc, tag::Class>,
-    fields: Vec<Value<'gc>>,
+    pub class: TypedValue<'gc, tag::Class>,
+    pub fields: GcRefCell<Vec<Value<'gc>>>,
+}
+
+impl<'gc> Object<'gc> {
+    pub fn field_idx(&self, name: &str) -> Option<usize> {
+        todo!()
+    }
 }
 
 impl Finalize for Object<'_> {}
