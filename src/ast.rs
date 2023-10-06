@@ -1,9 +1,10 @@
 pub mod visit;
 
-use std::fmt::{self, Display};
+use std::fmt::{self, Debug, Display, Write};
 use std::num::NonZeroUsize;
 
 use crate::location::{Location, Spanned};
+use crate::parse::token::is_bin_op_char;
 
 use self::visit::AstRecurse;
 
@@ -45,7 +46,7 @@ impl AstRecurse for Class {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Method {
     pub location: Location,
-    pub selector: Spanned<Selector>,
+    pub selector: SpannedSelector,
     pub def: Spanned<MethodDef>,
 }
 
@@ -59,25 +60,123 @@ impl AstRecurse for Method {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Selector {
-    Unary(Name),
-    Binary(Name),
-    Keyword(Vec<Name>),
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SelectorKind {
+    Unary,
+    Binary,
+    Keyword(Box<[usize]>),
+}
+
+#[derive(Clone, PartialEq)]
+pub struct Selector {
+    name: String,
+    kind: SelectorKind,
+}
+
+impl Selector {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn from_string(name: String) -> Self {
+        let kind = if name.chars().all(is_bin_op_char) {
+            SelectorKind::Binary
+        } else {
+            let colons = name
+                .match_indices(':')
+                .map(|(idx, _)| idx)
+                .collect::<Vec<_>>();
+
+            if colons.is_empty() {
+                SelectorKind::Unary
+            } else {
+                SelectorKind::Keyword(colons.into())
+            }
+        };
+
+        Self { name, kind }
+    }
+}
+
+impl Debug for Selector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Selector").field(&self.name).finish()
+    }
 }
 
 impl Display for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unary(name) | Self::Binary(name) => name.value.fmt(f),
+        write!(f, "{}", self.name)
+    }
+}
 
-            Self::Keyword(names) => {
-                for name in names {
-                    write!(f, "{}:", name.value)?;
-                }
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedSelector {
+    pub location: Location,
+    pub value: Selector,
+    pub kws: Option<Box<[Location]>>,
+}
 
-                Ok(())
-            }
+impl SpannedSelector {
+    pub fn new_unary(name: Name) -> Self {
+        let Spanned {
+            location,
+            value: name,
+        } = name;
+        assert!(!name.contains(':'), "unary selector contains a colon");
+
+        SpannedSelector {
+            location,
+            value: Selector {
+                name,
+                kind: SelectorKind::Unary,
+            },
+            kws: None,
+        }
+    }
+
+    pub fn new_binary(name: Name) -> Self {
+        let Spanned {
+            location,
+            value: name,
+        } = name;
+
+        SpannedSelector {
+            location,
+            value: Selector {
+                name,
+                kind: SelectorKind::Binary,
+            },
+            kws: None,
+        }
+    }
+
+    pub fn new_keyword(names: Vec<Name>) -> Self {
+        assert!(!names.is_empty());
+
+        let location = names
+            .iter()
+            .map(|name| name.location)
+            .reduce(|lhs, rhs| lhs.convex_hull(rhs))
+            .unwrap();
+
+        let mut kw_offsets = Vec::with_capacity(names.len() - 1);
+        let mut serialized = String::new();
+
+        for name in names.iter() {
+            kw_offsets.push(name.value.len());
+            write!(serialized, "{}:", name.value).unwrap();
+        }
+
+        let kws = Some(names.into_iter().map(|name| name.location).collect());
+
+        SpannedSelector {
+            location,
+            value: Selector {
+                name: serialized,
+                kind: SelectorKind::Keyword(kw_offsets.into_boxed_slice()),
+            },
+            kws,
         }
     }
 }
@@ -325,7 +424,7 @@ impl AstRecurse for ArrayLit {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolLit {
     String(Name),
-    Selector(Spanned<Selector>),
+    Selector(SpannedSelector),
 }
 
 impl SymbolLit {
@@ -351,7 +450,7 @@ pub struct Dispatch {
     pub location: Location,
     pub recv: Box<Expr>,
     pub supercall: bool,
-    pub selector: Selector,
+    pub selector: SpannedSelector,
     pub args: Vec<Expr>,
 }
 

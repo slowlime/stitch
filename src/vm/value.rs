@@ -1,11 +1,12 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::ast::{self, SymbolLit as Symbol};
 use crate::impl_collect;
-use crate::location::{Span, Spanned, Location};
+use crate::location::{Location, Span, Spanned};
 
 use super::error::VmError;
 use super::gc::GcRefCell;
@@ -228,9 +229,12 @@ impl<'gc, T: Tag> TypedValue<'gc, T> {
     }
 
     pub fn get(&self) -> T::Value<'_, 'gc> {
-        assert!(self.0.is_legal(), "attempt to get the value of an illegal Value");
+        assert!(
+            self.0.is_legal(),
+            "attempt to get the value of an illegal Value"
+        );
 
-        unsafe { T::get_unchecked(self.0.0.as_ref().unwrap()) }
+        unsafe { T::get_unchecked(self.0 .0.as_ref().unwrap()) }
     }
 
     pub fn as_value(&self) -> &Value<'gc> {
@@ -260,10 +264,11 @@ unsafe impl<T: Tag> Collect for TypedValue<'_, T> {
 
 #[derive(Debug, Clone)]
 pub struct Block<'gc> {
-    nlret_valid_flag: Rc<Cell<bool>>,
-    code: ast::Block,
+    pub location: Location,
+    pub nlret_valid_flag: Rc<Cell<bool>>,
+    pub code: ast::Block,
     // TODO
-    upvalues: Vec<Value<'gc>>,
+    pub upvalues: Vec<Value<'gc>>,
 }
 
 impl Finalize for Block<'_> {}
@@ -281,8 +286,15 @@ pub struct Class<'gc> {
     pub name: Spanned<String>,
     pub obj: GcRefCell<TypedValue<'gc, tag::Object>>,
     pub superclass: Option<TypedValue<'gc, tag::Class>>,
+    pub method_map: HashMap<String, usize>,
     pub methods: Vec<TypedValue<'gc, tag::Method>>,
     pub instance_fields: Vec<ast::Name>,
+}
+
+impl<'gc> Class<'gc> {
+    pub fn get_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
+        self.method_map.get(name).map(|&idx| &self.methods[idx])
+    }
 }
 
 impl Finalize for Class<'_> {}
@@ -299,7 +311,7 @@ unsafe impl Collect for Class<'_> {
 
 #[derive(Debug, Clone)]
 pub struct Method<'gc> {
-    pub selector: Spanned<ast::Selector>,
+    pub selector: ast::SpannedSelector,
     pub location: Location,
     pub obj: GcRefCell<TypedValue<'gc, tag::Object>>,
     pub holder: GcRefCell<TypedValue<'gc, tag::Class>>,

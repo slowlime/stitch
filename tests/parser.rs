@@ -65,7 +65,7 @@ fn test_parser_stitch(source_path: PathBuf) {
 
 #[test_resources("third-party/SOM/TestSuite/**/*.som")]
 fn test_parser_som_st(source_path: PathBuf) {
-    const FAILING_TEST_NAMES: &'static [&'static str] = &[
+    const FAILING_TEST_NAMES: &[&str] = &[
         // assigns to `self` and `super`, neither of which is supported
         "Self",
     ];

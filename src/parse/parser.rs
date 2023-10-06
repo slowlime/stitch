@@ -618,14 +618,18 @@ impl<'a> Parser<'a> {
 
         Ok(ast::Method {
             location: Location::UserCode(
-                selector.span().unwrap().convex_hull(&def.span().unwrap()),
+                selector
+                    .location
+                    .span()
+                    .unwrap()
+                    .convex_hull(&def.span().unwrap()),
             ),
             selector,
             def,
         })
     }
 
-    fn parse_pattern(&mut self) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
+    fn parse_pattern(&mut self) -> Result<(ast::SpannedSelector, Vec<ast::Name>), ParserError> {
         lookahead!(self: {
             BinOpMatcher => self.parse_bin_pattern(),
             TokenType::Keyword => self.parse_kw_pattern(),
@@ -633,22 +637,18 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_bin_pattern(
-        &mut self,
-    ) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
+    fn parse_bin_pattern(&mut self) -> Result<(ast::SpannedSelector, Vec<ast::Name>), ParserError> {
         let Token { span, value } = self.expect(BinOpMatcher).unwrap();
         let name = Spanned::new_spanning(value.as_bin_op().unwrap().into_owned().into_str(), span);
         let param = self.parse_ident(PrimitiveAllowed::Yes)?;
 
         Ok((
-            Spanned::new_spanning(ast::Selector::Binary(name.into_owned()), span),
+            ast::SpannedSelector::new_binary(name.into_owned()),
             vec![param],
         ))
     }
 
-    fn parse_kw_pattern(
-        &mut self,
-    ) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
+    fn parse_kw_pattern(&mut self) -> Result<(ast::SpannedSelector, Vec<ast::Name>), ParserError> {
         let mut kws = vec![];
         let mut params = vec![];
 
@@ -671,22 +671,14 @@ impl<'a> Parser<'a> {
             .unwrap()
             .convex_hull(&params.last().unwrap().span().unwrap());
 
-        Ok((
-            Spanned::new_spanning(ast::Selector::Keyword(kws), span),
-            params,
-        ))
+        Ok((ast::SpannedSelector::new_keyword(kws), params))
     }
 
-    fn parse_un_pattern(
-        &mut self,
-    ) -> Result<(Spanned<ast::Selector>, Vec<ast::Name>), ParserError> {
+    fn parse_un_pattern(&mut self) -> Result<(ast::SpannedSelector, Vec<ast::Name>), ParserError> {
         let selector = self.parse_ident(PrimitiveAllowed::Yes)?;
         let span = selector.span().unwrap();
 
-        Ok((
-            Spanned::new_spanning(ast::Selector::Unary(selector), span),
-            vec![],
-        ))
+        Ok((ast::SpannedSelector::new_unary(selector), vec![]))
     }
 
     fn parse_block_body(
@@ -876,7 +868,7 @@ impl<'a> Parser<'a> {
                 .span()
                 .unwrap()
                 .convex_hull(&args.last().unwrap().location().span().unwrap());
-            let selector = ast::Selector::Keyword(kws);
+            let selector = ast::SpannedSelector::new_keyword(kws);
 
             Ok((
                 ast::Expr::Dispatch(ast::Dispatch {
@@ -911,7 +903,8 @@ impl<'a> Parser<'a> {
                 .span()
                 .unwrap()
                 .convex_hull(&arg.location().span().unwrap());
-            let selector = ast::Selector::Binary(Spanned::new_spanning(op.into_owned(), op_span));
+            let selector =
+                ast::SpannedSelector::new_binary(Spanned::new_spanning(op.into_owned(), op_span));
 
             recv = ast::Expr::Dispatch(ast::Dispatch {
                 location: Location::UserCode(span),
@@ -935,7 +928,7 @@ impl<'a> Parser<'a> {
         while self.peek(VarNameMatcher)? {
             let name = self.parse_ident(PrimitiveAllowed::Yes)?;
             let name_span = name.location.span().unwrap();
-            let selector = ast::Selector::Unary(name);
+            let selector = ast::SpannedSelector::new_unary(name);
             let span = recv.location().span().unwrap().convex_hull(&name_span);
 
             recv = ast::Expr::Dispatch(ast::Dispatch {
@@ -1055,21 +1048,25 @@ impl<'a> Parser<'a> {
             token::Symbol::String(s) => {
                 ast::SymbolLit::String(Spanned::new_spanning(s.into_owned(), span))
             }
-            token::Symbol::UnarySelector(s) => ast::SymbolLit::Selector(Spanned::new_spanning(
-                ast::Selector::Unary(Spanned::new_spanning(s.into_owned(), span)),
-                span,
-            )),
-            token::Symbol::BinarySelector(op) => ast::SymbolLit::Selector(Spanned::new_spanning(
-                ast::Selector::Binary(Spanned::new_spanning(op.into_str().into_owned(), span)),
-                span,
-            )),
+            token::Symbol::UnarySelector(s) => ast::SymbolLit::Selector(
+                ast::SpannedSelector::new_unary(Spanned::new_spanning(s.into_owned(), span)),
+            ),
+            token::Symbol::BinarySelector(op) => {
+                ast::SymbolLit::Selector(ast::SpannedSelector::new_binary(Spanned::new_spanning(
+                    op.into_str().into_owned(),
+                    span,
+                )))
+            }
             token::Symbol::KeywordSelector(kws) => {
                 let kws = kws
                     .into_iter()
                     .map(|token::Keyword { span, kw }| Spanned::new_spanning(kw.into_owned(), span))
                     .collect();
 
-                ast::SymbolLit::Selector(Spanned::new_spanning(ast::Selector::Keyword(kws), span))
+                let mut selector = ast::SpannedSelector::new_keyword(kws);
+                selector.location = Location::UserCode(span);
+
+                ast::SymbolLit::Selector(selector)
             }
         };
 

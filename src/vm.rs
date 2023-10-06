@@ -4,18 +4,30 @@ pub mod gc;
 mod method;
 mod value;
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use crate::ast;
 use crate::ast::visit::{AstRecurse, DefaultVisitorMut};
-use crate::location::{Location, Spanned};
+use crate::location::{Location, Span, Spanned};
+use crate::vm::frame::Local;
 
 use self::error::VmError;
-use self::frame::Frame;
+use self::frame::{Callee, Frame};
 use self::gc::{GarbageCollector, GcRefCell};
 use self::method::{MethodDef, Primitive};
-use self::value::{tag, Class, IntoValue, Method, TypedValue, Value, Object};
+use self::value::{tag, Class, IntoValue, Method, Object, TypedValue, Value};
+
+pub const RUN_METHOD_NAME: &str = "run";
+
+enum Effect<'gc> {
+    None,
+
+    Return(Value<'gc>),
+
+    NonLocalReturn { value: Value<'gc>, up_frames: usize },
+}
 
 fn check_method_name_collisions(
     class_method: bool,
@@ -24,11 +36,12 @@ fn check_method_name_collisions(
     let mut names = HashMap::new();
 
     for method in methods {
-        if let Some(prev_span) =
-            names.insert(method.selector.value.to_string(), method.selector.span())
-        {
+        if let Some(prev_span) = names.insert(
+            method.selector.value.to_string(),
+            method.selector.location.span(),
+        ) {
             return Err(VmError::MethodCollision {
-                span: method.selector.span(),
+                span: method.selector.location.span(),
                 prev_span,
                 name: method.selector.value.to_string(),
                 class_method,
@@ -180,7 +193,9 @@ impl<'gc> Vm<'gc> {
         impl DefaultVisitorMut for NameResolver<'_> {
             fn visit_expr(&mut self, expr: &mut ast::Expr) {
                 if let ast::Expr::UnresolvedName(_) = expr {
-                    let ast::Expr::UnresolvedName(name) = mem::take(expr) else { unreachable!() };
+                    let ast::Expr::UnresolvedName(name) = mem::take(expr) else {
+                        unreachable!()
+                    };
 
                     *expr = if self.fields.contains(name.0.value.as_str()) {
                         ast::Expr::Field(ast::Field(name.0))
@@ -198,13 +213,14 @@ impl<'gc> Vm<'gc> {
 
         // add an implicit return in the method body
         match code.body.last() {
-            Some(ast::Stmt::Return(_)) => {},
+            Some(ast::Stmt::Return(_)) => {}
             Some(ast::Stmt::NonLocalReturn(_)) => unreachable!(),
             Some(ast::Stmt::Dummy) => panic!("Stmt::Dummy in AST"),
 
             Some(ast::Stmt::Expr(_)) | None => {
                 let local = ast::Expr::Local(ast::Local(Spanned::new_builtin("self".into())));
-                code.body.push(ast::Stmt::Return(Spanned::new_builtin(local)));
+                code.body
+                    .push(ast::Stmt::Return(Spanned::new_builtin(local)));
             }
         }
 
@@ -216,16 +232,20 @@ impl<'gc> Vm<'gc> {
                     Some(stmt) => {
                         *stmt = match mem::take(stmt) {
                             ast::Stmt::Return(expr) => ast::Stmt::NonLocalReturn(expr),
-                            ast::Stmt::NonLocalReturn(_) =>
-                                unreachable!("NonLocalReturn must not be present before this run"),
+                            ast::Stmt::NonLocalReturn(_) => {
+                                unreachable!("NonLocalReturn must not be present before this run")
+                            }
                             ast::Stmt::Expr(expr) => ast::Stmt::Return(expr),
                             ast::Stmt::Dummy => panic!("Stmt::Dummy in AST"),
                         };
                     }
 
                     None => {
-                        let nil = ast::Expr::Global(ast::Global(Spanned::new_builtin("nil".into())));
-                        block.body.push(ast::Stmt::Return(Spanned::new_builtin(nil)));
+                        let nil =
+                            ast::Expr::Global(ast::Global(Spanned::new_builtin("nil".into())));
+                        block
+                            .body
+                            .push(ast::Stmt::Return(Spanned::new_builtin(nil)));
                     }
                 }
 
@@ -242,18 +262,20 @@ impl<'gc> Vm<'gc> {
     fn resolve_primitive(
         &self,
         class_name: &str,
-        selector: &Spanned<ast::Selector>,
+        selector: &ast::SpannedSelector,
     ) -> Result<Primitive, VmError> {
-        Primitive::from_selector(class_name, &selector.value).ok_or_else(|| VmError::UnknownPrimitive {
-            span: selector.span(),
-            name: selector.value.to_string(),
-            class_name: class_name.to_owned(),
+        Primitive::from_selector(class_name, &selector.value).ok_or_else(|| {
+            VmError::UnknownPrimitive {
+                span: selector.location.span(),
+                name: selector.value.to_string(),
+                class_name: class_name.to_owned(),
+            }
         })
     }
 
     fn make_method(
         &self,
-        selector: Spanned<ast::Selector>,
+        selector: ast::SpannedSelector,
         location: Location,
         def: Spanned<MethodDef>,
     ) -> TypedValue<'gc, tag::Method> {
@@ -269,7 +291,8 @@ impl<'gc> Vm<'gc> {
 
         // TODO: make sure field assignments are consistent
         let obj = self.make_object(self.builtins().method.clone());
-        obj.get().fields.borrow_mut()[obj.get().field_idx("$method").unwrap()] = value.clone().into_value();
+        obj.get().fields.borrow_mut()[obj.get().field_idx("$method").unwrap()] =
+            value.clone().into_value();
 
         *value.get().obj.borrow_mut() = obj;
 
@@ -284,11 +307,16 @@ impl<'gc> Vm<'gc> {
         methods: Vec<TypedValue<'gc, tag::Method>>,
         instance_fields: Vec<ast::Name>,
     ) -> TypedValue<'gc, tag::Class> {
+        let method_map = methods
+            .iter()
+            .enumerate()
+            .map(|(idx, method)| (method.get().selector.value.to_string(), idx))
+            .collect();
         let cls = Class {
             name,
-            // TODO: put an actual object here
             obj: Default::default(),
             superclass,
+            method_map,
             methods,
             instance_fields,
         };
@@ -297,7 +325,8 @@ impl<'gc> Vm<'gc> {
 
         // TODO: make sure field assignments are consistent
         let obj = self.make_object(metaclass);
-        obj.get().fields.borrow_mut()[obj.get().field_idx("$class").unwrap()] = value.clone().into_value();
+        obj.get().fields.borrow_mut()[obj.get().field_idx("$class").unwrap()] =
+            value.clone().into_value();
 
         *value.get().obj.borrow_mut() = obj;
 
@@ -326,5 +355,105 @@ impl<'gc> Vm<'gc> {
 
     fn get_global(&self, name: &str) -> Option<&Value<'gc>> {
         self.globals.get(name)
+    }
+
+    pub fn run(&mut self, class: TypedValue<'gc, tag::Class>) -> Result<Value<'gc>, VmError> {
+        let method = match class.get().get_method_by_name(RUN_METHOD_NAME) {
+            Some(method) => method.clone(),
+
+            None => {
+                return Err(VmError::NoRunMethod {
+                    class_span: class.get().name.span(),
+                    class_name: class.get().name.value.clone(),
+                })
+            }
+        };
+
+        self.execute_method(method, vec![])
+    }
+
+    pub fn execute_method(
+        &mut self,
+        method: TypedValue<'gc, tag::Method>,
+        params: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, VmError> {
+        match method.get().def.value {
+            MethodDef::Code(ref block) => {
+                self.execute(block, None, Callee::Method(method.clone()), params)
+            }
+            MethodDef::Primitive(p) => self.execute_primitive(p, params),
+        }
+    }
+
+    fn execute(
+        &mut self,
+        block: &ast::Block,
+        dispatch_span: Option<Span>,
+        callee: Callee<'gc>,
+        params: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, VmError> {
+        match params.len().cmp(&block.params.len()) {
+            Ordering::Less => {
+                return Err(VmError::NotEnoughArguments {
+                    dispatch_span,
+                    callee_span: callee.location().span(),
+                    callee_name: callee.name().to_string(),
+                    expected_count: block.params.len(),
+                    provided_count: params.len(),
+                    missing_params: block.params[params.len()..].to_vec(),
+                })
+            }
+
+            Ordering::Greater => {
+                return Err(VmError::TooManyArguments {
+                    dispatch_span,
+                    callee_span: callee.location().span(),
+                    callee_name: callee.name().to_string(),
+                    expected_count: block.params.len(),
+                    provided_count: params.len(),
+                })
+            }
+
+            Ordering::Equal => {}
+        }
+
+        let mut locals = vec![];
+        let mut local_map = HashMap::new();
+
+        for (name, value) in block.params.iter().cloned().zip(params) {
+            local_map.insert(name.value.clone(), locals.len());
+            locals.push(Local {
+                name,
+                value: GcRefCell::new(value),
+            });
+        }
+
+        for local in &block.locals {
+            local_map.insert(local.value.clone(), locals.len());
+            locals.push(Local {
+                name: local.clone(),
+                value: GcRefCell::new(self.builtins().nil_object.clone().into_value()),
+            });
+        }
+
+        self.frames.push(Frame {
+            callee,
+            local_map,
+            locals,
+        });
+
+        todo!()
+    }
+
+    fn execute_primitive(
+        &mut self,
+        p: Primitive,
+        params: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, VmError> {
+        todo!()
+    }
+
+    fn execute_stmt(&mut self, stmt: &ast::Stmt) -> Result<Effect<'gc>, VmError> {
+        todo!()
     }
 }

@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::location::Span;
+use crate::location::{Span, Spanned};
 use crate::util::format_list;
 
 use super::value::Ty;
@@ -46,5 +46,42 @@ pub enum VmError {
 
         name: String,
         class_name: String,
+    },
+
+    #[error("no run method on class {class_name}")]
+    NoRunMethod {
+        #[label]
+        class_span: Option<Span>,
+
+        class_name: String,
+    },
+
+    #[error("not enough arguments to {callee_name}: {expected_count} expected, {provided_count} provided")]
+    NotEnoughArguments {
+        #[label]
+        dispatch_span: Option<Span>,
+
+        #[label = "callee defined here"]
+        callee_span: Option<Span>,
+
+        callee_name: String,
+        expected_count: usize,
+        provided_count: usize,
+        missing_params: Vec<Spanned<String>>,
+    },
+
+    #[error(
+        "too many arguments to {callee_name}: {expected_count} expected, {provided_count} provided"
+    )]
+    TooManyArguments {
+        #[label]
+        dispatch_span: Option<Span>,
+
+        #[label]
+        callee_span: Option<Span>,
+
+        callee_name: String,
+        expected_count: usize,
+        provided_count: usize,
     },
 }

@@ -118,6 +118,16 @@ impl Location {
     pub fn span(&self) -> Option<Span> {
         try_match!(*self, Location::UserCode(span) => span)
     }
+
+    pub fn convex_hull(&self, other: Location) -> Location {
+        match (self, other) {
+            (Location::UserCode(lhs), Location::UserCode(ref rhs)) => {
+                Location::UserCode(lhs.convex_hull(rhs))
+            }
+
+            _ => Location::Builtin,
+        }
+    }
 }
 
 impl From<Location> for Option<SourceSpan> {

@@ -19,7 +19,7 @@ macro_rules! define_primitives {
 
         impl Primitive {
             pub fn from_name(class_name: &str, method_name: &str) -> Option<Primitive> {
-                static PRIMITIVES: OnceLock<HashMap<(&'static str, &'static str), Primitive>> = OnceLock::new();
+                static PRIMITIVES: OnceLock<HashMap<(&str, &str), Primitive>> = OnceLock::new();
 
                 PRIMITIVES.get_or_init(|| HashMap::from([
                     $( (($class_name, $method_name), Self::$variant), )*
