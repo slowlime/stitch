@@ -85,6 +85,7 @@ define_yes_no_options! {
     enum BlockParamsAllowed;
     enum StatementFinal;
     enum SuperRecv;
+    enum IsClosure;
 }
 
 trait Matcher {
@@ -323,9 +324,20 @@ enum ResolvedVar {
     Unresolved,
 }
 
-#[derive(Default)]
+// TODO: do proper upvalue resolution
+#[derive(Debug, Clone)]
 struct Scope {
     vars: HashMap<String, Var>,
+    is_closure: IsClosure,
+}
+
+impl Scope {
+    pub fn new(is_closure: IsClosure) -> Self {
+        Self {
+            vars: Default::default(),
+            is_closure,
+        }
+    }
 }
 
 pub struct Parser<'a> {
@@ -451,16 +463,21 @@ impl<'a> Parser<'a> {
     fn resolve_var(&mut self, name: &str) -> ResolvedVar {
         // since `super` is only defined once, in the same scope as `self`, this is okay.
         let name = if name == "super" { "self" } else { name };
+        let mut up_frames = 0;
 
-        for (i, scope) in self.scopes.iter().rev().enumerate() {
+        for scope in self.scopes.iter().rev() {
             if let Some(var) = scope.vars.get(name) {
                 return match var {
-                    Var::Local(_) | Var::Recv if i == 0 => ResolvedVar::Local,
-                    Var::Local(_) | Var::Recv => ResolvedVar::Upvalue {
-                        up_frames: i.try_into().unwrap(),
+                    Var::Local(_) | Var::Recv if up_frames > 0 => ResolvedVar::Upvalue {
+                        up_frames: NonZeroUsize::new(up_frames).unwrap(),
                     },
+                    Var::Local(_) | Var::Recv => ResolvedVar::Local,
                     Var::Field(_) => ResolvedVar::Field,
                 };
+            }
+
+            if scope.is_closure.is_yes() {
+                up_frames += 1;
             }
         }
 
@@ -487,7 +504,7 @@ impl<'a> Parser<'a> {
         self.expect(Special::ParenLeft)?;
 
         let object_fields = self.parse_opt_var_list()?.unwrap_or_default();
-        self.scopes.push(Default::default());
+        self.scopes.push(Scope::new(IsClosure::No));
 
         for field in &object_fields {
             self.define_var(Into::into(&field.value), Var::Field(field.location))?;
@@ -510,7 +527,7 @@ impl<'a> Parser<'a> {
             if let Some(separator) = self.try_consume(SeparatorMatcher)? {
                 let class_fields = self.parse_opt_var_list()?.unwrap_or_default();
 
-                self.scopes.push(Default::default());
+                self.scopes.push(Scope::new(IsClosure::No));
 
                 for field in &class_fields {
                     self.define_var(Into::into(&field.value), Var::Field(field.location))?;
@@ -588,7 +605,8 @@ impl<'a> Parser<'a> {
         let (selector, params) = self.parse_pattern()?;
         self.expect(Special::Equals)?;
 
-        self.scopes.push(Default::default());
+        // methods do no close over any variables
+        self.scopes.push(Scope::new(IsClosure::No));
 
         for param in &params {
             self.define_var(param.value.clone(), Var::Local(param.location))?;
@@ -665,18 +683,11 @@ impl<'a> Parser<'a> {
             params.push(self.parse_ident(PrimitiveAllowed::Yes)?);
         }
 
-        debug_assert!(!kws.is_empty());
-        let span = kws[0]
-            .span()
-            .unwrap()
-            .convex_hull(&params.last().unwrap().span().unwrap());
-
         Ok((ast::SpannedSelector::new_keyword(kws), params))
     }
 
     fn parse_un_pattern(&mut self) -> Result<(ast::SpannedSelector, Vec<ast::Name>), ParserError> {
         let selector = self.parse_ident(PrimitiveAllowed::Yes)?;
-        let span = selector.span().unwrap();
 
         Ok((ast::SpannedSelector::new_unary(selector), vec![]))
     }
@@ -714,6 +725,7 @@ impl<'a> Parser<'a> {
                     params: vec![],
                     locals: vec![],
                     body: vec![],
+                    upvalues: vec![],
                 },
                 left.span.convex_hull(&right.span),
             ));
@@ -743,6 +755,7 @@ impl<'a> Parser<'a> {
                 params,
                 locals,
                 body,
+                upvalues: vec![],
             },
             left.span.convex_hull(&right.span),
         ))
@@ -992,7 +1005,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_block_expr(&mut self) -> Result<ast::Expr, ParserError> {
-        self.scopes.push(Default::default());
+        self.scopes.push(Scope::new(IsClosure::Yes));
 
         let block = self.bounded()?.parse_block_body(
             BlockParamsAllowed::Yes,

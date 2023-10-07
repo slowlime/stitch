@@ -22,7 +22,7 @@ pub struct Class {
 }
 
 impl AstRecurse for Class {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         for method in &self.object_methods {
             visitor.visit_method(method);
         }
@@ -32,7 +32,7 @@ impl AstRecurse for Class {
         }
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         for method in &mut self.object_methods {
             visitor.visit_method(method);
         }
@@ -51,11 +51,11 @@ pub struct Method {
 }
 
 impl AstRecurse for Method {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         self.def.value.recurse(visitor);
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         self.def.value.recurse_mut(visitor);
     }
 }
@@ -188,14 +188,14 @@ pub enum MethodDef {
 }
 
 impl AstRecurse for MethodDef {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         match self {
             MethodDef::Block(ref block) => visitor.visit_block(block),
             MethodDef::Primitive => {}
         }
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         match self {
             MethodDef::Block(ref mut block) => visitor.visit_block(block),
             MethodDef::Primitive => {}
@@ -208,16 +208,17 @@ pub struct Block {
     pub params: Vec<Name>,
     pub locals: Vec<Name>,
     pub body: Vec<Stmt>,
+    pub upvalues: Vec<String>,
 }
 
 impl AstRecurse for Block {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         for stmt in &self.body {
             visitor.visit_stmt(stmt);
         }
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         for stmt in &mut self.body {
             visitor.visit_stmt(stmt);
         }
@@ -235,7 +236,7 @@ pub enum Stmt {
 }
 
 impl AstRecurse for Stmt {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         match self {
             Self::Return(expr) | Self::NonLocalReturn(expr) | Self::Expr(expr) => {
                 visitor.visit_expr(&expr.value)
@@ -245,7 +246,7 @@ impl AstRecurse for Stmt {
         }
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         match self {
             Self::Return(expr) | Self::NonLocalReturn(expr) | Self::Expr(expr) => {
                 visitor.visit_expr(&mut expr.value)
@@ -301,7 +302,7 @@ impl Expr {
 }
 
 impl AstRecurse for Expr {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         match self {
             Self::Assign(expr) => visitor.visit_assign(expr),
             Self::Block(expr) => visitor.visit_block(&expr.value),
@@ -321,7 +322,7 @@ impl AstRecurse for Expr {
         }
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         match self {
             Self::Assign(expr) => visitor.visit_assign(expr),
             Self::Block(expr) => visitor.visit_block(&mut expr.value),
@@ -356,7 +357,7 @@ impl AssignVar {
         match self {
             AssignVar::UnresolvedName(name) => name.0.location,
             AssignVar::Local(name) => name.0.location,
-            AssignVar::Upvalue(name) => name.name.location,
+            AssignVar::Upvalue(upvalue) => upvalue.name.location,
             AssignVar::Field(name) => name.0.location,
             AssignVar::Global(name) => name.0.location,
         }
@@ -364,7 +365,7 @@ impl AssignVar {
 }
 
 impl AstRecurse for AssignVar {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         match self {
             Self::UnresolvedName(name) => visitor.visit_unresolved_name(name),
             Self::Local(local) => visitor.visit_local(local),
@@ -374,7 +375,7 @@ impl AstRecurse for AssignVar {
         }
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         match self {
             Self::UnresolvedName(name) => visitor.visit_unresolved_name(name),
             Self::Local(local) => visitor.visit_local(local),
@@ -393,12 +394,12 @@ pub struct Assign {
 }
 
 impl AstRecurse for Assign {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         self.var.recurse(visitor);
         visitor.visit_expr(&self.value);
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         self.var.recurse_mut(visitor);
         visitor.visit_expr(&mut self.value);
     }
@@ -408,13 +409,13 @@ impl AstRecurse for Assign {
 pub struct ArrayLit(pub Spanned<Vec<Expr>>);
 
 impl AstRecurse for ArrayLit {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         for elem in &self.0.value {
             visitor.visit_expr(elem);
         }
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         for elem in &mut self.0.value {
             visitor.visit_expr(elem);
         }
@@ -455,7 +456,7 @@ pub struct Dispatch {
 }
 
 impl AstRecurse for Dispatch {
-    fn recurse<V: visit::Visitor>(&self, visitor: &mut V) {
+    fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         visitor.visit_expr(&self.recv);
 
         for arg in &self.args {
@@ -463,7 +464,7 @@ impl AstRecurse for Dispatch {
         }
     }
 
-    fn recurse_mut<V: visit::VisitorMut>(&mut self, visitor: &mut V) {
+    fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         visitor.visit_expr(&mut self.recv);
 
         for arg in &mut self.args {

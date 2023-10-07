@@ -1,68 +1,68 @@
 use crate::ast;
 
 pub trait AstRecurse {
-    fn recurse<V: Visitor>(&self, visitor: &mut V);
-    fn recurse_mut<V: VisitorMut>(&mut self, visitor: &mut V);
+    fn recurse<'a, V: Visitor<'a>>(&'a self, visitor: &mut V);
+    fn recurse_mut<'a, V: VisitorMut<'a>>(&'a mut self, visitor: &mut V);
 }
 
 macro_rules! define_visitor {
     ($( $type:ident { $( $name:ident ( $arg:ident : $ty:ty ) );+ $(;)? } )+) => {
-        pub trait Visitor
+        pub trait Visitor<'a>
         where
             Self: Sized,
         {
             $(
                 $(
-                    fn $name(&mut self, $arg: &$ty);
+                    fn $name(&mut self, $arg: &'a $ty);
                 )+
             )+
         }
 
-        pub trait VisitorMut
+        pub trait VisitorMut<'a>
         where
             Self: Sized,
         {
             $(
                 $(
-                    fn $name(&mut self, $arg: &mut $ty);
+                    fn $name(&mut self, $arg: &'a mut $ty);
                 )+
             )+
         }
 
-        pub trait DefaultVisitor
+        pub trait DefaultVisitor<'a>
         where
             Self: Sized,
         {
-            $( define_visitor!(@ $type { $( $name ( $arg : &$ty ) => recurse; )+ } ); )+
+            $( define_visitor!(@ $type { $( $name ( $arg : &'a $ty ) => recurse; )+ } ); )+
         }
 
-        impl<T> Visitor for T
+        impl<'a, T> Visitor<'a> for T
         where
-            T: DefaultVisitor,
+            T: DefaultVisitor<'a>,
         {
             $(
                 $(
-                    fn $name(&mut self, $arg: &$ty) {
+                    fn $name(&mut self, $arg: &'a $ty) {
                         <Self as DefaultVisitor>::$name(self, $arg);
                     }
                 )+
             )+
         }
 
-        pub trait DefaultVisitorMut
+        pub trait DefaultVisitorMut<'a>
         where
             Self: Sized,
         {
-            $( define_visitor!(@ $type { $( $name ( $arg : &mut $ty ) => recurse_mut; )+ } ); )+
+            $( define_visitor!(@ $type { $( $name ( $arg : &'a mut $ty ) => recurse_mut; )+ } ); )+
         }
 
-        impl<T> VisitorMut for T
+        impl<'a, T> VisitorMut<'a> for T
         where
-            T: DefaultVisitorMut,
+            T: DefaultVisitorMut<'a>,
         {
             $(
                 $(
-                    fn $name(&mut self, $arg: &mut $ty) {
+                    fn $name(&mut self, $arg: &'a  mut $ty) {
                         <Self as DefaultVisitorMut>::$name(self, $arg);
                     }
                 )+

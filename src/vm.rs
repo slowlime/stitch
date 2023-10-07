@@ -7,9 +7,10 @@ mod value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::mem;
+use std::num::NonZeroUsize;
 
 use crate::ast;
-use crate::ast::visit::{AstRecurse, DefaultVisitorMut};
+use crate::ast::visit::{AstRecurse, DefaultVisitor, DefaultVisitorMut};
 use crate::location::{Location, Span, Spanned};
 use crate::vm::frame::Local;
 
@@ -50,6 +51,209 @@ fn check_method_name_collisions(
     }
 
     Ok(())
+}
+
+fn resolve_names(block: &mut ast::Block, fields: &HashSet<&str>) {
+    struct NameResolver<'a> {
+        fields: &'a HashSet<&'a str>,
+    }
+
+    impl DefaultVisitorMut<'_> for NameResolver<'_> {
+        fn visit_expr(&mut self, expr: &mut ast::Expr) {
+            if let ast::Expr::UnresolvedName(_) = expr {
+                let ast::Expr::UnresolvedName(name) = mem::take(expr) else {
+                    unreachable!()
+                };
+
+                *expr = if self.fields.contains(name.0.value.as_str()) {
+                    ast::Expr::Field(ast::Field(name.0))
+                } else {
+                    ast::Expr::Global(ast::Global(name.0))
+                };
+            } else {
+                expr.recurse_mut(self);
+            }
+        }
+    }
+
+    NameResolver { fields }.visit_block(block)
+}
+
+fn resolve_upvalues(code: &mut ast::Block) {
+    type UpvalueVec = Vec<String>;
+
+    #[derive(Default)]
+    struct UpvalueResolver<'a> {
+        frames: Vec<&'a mut UpvalueVec>,
+    }
+
+    impl UpvalueResolver<'_> {
+        fn capture_var(&mut self, name: &str, up_frames: NonZeroUsize) {
+            // frames[frames.len() - 1 - up_frames] is the scope that defines the local
+            // so frames[(frames.len() - up_frames)..] would all be capturing the variable
+            for upvalues in self.frames.iter_mut().rev().take(up_frames.get()) {
+                if !upvalues.iter().any(|upvalue| upvalue == name) {
+                    upvalues.push(name.to_owned());
+                } else {
+                    // only register each upvalue once
+                    break;
+                }
+            }
+        }
+    }
+
+    impl<'a> DefaultVisitorMut<'a> for UpvalueResolver<'a> {
+        fn visit_block(&mut self, block: &'a mut ast::Block) {
+            self.frames.push(&mut block.upvalues);
+
+            for stmt in &mut block.body {
+                self.visit_stmt(stmt);
+            }
+        }
+
+        fn visit_field(&mut self, _field: &'a mut ast::Field) {
+            if self.frames.len() == 1 {
+                // `self` is a local (not an upvalue) -- nothing to do
+                return;
+            }
+
+            // otherwise field access implicitly captures `self` in the outer scope
+            self.capture_var("self", NonZeroUsize::new(self.frames.len() - 1).unwrap());
+        }
+
+        fn visit_upvalue(&mut self, upvalue: &'a mut ast::Upvalue) {
+            self.capture_var(&upvalue.name.value, upvalue.up_frames);
+        }
+    }
+
+    assert!(
+        code.upvalues.is_empty(),
+        "method must not capture anything!"
+    );
+    UpvalueResolver::default().visit_block(code);
+}
+
+fn add_implicit_returns(code: &mut ast::Block) {
+    match code.body.last() {
+        Some(ast::Stmt::Return(_)) => {}
+        Some(ast::Stmt::NonLocalReturn(_)) => unreachable!(),
+        Some(ast::Stmt::Dummy) => panic!("Stmt::Dummy in AST"),
+
+        Some(ast::Stmt::Expr(_)) | None => {
+            let local = ast::Expr::Local(ast::Local(Spanned::new_builtin("self".into())));
+            code.body
+                .push(ast::Stmt::Return(Spanned::new_builtin(local)));
+        }
+    }
+
+    struct BlockReturns;
+
+    impl DefaultVisitorMut<'_> for BlockReturns {
+        fn visit_block(&mut self, block: &mut ast::Block) {
+            match block.body.last_mut() {
+                Some(stmt) => {
+                    *stmt = match mem::take(stmt) {
+                        ast::Stmt::Return(expr) => ast::Stmt::NonLocalReturn(expr),
+                        ast::Stmt::NonLocalReturn(_) => {
+                            unreachable!("NonLocalReturn must not be present before this run")
+                        }
+                        ast::Stmt::Expr(expr) => ast::Stmt::Return(expr),
+                        ast::Stmt::Dummy => panic!("Stmt::Dummy in AST"),
+                    };
+                }
+
+                None => {
+                    let nil = ast::Expr::Global(ast::Global(Spanned::new_builtin("nil".into())));
+                    block
+                        .body
+                        .push(ast::Stmt::Return(Spanned::new_builtin(nil)));
+                }
+            }
+
+            block.recurse_mut(self);
+        }
+    }
+
+    // add implicit returns in block bodies
+    code.recurse_mut(&mut BlockReturns);
+}
+
+fn check_method_code(code: &ast::Block, fields: &HashSet<&str>) {
+    struct Checker<'a> {
+        frame_idx: usize,
+        captured_upvalues: &'a [String],
+        locals: &'a [Spanned<String>],
+        fields: &'a HashSet<&'a str>,
+    }
+
+    impl<'a> DefaultVisitor<'a> for Checker<'a> {
+        fn visit_unresolved_name(&mut self, name: &'a ast::UnresolvedName) {
+            panic!("name {} left unresolved", name.0.value);
+        }
+
+        fn visit_block(&mut self, block: &'a ast::Block) {
+            self.frame_idx += 1;
+            let captured_upvalues = mem::replace(&mut self.captured_upvalues, &block.upvalues);
+
+            for name in &block.upvalues {
+                assert!(
+                    block.locals.iter().any(|local| local.value == *name)
+                        || captured_upvalues.contains(name),
+                    "upvalue {name} must either capture an upvalue or a local in the immediately enclosing frame"
+                );
+            }
+
+            let locals = mem::replace(&mut self.locals, &block.locals);
+
+            block.recurse(self);
+
+            self.locals = locals;
+            self.captured_upvalues = captured_upvalues;
+            self.frame_idx -= 1;
+        }
+
+        fn visit_field(&mut self, field: &'a ast::Field) {
+            if self.frame_idx > 1 {
+                assert!(
+                    self.captured_upvalues.iter().any(|name| name == "self"),
+                    "`self` implicitly captured by field access but missing from the upvalue list"
+                );
+            }
+
+            assert!(
+                self.fields.contains(field.0.value.as_str()),
+                "unknown field `{}`",
+                field.0.value
+            );
+        }
+
+        fn visit_upvalue(&mut self, upvalue: &'a ast::Upvalue) {
+            assert!(
+                self.captured_upvalues.contains(&upvalue.name.value),
+                "upvalue {} not captured",
+                upvalue.name.value
+            );
+        }
+
+        fn visit_local(&mut self, local: &'a ast::Local) {
+            assert!(
+                self.locals.iter().any(|name| name.value == local.0.value),
+                "unknown local `{}`",
+                local.0.value
+            );
+        }
+    }
+
+    assert!(code.upvalues.is_empty(), "method captures a variable");
+
+    let mut checker = Checker {
+        frame_idx: 0,
+        captured_upvalues: &[],
+        locals: &[],
+        fields,
+    };
+
+    checker.visit_block(code);
 }
 
 pub struct Builtins<'gc> {
@@ -186,75 +390,13 @@ impl<'gc> Vm<'gc> {
     }
 
     fn process_method_code(&self, mut code: ast::Block, fields: &HashSet<&str>) -> ast::Block {
-        struct NameResolver<'a> {
-            fields: &'a HashSet<&'a str>,
+        resolve_names(&mut code, fields);
+        resolve_upvalues(&mut code);
+        add_implicit_returns(&mut code);
+
+        if cfg!(debug_assertions) {
+            check_method_code(&code, fields);
         }
-
-        impl DefaultVisitorMut for NameResolver<'_> {
-            fn visit_expr(&mut self, expr: &mut ast::Expr) {
-                if let ast::Expr::UnresolvedName(_) = expr {
-                    let ast::Expr::UnresolvedName(name) = mem::take(expr) else {
-                        unreachable!()
-                    };
-
-                    *expr = if self.fields.contains(name.0.value.as_str()) {
-                        ast::Expr::Field(ast::Field(name.0))
-                    } else {
-                        ast::Expr::Global(ast::Global(name.0))
-                    };
-                } else {
-                    expr.recurse_mut(self);
-                }
-            }
-        }
-
-        // resolve UnresolvedNames now that all information is available
-        NameResolver { fields }.visit_block(&mut code);
-
-        // add an implicit return in the method body
-        match code.body.last() {
-            Some(ast::Stmt::Return(_)) => {}
-            Some(ast::Stmt::NonLocalReturn(_)) => unreachable!(),
-            Some(ast::Stmt::Dummy) => panic!("Stmt::Dummy in AST"),
-
-            Some(ast::Stmt::Expr(_)) | None => {
-                let local = ast::Expr::Local(ast::Local(Spanned::new_builtin("self".into())));
-                code.body
-                    .push(ast::Stmt::Return(Spanned::new_builtin(local)));
-            }
-        }
-
-        struct BlockReturns;
-
-        impl DefaultVisitorMut for BlockReturns {
-            fn visit_block(&mut self, block: &mut ast::Block) {
-                match block.body.last_mut() {
-                    Some(stmt) => {
-                        *stmt = match mem::take(stmt) {
-                            ast::Stmt::Return(expr) => ast::Stmt::NonLocalReturn(expr),
-                            ast::Stmt::NonLocalReturn(_) => {
-                                unreachable!("NonLocalReturn must not be present before this run")
-                            }
-                            ast::Stmt::Expr(expr) => ast::Stmt::Return(expr),
-                            ast::Stmt::Dummy => panic!("Stmt::Dummy in AST"),
-                        };
-                    }
-
-                    None => {
-                        let nil =
-                            ast::Expr::Global(ast::Global(Spanned::new_builtin("nil".into())));
-                        block
-                            .body
-                            .push(ast::Stmt::Return(Spanned::new_builtin(nil)));
-                    }
-                }
-
-                block.recurse_mut(self);
-            }
-        }
-
-        // add implicit returns in block bodies
-        code.recurse_mut(&mut BlockReturns);
 
         code
     }
