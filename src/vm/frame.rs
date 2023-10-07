@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::rc::Rc;
 
 use crate::ast;
 use crate::location::Location;
@@ -12,23 +13,29 @@ pub struct CalleeName<'s, 'gc>(&'s Callee<'gc>);
 impl Display for CalleeName<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Callee::Method(value) => write!(f, "method {}", value.get().selector.value.name()),
-            Callee::Block(_) => write!(f, "<block>"),
+            Callee::Method { value, .. } => write!(f, "method {}", value.get().selector.value.name()),
+            Callee::Block { .. } => write!(f, "<block>"),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Callee<'gc> {
-    Method(TypedValue<'gc, tag::Method>),
-    Block(TypedValue<'gc, tag::Block>),
+    Method {
+        value: TypedValue<'gc, tag::Method>,
+        nlret_valid_flag: Rc<()>,
+    },
+
+    Block {
+        value: TypedValue<'gc, tag::Block>,
+    }
 }
 
 impl<'gc> Callee<'gc> {
     pub fn location(&self) -> Location {
         match self {
-            Self::Method(value) => value.get().location,
-            Self::Block(value) => value.get().location,
+            Self::Method { value, .. } => value.get().location,
+            Self::Block { value } => value.get().location,
         }
     }
 

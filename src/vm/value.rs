@@ -1,8 +1,7 @@
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::marker::PhantomData;
-use std::rc::Rc;
+use std::rc::Weak;
 
 use crate::ast::{self, SymbolLit as Symbol};
 use crate::impl_collect;
@@ -265,7 +264,8 @@ unsafe impl<T: Tag> Collect for TypedValue<'_, T> {
 #[derive(Debug, Clone)]
 pub struct Block<'gc> {
     pub location: Location,
-    pub nlret_valid_flag: Rc<Cell<bool>>,
+    // the strong reference is held in Frame
+    pub nlret_valid_flag: Weak<()>,
     pub code: ast::Block,
     // TODO
     pub upvalues: Vec<Value<'gc>>,

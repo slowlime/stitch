@@ -1,5 +1,5 @@
 mod error;
-mod exec;
+mod eval;
 mod frame;
 pub mod gc;
 mod method;
@@ -16,7 +16,7 @@ use crate::location::{Location, Span, Spanned};
 use crate::vm::frame::Local;
 
 use self::error::VmError;
-use self::exec::Effect;
+use self::eval::Effect;
 use self::frame::{Callee, Frame};
 use self::gc::{GarbageCollector, GcRefCell};
 use self::method::{MethodDef, Primitive};
@@ -201,9 +201,31 @@ fn check_method_code(code: &ast::Block, fields: &HashSet<&str>) {
 
             block.recurse(self);
 
+            match block.body.last() {
+                Some(ast::Stmt::Return(_) | ast::Stmt::NonLocalReturn(_)) => {}
+                _ => panic!("block must be terminated with Stmt::Return / Stmt::NonLocalReturn"),
+            }
+
             self.locals = locals;
             self.captured_upvalues = captured_upvalues;
             self.frame_idx -= 1;
+        }
+
+        fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
+            match stmt {
+                ast::Stmt::NonLocalReturn(_) if self.frame_idx <= 1 => {
+                    panic!("Stmt::NonLocalReturn in method body")
+                }
+                ast::Stmt::Dummy => panic!("Stmt::Dummy in AST"),
+                _ => {}
+            }
+        }
+
+        fn visit_expr(&mut self, expr: &'a ast::Expr) {
+            match expr {
+                ast::Expr::Dummy => panic!("Expr::Dummy in AST"),
+                _ => {}
+            }
         }
 
         fn visit_field(&mut self, field: &'a ast::Field) {
@@ -515,7 +537,15 @@ impl<'gc> Vm<'gc> {
     ) -> Result<Value<'gc>, VmError> {
         match method.get().def.value {
             MethodDef::Code(ref block) => {
-                self.push_frame(block, None, Callee::Method(method.clone()), params);
+                self.push_frame(
+                    block,
+                    None,
+                    Callee::Method {
+                        value: method.clone(),
+                        nlret_valid_flag: Default::default(),
+                    },
+                    params,
+                )?;
                 self.execute(block)
             }
 
@@ -541,12 +571,17 @@ impl<'gc> Vm<'gc> {
 
     // assumes the frame is already pushed
     fn execute(&mut self, block: &ast::Block) -> Result<Value<'gc>, VmError> {
-        assert!(self.frames.len() == 1, "expected exactly one frame on the stack");
+        assert!(
+            self.frames.len() == 1,
+            "expected exactly one frame on the stack"
+        );
 
-        let result = match block.exec(self) {
-            Effect::None => panic!("block has no return statement"),
+        let result = match block.eval(self) {
+            Effect::None(_) => panic!("block has no return statement"),
             Effect::Return(value) => Ok(value),
-            Effect::NonLocalReturn { value, up_frames } => panic!("NonLocalReturn through top-level frame"),
+            Effect::NonLocalReturn { value, up_frames } => {
+                panic!("NonLocalReturn through top-level frame")
+            }
             Effect::Unwind(e) => Err(e),
         };
 

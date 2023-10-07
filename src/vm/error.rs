@@ -84,4 +84,13 @@ pub enum VmError {
         expected_count: usize,
         provided_count: usize,
     },
+
+    #[error("non-local return from an escaped block")]
+    NlRetFromEscapedBlock {
+        #[label]
+        ret_span: Option<Span>,
+
+        // TODO:
+        // method_span: Option<Span>,
+    },
 }
