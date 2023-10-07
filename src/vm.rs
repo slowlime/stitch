@@ -1,4 +1,5 @@
 mod error;
+mod exec;
 mod frame;
 pub mod gc;
 mod method;
@@ -15,20 +16,13 @@ use crate::location::{Location, Span, Spanned};
 use crate::vm::frame::Local;
 
 use self::error::VmError;
+use self::exec::Effect;
 use self::frame::{Callee, Frame};
 use self::gc::{GarbageCollector, GcRefCell};
 use self::method::{MethodDef, Primitive};
 use self::value::{tag, Class, IntoValue, Method, Object, TypedValue, Value};
 
 pub const RUN_METHOD_NAME: &str = "run";
-
-enum Effect<'gc> {
-    None,
-
-    Return(Value<'gc>),
-
-    NonLocalReturn { value: Value<'gc>, up_frames: usize },
-}
 
 fn check_method_name_collisions(
     class_method: bool,
@@ -521,19 +515,54 @@ impl<'gc> Vm<'gc> {
     ) -> Result<Value<'gc>, VmError> {
         match method.get().def.value {
             MethodDef::Code(ref block) => {
-                self.execute(block, None, Callee::Method(method.clone()), params)
+                self.push_frame(block, None, Callee::Method(method.clone()), params);
+                self.execute(block)
             }
+
             MethodDef::Primitive(p) => self.execute_primitive(p, params),
         }
     }
 
-    fn execute(
+    pub fn execute_block(
+        &mut self,
+        block: TypedValue<'gc, tag::Block>,
+        params: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, VmError> {
+        todo!()
+    }
+
+    fn execute_primitive(
+        &mut self,
+        p: Primitive,
+        params: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, VmError> {
+        todo!()
+    }
+
+    // assumes the frame is already pushed
+    fn execute(&mut self, block: &ast::Block) -> Result<Value<'gc>, VmError> {
+        assert!(self.frames.len() == 1, "expected exactly one frame on the stack");
+
+        let result = match block.exec(self) {
+            Effect::None => panic!("block has no return statement"),
+            Effect::Return(value) => Ok(value),
+            Effect::NonLocalReturn { value, up_frames } => panic!("NonLocalReturn through top-level frame"),
+            Effect::Unwind(e) => Err(e),
+        };
+
+        self.pop_frame();
+        assert!(self.frames.is_empty(), "frame push/pop mismatch");
+
+        result
+    }
+
+    fn push_frame(
         &mut self,
         block: &ast::Block,
         dispatch_span: Option<Span>,
         callee: Callee<'gc>,
         params: Vec<Value<'gc>>,
-    ) -> Result<Value<'gc>, VmError> {
+    ) -> Result<(), VmError> {
         match params.len().cmp(&block.params.len()) {
             Ordering::Less => {
                 return Err(VmError::NotEnoughArguments {
@@ -584,18 +613,10 @@ impl<'gc> Vm<'gc> {
             locals,
         });
 
-        todo!()
+        Ok(())
     }
 
-    fn execute_primitive(
-        &mut self,
-        p: Primitive,
-        params: Vec<Value<'gc>>,
-    ) -> Result<Value<'gc>, VmError> {
-        todo!()
-    }
-
-    fn execute_stmt(&mut self, stmt: &ast::Stmt) -> Result<Effect<'gc>, VmError> {
-        todo!()
+    fn pop_frame(&mut self) {
+        todo!("close upvalues and pop the frame off the stack")
     }
 }
