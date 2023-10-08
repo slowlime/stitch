@@ -362,7 +362,7 @@ impl<'gc> Vm<'gc> {
         );
 
         for method in &metaclass.get().methods {
-            *method.get().holder.borrow_mut() = metaclass.clone();
+            method.get().holder.set(metaclass.clone()).unwrap();
         }
 
         let cls = self.make_class(
@@ -374,7 +374,7 @@ impl<'gc> Vm<'gc> {
         );
 
         for method in &cls.get().methods {
-            *method.get().holder.borrow_mut() = cls.clone();
+            method.get().holder.set(cls.clone()).unwrap();
         }
 
         self.set_global(cls.get().name.value.clone(), cls.clone().into_value());
@@ -451,8 +451,7 @@ impl<'gc> Vm<'gc> {
         let obj = self.make_object(self.builtins().method.clone());
         obj.get().fields.borrow_mut()[obj.get().field_idx("$method").unwrap()] =
             value.clone().into_value();
-
-        *value.get().obj.borrow_mut() = obj;
+        value.get().obj.set(obj).unwrap();
 
         value
     }
@@ -470,12 +469,19 @@ impl<'gc> Vm<'gc> {
             .enumerate()
             .map(|(idx, method)| (method.get().selector.value.to_string(), idx))
             .collect();
+        let instance_field_map = instance_fields
+            .iter()
+            .enumerate()
+            .map(|(idx, field)| (field.value.clone(), idx))
+            .collect();
+
         let cls = Class {
             name,
             obj: Default::default(),
             superclass,
             method_map,
             methods,
+            instance_field_map,
             instance_fields,
         };
 
@@ -485,8 +491,7 @@ impl<'gc> Vm<'gc> {
         let obj = self.make_object(metaclass);
         obj.get().fields.borrow_mut()[obj.get().field_idx("$class").unwrap()] =
             value.clone().into_value();
-
-        *value.get().obj.borrow_mut() = obj;
+        value.get().obj.set(obj).unwrap();
 
         value
     }

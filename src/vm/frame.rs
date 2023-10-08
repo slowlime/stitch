@@ -1,4 +1,4 @@
-use std::cell::{Cell, OnceCell};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::rc::Rc;
@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::location::Location;
 use crate::{ast, impl_collect};
 
-use super::gc::{Collect, Finalize, Gc, GcRefCell};
+use super::gc::{Collect, Finalize, Gc, GcRefCell, GcOnceCell};
 use super::value::{tag, TypedValue, Value};
 
 pub struct CalleeName<'s, 'gc>(&'s Callee<'gc>);
@@ -65,7 +65,7 @@ impl<'gc> Frame<'gc> {
             Callee::Block { block } => block
                 .get()
                 .get_upvalue_by_name("self")
-                .map(|upvalue| &upvalue.get().value),
+                .map(|upvalue| &upvalue.get_local().value),
         }
     }
 }
@@ -90,7 +90,7 @@ unsafe impl Collect for Local<'_> {
 pub struct Upvalue<'gc> {
     pub next: GcRefCell<Option<Gc<'gc, Upvalue<'gc>>>>,
     local: Cell<*const Local<'gc>>,
-    closed_var: OnceCell<Local<'gc>>,
+    closed_var: GcOnceCell<Local<'gc>>,
 }
 
 impl<'gc> Upvalue<'gc> {
@@ -98,18 +98,17 @@ impl<'gc> Upvalue<'gc> {
         Self {
             next: GcRefCell::new(None),
             local: Cell::new(local),
-            closed_var: OnceCell::new(),
+            closed_var: GcOnceCell::new(),
         }
     }
 
-    pub fn get(&self) -> &Local<'gc> {
+    pub fn get_local(&self) -> &Local<'gc> {
         unsafe { &*self.local.get() }
     }
 
     pub fn close(&self) {
-        // FIXME: make sure *local.get() is no longer treated as a gc root
         self.closed_var
-            .set(self.get().clone())
+            .set(self.get_local().clone())
             .expect("upvalue is already closed");
         self.local.set(self.closed_var.get().unwrap());
     }
@@ -122,10 +121,7 @@ unsafe impl Collect for Upvalue<'_> {
         fn visit(&self) {
             visit(&self.next);
             // skip self.local
-
-            if let Some(local) = self.closed_var.get() {
-                visit(local);
-            }
+            visit(&self.closed_var);
         }
     }
 }

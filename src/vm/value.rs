@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use std::rc::Weak;
 
@@ -9,7 +10,7 @@ use crate::location::{Location, Span, Spanned};
 
 use super::error::VmError;
 use super::frame::Upvalue;
-use super::gc::GcRefCell;
+use super::gc::{GcRefCell, GcRef, GcRefMut, GcOnceCell};
 use super::gc::{Collect, Gc};
 use super::gc::{Finalize, GarbageCollector};
 use super::method::MethodDef;
@@ -60,6 +61,10 @@ impl<'gc> Value<'gc> {
                 actual: self.0.as_ref().unwrap().ty(),
             })
         }
+    }
+
+    pub fn get_obj(&self) -> Option<&Object<'gc>> {
+        self.0.as_ref()?.get_obj()
     }
 }
 
@@ -188,6 +193,22 @@ define_value_kind! {
     }
 }
 
+impl<'gc> ValueKind<'gc> {
+    pub fn get_obj(&self) -> Option<&Object<'gc>> {
+        match self {
+            Self::Int(_) => None,
+            Self::Float(_) => None,
+            Self::Array(_) => None,
+            Self::Block(block) => block.obj.get().map(|obj| obj.get()),
+            Self::Class(class) => class.obj.get().map(|obj| obj.get()),
+            Self::Method(method) => method.obj.get().map(|obj| obj.get()),
+            Self::Symbol(_) => None,
+            Self::Object(obj) => Some(obj),
+            Self::String(_) => None,
+        }
+    }
+}
+
 impl Finalize for ValueKind<'_> {}
 
 unsafe impl Collect for ValueKind<'_> {
@@ -265,6 +286,7 @@ unsafe impl<T: Tag> Collect for TypedValue<'_, T> {
 #[derive(Debug, Clone)]
 pub struct Block<'gc> {
     pub location: Location,
+    pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
     // the strong reference is held in Frame
     pub nlret_valid_flag: Weak<()>,
     pub code: ast::Block,
@@ -283,6 +305,7 @@ impl Finalize for Block<'_> {}
 unsafe impl Collect for Block<'_> {
     impl_collect! {
         fn visit(&self) {
+            visit(&self.obj);
             visit(&self.upvalues);
         }
     }
@@ -291,10 +314,11 @@ unsafe impl Collect for Block<'_> {
 #[derive(Debug, Clone)]
 pub struct Class<'gc> {
     pub name: Spanned<String>,
-    pub obj: GcRefCell<TypedValue<'gc, tag::Object>>,
+    pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
     pub superclass: Option<TypedValue<'gc, tag::Class>>,
     pub method_map: HashMap<String, usize>,
     pub methods: Vec<TypedValue<'gc, tag::Method>>,
+    pub instance_field_map: HashMap<String, usize>,
     pub instance_fields: Vec<ast::Name>,
 }
 
@@ -320,8 +344,8 @@ unsafe impl Collect for Class<'_> {
 pub struct Method<'gc> {
     pub selector: ast::SpannedSelector,
     pub location: Location,
-    pub obj: GcRefCell<TypedValue<'gc, tag::Object>>,
-    pub holder: GcRefCell<TypedValue<'gc, tag::Class>>,
+    pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
+    pub holder: GcOnceCell<TypedValue<'gc, tag::Class>>,
     pub def: Spanned<MethodDef>,
 }
 
@@ -342,9 +366,55 @@ pub struct Object<'gc> {
     pub fields: GcRefCell<Vec<Value<'gc>>>,
 }
 
+pub struct FieldProj<'a, 'gc> {
+    inner: GcRef<'a, Vec<Value<'gc>>>,
+    idx: usize,
+}
+
+impl<'gc> Deref for FieldProj<'_, 'gc> {
+    type Target = Value<'gc>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner[self.idx]
+    }
+}
+
+pub struct FieldProjMut<'a, 'gc> {
+    inner: GcRefMut<'a, Vec<Value<'gc>>>,
+    idx: usize,
+}
+
+impl<'gc> Deref for FieldProjMut<'_, 'gc> {
+    type Target = Value<'gc>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner[self.idx]
+    }
+}
+
+impl<'gc> DerefMut for FieldProjMut<'_, 'gc> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner[self.idx]
+    }
+}
+
 impl<'gc> Object<'gc> {
     pub fn field_idx(&self, name: &str) -> Option<usize> {
-        todo!()
+        self.class.get().instance_field_map.get(name).copied()
+    }
+
+    pub fn get_field_by_name(&self, name: &str) -> Option<FieldProj<'_, 'gc>> {
+        self.field_idx(name).map(|idx| FieldProj {
+            inner: self.fields.borrow(),
+            idx,
+        })
+    }
+
+    pub fn get_field_by_name_mut(&self, name: &str) -> Option<FieldProjMut<'_, 'gc>> {
+        self.field_idx(name).map(|idx| FieldProjMut {
+            inner: self.fields.borrow_mut(),
+            idx,
+        })
     }
 }
 
