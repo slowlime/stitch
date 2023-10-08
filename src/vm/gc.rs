@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fmt::{self, Debug, Display};
 use std::hash::{self, Hash};
 use std::marker::PhantomData;
-use std::mem::{align_of, size_of_val};
+use std::mem::{align_of, size_of_val, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 use std::ptr::{addr_of, NonNull};
 
@@ -23,7 +23,10 @@ define_yes_no_options! {
     enum Marked;
     enum Strong;
     enum Collecting;
+    enum Init;
 }
+
+// Garbage collector ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 // determines how often GC runs: we launch a collection cycle if `used/heap_size >= LOAD_FACTOR/u8::MAX`.
 const LOAD_FACTOR: u8 = 191; // ~75%
@@ -223,6 +226,8 @@ impl Drop for GarbageCollector {
     }
 }
 
+// GcBox<T> ////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 struct Header {
     vtable: &'static GcVTable,
     ref_mark: Cell<u32>,
@@ -412,6 +417,8 @@ impl GcErasedBox {
         (vtable.drop)(self.0.as_ptr())
     }
 }
+
+// Gc<T> ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 pub struct Gc<'gc, T: ?Sized> {
     inner: NonNull<GcBox<'gc, T>>,
@@ -603,6 +610,8 @@ unsafe impl<T: Collect> Collect for Gc<'_, T> {
         // so in either case the only reasonable course of action here is doing absolutely nothing.
     }
 }
+
+// GcRefCell<T> ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BorrowError {
@@ -943,6 +952,213 @@ impl<T: Collect + ?Sized> Drop for GcRefMut<'_, T> {
             unsafe {
                 (*self.cell.inner.get().cast_const()).dec_ref_count();
             }
+        }
+    }
+}
+
+// GcOnceCell<T> ///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+enum OnceCellStatus {
+    UninitWeak,
+
+    #[default]
+    UninitStrong,
+
+    InitWeak,
+    InitStrong,
+}
+
+impl OnceCellStatus {
+    fn strong(&self) -> Strong {
+        matches!(
+            self,
+            OnceCellStatus::UninitStrong | OnceCellStatus::InitStrong
+        )
+        .into()
+    }
+
+    fn init(&self) -> Init {
+        matches!(self, OnceCellStatus::InitWeak | OnceCellStatus::InitStrong).into()
+    }
+
+    fn with_strong(self, strong: Strong) -> Self {
+        if strong.is_yes() {
+            match self {
+                Self::UninitWeak => Self::UninitStrong,
+                Self::InitWeak => Self::InitStrong,
+                _ => self,
+            }
+        } else {
+            match self {
+                Self::UninitStrong => Self::UninitWeak,
+                Self::InitStrong => Self::InitWeak,
+                _ => self,
+            }
+        }
+    }
+
+    fn with_init(self, init: Init) -> Self {
+        if init.is_yes() {
+            match self {
+                Self::UninitWeak => Self::InitWeak,
+                Self::UninitStrong => Self::InitStrong,
+                _ => self,
+            }
+        } else {
+            match self {
+                Self::InitWeak => Self::UninitWeak,
+                Self::InitStrong => Self::UninitStrong,
+                _ => self,
+            }
+        }
+    }
+}
+
+pub struct GcOnceCell<T> {
+    status: Cell<OnceCellStatus>,
+    inner: UnsafeCell<MaybeUninit<T>>,
+}
+
+impl<T> GcOnceCell<T> {
+    pub fn new() -> Self {
+        Self {
+            status: Default::default(),
+            inner: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    pub fn new_init(value: T) -> Self {
+        Self {
+            status: Cell::new(OnceCellStatus::InitStrong),
+            inner: UnsafeCell::new(MaybeUninit::new(value)),
+        }
+    }
+
+    pub fn get(&self) -> Option<&T> {
+        if self.status.get().init().is_yes() {
+            Some(unsafe { (*self.inner.get()).assume_init_ref() })
+        } else {
+            None
+        }
+    }
+}
+
+impl<T: Collect> GcOnceCell<T> {
+    pub fn set(&self, value: T) -> Result<(), T> {
+        let status = self.status.get();
+
+        if status.init().is_yes() {
+            return Err(value);
+        }
+
+        let inner = unsafe { (*self.inner.get()).write(value) };
+
+        if status.strong().is_no() {
+            // self is on the garbage-collected heap, so value is no longer a root
+            unsafe {
+                inner.dec_ref_count();
+            }
+        }
+
+        self.status.set(status.with_init(Init::Yes));
+
+        Ok(())
+    }
+
+    pub fn get_or_init<F>(&self, f: F) -> &T
+    where
+        F: FnOnce() -> T,
+    {
+        if let Some(value) = self.get() {
+            return value;
+        }
+
+        let value = f();
+        assert!(self.set(value).is_ok(), "reentrant initialization");
+
+        self.get().unwrap()
+    }
+}
+
+impl<T> Drop for GcOnceCell<T> {
+    fn drop(&mut self) {
+        if self.status.get().init().is_yes() {
+            unsafe { self.inner.get_mut().assume_init_drop() };
+        }
+    }
+}
+
+impl<T> Default for GcOnceCell<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Debug> Debug for GcOnceCell<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut d = f.debug_tuple("GcOnceCell");
+
+        match self.get() {
+            Some(value) => d.field(value),
+            None => d.field(&"<uninit>"),
+        };
+
+        d.finish()
+    }
+}
+
+impl<T: Clone> Clone for GcOnceCell<T> {
+    fn clone(&self) -> Self {
+        match self.get() {
+            Some(value) => Self::new_init(value.clone()),
+            None => Self::new(),
+        }
+    }
+}
+
+impl<T: PartialEq> PartialEq for GcOnceCell<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl<T: Eq> Eq for GcOnceCell<T> {}
+
+impl<T> Finalize for GcOnceCell<T> {}
+
+unsafe impl<T: Collect> Collect for GcOnceCell<T> {
+    unsafe fn mark(&self) {
+        if let Some(value) = self.get() {
+            value.mark();
+        }
+    }
+
+    unsafe fn inc_ref_count(&self) {
+        let status = self.status.get();
+        assert!(status.strong().is_no(), "trying to upgrade a root");
+        self.status.set(status.with_strong(Strong::Yes));
+
+        if let Some(value) = self.get() {
+            value.inc_ref_count();
+        }
+    }
+
+    unsafe fn dec_ref_count(&self) {
+        let status = self.status.get();
+        assert!(status.strong().is_yes(), "trying to downgrade a non-root");
+        self.status.set(status.with_strong(Strong::No));
+
+        if let Some(value) = self.get() {
+            value.dec_ref_count();
+        }
+    }
+
+    unsafe fn run_finalizers(&self) {
+        self.finalize();
+
+        if let Some(value) = self.get() {
+            value.run_finalizers();
         }
     }
 }

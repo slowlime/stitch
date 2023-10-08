@@ -3,8 +3,9 @@ use std::mem;
 use std::rc::Rc;
 
 use stitch::impl_collect;
-use stitch::vm::gc::{Collect, Finalize, GarbageCollector, Gc, GcRefCell};
+use stitch::vm::gc::{Collect, Finalize, GarbageCollector, Gc, GcRefCell, GcOnceCell};
 
+#[derive(Debug)]
 struct DropFlagger(Rc<Cell<usize>>);
 
 impl DropFlagger {
@@ -60,6 +61,27 @@ fn test_gc_ref_cell() {
     *a.0.borrow_mut() = Some(b);
 
     drop(a);
+}
+
+#[test]
+fn test_gc_once_cell() {
+    let cell = GcOnceCell::<Gc<DropFlagger>>::new();
+    // should do nothing
+    drop(cell);
+
+    let gc = GarbageCollector::new();
+
+    let cell = Gc::new(&gc, GcOnceCell::<Gc<DropFlagger>>::new());
+    // should do nothing
+    drop(cell);
+
+    let cell = Gc::new(&gc, GcOnceCell::<Gc<DropFlagger>>::new());
+    let (flagger, flag) = DropFlagger::new();
+    cell.set(Gc::new(&gc, flagger)).expect("init must succeed");
+    assert_eq!(flag.get(), 0);
+    drop(cell);
+    gc.collect();
+    assert_eq!(flag.get(), 1);
 }
 
 #[test]
