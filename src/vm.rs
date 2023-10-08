@@ -541,7 +541,7 @@ impl<'gc> Vm<'gc> {
                     block,
                     None,
                     Callee::Method {
-                        value: method.clone(),
+                        method: method.clone(),
                         nlret_valid_flag: Default::default(),
                     },
                     params,

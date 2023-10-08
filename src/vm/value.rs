@@ -8,6 +8,7 @@ use crate::impl_collect;
 use crate::location::{Location, Span, Spanned};
 
 use super::error::VmError;
+use super::frame::Upvalue;
 use super::gc::GcRefCell;
 use super::gc::{Collect, Gc};
 use super::gc::{Finalize, GarbageCollector};
@@ -267,8 +268,14 @@ pub struct Block<'gc> {
     // the strong reference is held in Frame
     pub nlret_valid_flag: Weak<()>,
     pub code: ast::Block,
-    // TODO
-    pub upvalues: Vec<Value<'gc>>,
+    pub upvalue_map: HashMap<String, usize>,
+    pub upvalues: Vec<Upvalue<'gc>>,
+}
+
+impl<'gc> Block<'gc> {
+    pub fn get_upvalue_by_name(&self, name: &str) -> Option<&Upvalue<'gc>> {
+        self.upvalue_map.get(name).map(|&idx| &self.upvalues[idx])
+    }
 }
 
 impl Finalize for Block<'_> {}
