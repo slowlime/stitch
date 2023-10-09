@@ -215,37 +215,47 @@ impl ast::Assign {
 
 impl Spanned<ast::Block> {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        todo!()
+        // TODO: whoa, cloning the whole ast here seems excessive
+        Effect::None(vm.make_block(self.clone()).into_value())
     }
 }
 
 impl ast::ArrayLit {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        todo!()
+        let mut values = vec![];
+
+        for expr in &self.0.value {
+            match expr.eval(vm) {
+                Effect::None(value) => values.push(value),
+                eff => return eff,
+            }
+        }
+
+        Effect::None(vm.make_array(values).into_value())
     }
 }
 
 impl ast::SymbolLit {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        todo!()
+        Effect::None(vm.make_symbol(self.clone()).into_value())
     }
 }
 
 impl ast::StringLit {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        todo!()
+        Effect::None(vm.make_string(self.0.value.clone()).into_value())
     }
 }
 
 impl ast::IntLit {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        todo!()
+        Effect::None(vm.make_int(self.0.value).into_value())
     }
 }
 
 impl ast::FloatLit {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        todo!()
+        Effect::None(vm.make_float(self.0.value).into_value())
     }
 }
 
@@ -256,7 +266,7 @@ impl ast::Dispatch {
 }
 
 impl ast::UnresolvedName {
-    pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
+    pub(super) fn eval<'gc>(&self, _vm: &mut Vm<'gc>) -> Effect<'gc> {
         panic!("UnresolvedName in AST");
     }
 }

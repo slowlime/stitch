@@ -291,12 +291,12 @@ pub struct Block<'gc> {
     pub nlret_valid_flag: Weak<()>,
     pub code: ast::Block,
     pub upvalue_map: HashMap<String, usize>,
-    pub upvalues: Vec<Upvalue<'gc>>,
+    pub upvalues: Vec<Gc<'gc, Upvalue<'gc>>>,
 }
 
 impl<'gc> Block<'gc> {
     pub fn get_upvalue_by_name(&self, name: &str) -> Option<&Upvalue<'gc>> {
-        self.upvalue_map.get(name).map(|&idx| &self.upvalues[idx])
+        self.upvalue_map.get(name).map(|&idx| &*self.upvalues[idx])
     }
 }
 

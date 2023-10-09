@@ -5,20 +5,24 @@ pub mod gc;
 mod method;
 mod value;
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::num::NonZeroUsize;
+use std::ptr;
+use std::rc::Rc;
 
 use crate::ast;
 use crate::ast::visit::{AstRecurse, DefaultVisitor, DefaultVisitorMut};
 use crate::location::{Location, Span, Spanned};
 use crate::vm::frame::Local;
+use crate::vm::value::Block;
 
 use self::error::VmError;
 use self::eval::Effect;
-use self::frame::{Callee, Frame};
-use self::gc::{GarbageCollector, GcRefCell};
+use self::frame::{Callee, Frame, Upvalue};
+use self::gc::{GarbageCollector, Gc, GcRefCell};
 use self::method::{MethodDef, Primitive};
 use self::value::{tag, Class, IntoValue, Method, Object, TypedValue, Value};
 
@@ -280,6 +284,10 @@ pub struct Builtins<'gc> {
     pub metaclass_class: TypedValue<'gc, tag::Class>,
     pub method: TypedValue<'gc, tag::Class>,
     pub nil_object: TypedValue<'gc, tag::Object>,
+    pub block: TypedValue<'gc, tag::Class>,
+    pub block1: TypedValue<'gc, tag::Class>,
+    pub block2: TypedValue<'gc, tag::Class>,
+    pub block3: TypedValue<'gc, tag::Class>,
 }
 
 pub struct Vm<'gc> {
@@ -287,6 +295,7 @@ pub struct Vm<'gc> {
     globals: HashMap<String, Value<'gc>>,
     frames: Vec<Frame<'gc>>,
     builtins: Option<Builtins<'gc>>,
+    upvalues: RefCell<Option<Gc<'gc, Upvalue<'gc>>>>,
 }
 
 impl<'gc> Vm<'gc> {
@@ -296,6 +305,7 @@ impl<'gc> Vm<'gc> {
             globals: Default::default(),
             frames: vec![],
             builtins: None,
+            upvalues: RefCell::new(None),
         }
     }
 
@@ -449,8 +459,7 @@ impl<'gc> Vm<'gc> {
 
         // TODO: make sure field assignments are consistent
         let obj = self.make_object(self.builtins().method.clone());
-        obj.get().fields.borrow_mut()[obj.get().field_idx("$method").unwrap()] =
-            value.clone().into_value();
+        *obj.get().get_field_by_name_mut("$method").unwrap() = value.clone().into_value();
         value.get().obj.set(obj).unwrap();
 
         value
@@ -489,11 +498,113 @@ impl<'gc> Vm<'gc> {
 
         // TODO: make sure field assignments are consistent
         let obj = self.make_object(metaclass);
-        obj.get().fields.borrow_mut()[obj.get().field_idx("$class").unwrap()] =
-            value.clone().into_value();
+        *obj.get().get_field_by_name_mut("$class").unwrap() = value.clone().into_value();
         value.get().obj.set(obj).unwrap();
 
         value
+    }
+
+    fn make_block(&mut self, code: Spanned<ast::Block>) -> TypedValue<'gc, tag::Block> {
+        // FIXME: this is wrong.
+        // Counterexample:
+        //
+        // Test = (
+        //   run = (
+        //     |x|
+        //     2 < 3 ifTrue: [
+        //       ^[x]
+        //     ]
+        //   )
+        // )
+        //
+        // At the point of instantiation of the [x] block, the stacktrace is as follows:
+        //   Test/run (method, locals: [self, x])
+        //   True/ifTrue: (method, locals: [self, trueBlock])
+        //   Block1/value (method, locals: [self])
+        //   Test/run/[] (block, locals: [], upvalues: [x in Test/run])
+        //
+        // The code below would take the flag from Block1/value instead of Test/run.
+        let nlret_valid_flag = self
+            .frames
+            .iter()
+            .rev()
+            .find_map(|frame| match frame.callee {
+                Callee::Block { .. } => None,
+                Callee::Method {
+                    ref nlret_valid_flag,
+                    ..
+                } => Some(Rc::downgrade(nlret_valid_flag)),
+            })
+            .expect("must have a method frame");
+
+        let upvalues = code
+            .value
+            .upvalues
+            .iter()
+            .map(|name| {
+                let frame = self.frames.last().unwrap();
+                let local = frame.get_local_by_name(name).unwrap_or_else(|| match &frame.callee {
+                    Callee::Method { .. } => panic!("unknown upvalue `{}`", name),
+                    Callee::Block { block } => {
+                        match block.get().get_upvalue_by_name(name) {
+                            Some(upvalue) => upvalue.get_local(),
+                            None => panic!("unknown upvalue `{}`", name),
+                        }
+                    }
+                });
+
+                self.capture_local(local)
+            })
+            .collect::<Vec<_>>();
+
+        let upvalue_map = upvalues
+            .iter()
+            .enumerate()
+            .map(|(idx, upvalue)| (upvalue.get_local().name.value.clone(), idx))
+            .collect();
+
+        let block = Block {
+            location: code.location,
+            obj: Default::default(),
+            nlret_valid_flag,
+            code: code.value,
+            upvalue_map,
+            upvalues,
+        };
+
+        let class = match block.code.params.len() {
+            0 => self.builtins().block1.clone(),
+            1 => self.builtins().block2.clone(),
+            2 => self.builtins().block3.clone(),
+            _ => self.builtins().block.clone(),
+        };
+
+        let block = block.into_value(self.gc);
+        let obj = self.make_object(class);
+        *obj.get().get_field_by_name_mut("$block").unwrap() = block.clone().into_value();
+        block.get().obj.set(obj).unwrap();
+
+        block
+    }
+
+    fn make_array(&self, values: Vec<Value<'gc>>) -> TypedValue<'gc, tag::Array> {
+        GcRefCell::new(values).into_value(self.gc)
+    }
+
+    fn make_symbol(&self, sym: ast::SymbolLit) -> TypedValue<'gc, tag::Symbol> {
+        sym.into_value(self.gc)
+    }
+
+    fn make_string(&self, s: String) -> TypedValue<'gc, tag::String> {
+        s.into_value(self.gc)
+    }
+
+    fn make_int(&self, int: i64) -> TypedValue<'gc, tag::Int> {
+        int.into_value(self.gc)
+    }
+
+    fn make_float(&self, float: f64) -> TypedValue<'gc, tag::Float> {
+        float.into_value(self.gc)
     }
 
     fn make_object(&self, class: TypedValue<'gc, tag::Class>) -> TypedValue<'gc, tag::Object> {
@@ -658,5 +769,26 @@ impl<'gc> Vm<'gc> {
 
     fn pop_frame(&mut self) {
         todo!("close upvalues and pop the frame off the stack")
+    }
+
+    fn capture_local(&self, local: &Local<'gc>) -> Gc<'gc, Upvalue<'gc>> {
+        let mut next = self.upvalues.borrow().clone();
+
+        while let Some(upvalue) = next {
+            if ptr::eq(upvalue.get_local(), local) {
+                return upvalue;
+            }
+
+            next = upvalue.next.borrow().clone();
+        }
+
+        let upvalue = Gc::new(self.gc, unsafe { Upvalue::new(local) });
+        mem::swap(
+            &mut *self.upvalues.borrow_mut(),
+            &mut *upvalue.next.borrow_mut(),
+        );
+        *self.upvalues.borrow_mut() = Some(upvalue.clone());
+
+        upvalue
     }
 }
