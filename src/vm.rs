@@ -280,6 +280,7 @@ pub struct Builtins<'gc> {
     pub array: TypedValue<'gc, tag::Class>,
     pub object: TypedValue<'gc, tag::Class>,
     pub object_class: TypedValue<'gc, tag::Class>,
+    pub class: TypedValue<'gc, tag::Class>,
     pub metaclass: TypedValue<'gc, tag::Class>,
     pub metaclass_class: TypedValue<'gc, tag::Class>,
     pub method: TypedValue<'gc, tag::Class>,
@@ -288,6 +289,11 @@ pub struct Builtins<'gc> {
     pub block1: TypedValue<'gc, tag::Class>,
     pub block2: TypedValue<'gc, tag::Class>,
     pub block3: TypedValue<'gc, tag::Class>,
+    pub integer: TypedValue<'gc, tag::Class>,
+    pub double: TypedValue<'gc, tag::Class>,
+    pub symbol: TypedValue<'gc, tag::Class>,
+    pub primitive: TypedValue<'gc, tag::Class>,
+    pub string: TypedValue<'gc, tag::Class>,
 }
 
 pub struct Vm<'gc> {
@@ -643,6 +649,7 @@ impl<'gc> Vm<'gc> {
             }
         };
 
+        // FIXME: construct an instance and pass it to the run method
         self.execute_method(method, vec![])
     }
 

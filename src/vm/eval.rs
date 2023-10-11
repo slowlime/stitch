@@ -6,6 +6,7 @@ use crate::location::Spanned;
 
 use super::error::VmError;
 use super::frame::{Callee, Local, Upvalue};
+use super::method::{MethodDef, Primitive};
 use super::value::Value;
 use super::Vm;
 
@@ -168,45 +169,43 @@ impl ast::Expr {
 
 impl ast::Assign {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        self.value.eval(vm).and_then(|value| {
-            match &self.var {
-                ast::AssignVar::UnresolvedName(_) => panic!("UnresolvedName in AST"),
+        self.value.eval(vm).and_then(|value| match &self.var {
+            ast::AssignVar::UnresolvedName(_) => panic!("UnresolvedName in AST"),
 
-                ast::AssignVar::Local(local) => {
-                    *local.lookup(vm).value.borrow_mut() = value.clone();
+            ast::AssignVar::Local(local) => {
+                *local.lookup(vm).value.borrow_mut() = value.clone();
+
+                Effect::None(value)
+            }
+
+            ast::AssignVar::Upvalue(upvalue) => {
+                *upvalue.lookup(vm).get_local().value.borrow_mut() = value.clone();
+
+                Effect::None(value)
+            }
+
+            ast::AssignVar::Field(name) => {
+                let recv = vm.frames.last().unwrap().get_recv().unwrap().borrow();
+                let obj = recv.get_obj().expect("self has no associated object");
+                let Some(mut field) = obj.get_field_by_name_mut(&name.0.value) else {
+                    panic!("unknown field `{}`", name.0.value);
+                };
+
+                *field = value.clone();
+
+                Effect::None(value)
+            }
+
+            ast::AssignVar::Global(name) => {
+                if vm.get_global(&name.0.value).is_some() {
+                    vm.set_global(name.0.value.clone(), value.clone());
 
                     Effect::None(value)
-                }
-
-                ast::AssignVar::Upvalue(upvalue) => {
-                    *upvalue.lookup(vm).get_local().value.borrow_mut() = value.clone();
-
-                    Effect::None(value)
-                }
-
-                ast::AssignVar::Field(name) => {
-                    let recv = vm.frames.last().unwrap().get_recv().unwrap().borrow();
-                    let obj = recv.get_obj().expect("self has no associated object");
-                    let Some(mut field) = obj.get_field_by_name_mut(&name.0.value) else {
-                        panic!("unknown field `{}`", name.0.value);
-                    };
-
-                    *field = value.clone();
-
-                    Effect::None(value)
-                }
-
-                ast::AssignVar::Global(name) => {
-                    if vm.get_global(&name.0.value).is_some() {
-                        vm.set_global(name.0.value.clone(), value.clone());
-
-                        Effect::None(value)
-                    } else {
-                        Effect::Unwind(VmError::UndefinedName {
-                            span: name.0.span(),
-                            name: name.0.value.clone(),
-                        })
-                    }
+                } else {
+                    Effect::Unwind(VmError::UndefinedName {
+                        span: name.0.span(),
+                        name: name.0.value.clone(),
+                    })
                 }
             }
         })
@@ -261,7 +260,69 @@ impl ast::FloatLit {
 
 impl ast::Dispatch {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        todo!()
+        let recv = match self.recv.eval(vm) {
+            Effect::None(recv) => recv,
+            eff => return eff,
+        };
+
+        let mut args = vec![recv];
+
+        for expr in &self.args {
+            match expr.eval(vm) {
+                Effect::None(arg) => args.push(arg),
+                eff => return eff,
+            }
+        }
+
+        let recv = &args[0];
+
+        let Some(method) = recv
+            .get_method_by_name(vm, self.selector.value.name())
+            .cloned()
+        else {
+            let class = recv.get_class(vm).get();
+            return Effect::Unwind(VmError::NoSuchMethod {
+                span: self.location.span(),
+                class_span: class.name.span(),
+                class_name: class.name.value.clone(),
+                method_name: self.selector.value.name().to_owned(),
+            });
+        };
+
+        let result = match method.get().def.value {
+            MethodDef::Code(ref block) => {
+                if let Err(e) = vm.push_frame(
+                    block,
+                    self.location.span(),
+                    Callee::Method {
+                        method: method.clone(),
+                        nlret_valid_flag: Default::default(),
+                    },
+                    args,
+                ) {
+                    return Effect::Unwind(e);
+                }
+
+                let result = block.eval(vm);
+                vm.pop_frame();
+
+                result
+            }
+
+            MethodDef::Primitive(p) => p.eval(vm, args),
+        };
+
+        match result {
+            Effect::None(_) => panic!("block has no return statement"),
+            Effect::Return(value) => Effect::None(value),
+            Effect::Unwind(err) => Effect::Unwind(err),
+            Effect::NonLocalReturn { value, up_frames } => {
+                match NonZeroUsize::new(up_frames.get() - 1) {
+                    Some(up_frames) => Effect::NonLocalReturn { value, up_frames },
+                    None => Effect::Return(value),
+                }
+            }
+        }
     }
 }
 
@@ -293,12 +354,10 @@ impl ast::Upvalue {
     pub(super) fn lookup<'a, 'gc>(&self, vm: &'a Vm<'gc>) -> &'a Upvalue<'gc> {
         match &vm.frames.last().unwrap().callee {
             Callee::Method { .. } => panic!("upvalue access in a method"),
-            Callee::Block { block } => {
-                match block.get().get_upvalue_by_name(&self.name.value) {
-                    Some(upvalue) => upvalue,
-                    None => panic!("unknown upvalue `{}`", self.name.value),
-                }
-            }
+            Callee::Block { block } => match block.get().get_upvalue_by_name(&self.name.value) {
+                Some(upvalue) => upvalue,
+                None => panic!("unknown upvalue `{}`", self.name.value),
+            },
         }
     }
 }
@@ -325,5 +384,11 @@ impl ast::Global {
                 name: self.0.value.clone(),
             }),
         }
+    }
+}
+
+impl Primitive {
+    pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>, args: Vec<Value<'gc>>) -> Effect<'gc> {
+        todo!()
     }
 }

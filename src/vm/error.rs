@@ -93,4 +93,16 @@ pub enum VmError {
         // TODO:
         // method_span: Option<Span>,
     },
+
+    #[error("object of class `{class_name}` has no method `{method_name}`")]
+    NoSuchMethod {
+        #[label]
+        span: Option<Span>,
+
+        #[label = "class `{class_name}` defined here"]
+        class_span: Option<Span>,
+
+        class_name: String,
+        method_name: String,
+    },
 }

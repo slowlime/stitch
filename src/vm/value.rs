@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
-use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::rc::Weak;
 
 use crate::ast::{self, SymbolLit as Symbol};
@@ -10,10 +10,11 @@ use crate::location::{Location, Span, Spanned};
 
 use super::error::VmError;
 use super::frame::Upvalue;
-use super::gc::{GcRefCell, GcRef, GcRefMut, GcOnceCell};
 use super::gc::{Collect, Gc};
 use super::gc::{Finalize, GarbageCollector};
+use super::gc::{GcOnceCell, GcRef, GcRefCell, GcRefMut};
 use super::method::MethodDef;
+use super::Vm;
 
 #[derive(Debug, Clone, Default)]
 pub struct Value<'gc>(Option<Gc<'gc, ValueKind<'gc>>>);
@@ -63,8 +64,20 @@ impl<'gc> Value<'gc> {
         }
     }
 
+    pub fn get_class<'a>(&'a self, vm: &'a Vm<'gc>) -> &'a TypedValue<'gc, tag::Class> {
+        self.ensure_legal().0.as_ref().unwrap().get_class(vm)
+    }
+
     pub fn get_obj(&self) -> Option<&Object<'gc>> {
         self.0.as_ref()?.get_obj()
+    }
+
+    pub fn get_method_by_name<'a>(
+        &'a self,
+        vm: &'a Vm<'gc>,
+        name: &str,
+    ) -> Option<&'a TypedValue<'gc, tag::Method>> {
+        self.0.as_ref()?.get_method_by_name(vm, name)
     }
 }
 
@@ -206,6 +219,42 @@ impl<'gc> ValueKind<'gc> {
             Self::Object(obj) => Some(obj),
             Self::String(_) => None,
         }
+    }
+
+    pub fn get_class<'a>(&'a self, vm: &'a Vm<'gc>) -> &'a TypedValue<'gc, tag::Class> {
+        match self {
+            Self::Int(_) => &vm.builtins().integer,
+            Self::Float(_) => &vm.builtins().double,
+            Self::Array(_) => &vm.builtins().array,
+            Self::Block(block) => &block.obj.get().unwrap().get().class,
+            Self::Class(class) => &class.obj.get().unwrap().get().class,
+            Self::Method(method) => &method.obj.get().unwrap().get().class,
+            Self::Symbol(_) => &vm.builtins().symbol,
+            Self::Object(obj) => &obj.class,
+            Self::String(_) => &vm.builtins().string,
+        }
+    }
+
+    pub fn get_method_by_name<'a>(
+        &'a self,
+        vm: &'a Vm<'gc>,
+        name: &str,
+    ) -> Option<&'a TypedValue<'gc, tag::Method>> {
+        let class = match self {
+            Self::Int(_) => &vm.builtins().integer,
+            Self::Float(_) => &vm.builtins().double,
+            Self::Array(_) => &vm.builtins().array,
+            Self::Block(block) => return block.obj.get().unwrap().get().get_method_by_name(name),
+            Self::Class(class) => return class.obj.get().unwrap().get().get_method_by_name(name),
+            Self::Method(method) => {
+                return method.obj.get().unwrap().get().get_method_by_name(name)
+            }
+            Self::Symbol(_) => &vm.builtins().symbol,
+            Self::Object(obj) => return obj.get_method_by_name(name),
+            Self::String(_) => &vm.builtins().string,
+        };
+
+        class.get().get_method_by_name(name)
     }
 }
 
@@ -415,6 +464,10 @@ impl<'gc> Object<'gc> {
             inner: self.fields.borrow_mut(),
             idx,
         })
+    }
+
+    pub fn get_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
+        self.class.get().get_method_by_name(name)
     }
 }
 

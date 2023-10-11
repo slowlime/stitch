@@ -602,13 +602,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_method(&mut self) -> Result<ast::Method, ParserError> {
-        let (selector, params) = self.parse_pattern()?;
+        let (selector, mut params) = self.parse_pattern()?;
+        // insert a synthetic `self` parameter
+        params.insert(0, Spanned::new_builtin("self".into()));
         self.expect(Special::Equals)?;
 
         // methods do no close over any variables
         self.scopes.push(Scope::new(IsClosure::No));
 
-        for param in &params {
+        // the 0th parameter is the synthetic `self` parameter from above
+        // we'll add it explicitly
+        for param in params.iter().skip(1) {
             self.define_var(param.value.clone(), Var::Local(param.location))?;
         }
 
