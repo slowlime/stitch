@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::rc::Weak;
 
 use crate::ast::{self, SymbolLit as Symbol};
 use crate::impl_collect;

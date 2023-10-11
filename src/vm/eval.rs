@@ -88,6 +88,23 @@ impl ast::Block {
 
         panic!("block has no return statement");
     }
+
+    pub(super) fn eval_and_pop_frame<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
+        let result = self.eval(vm);
+        vm.pop_frame();
+
+        match result {
+            Effect::None(_) => panic!("block has no return statement"),
+            Effect::Return(value) => Effect::None(value),
+            Effect::Unwind(err) => Effect::Unwind(err),
+            Effect::NonLocalReturn { value, up_frames } => {
+                match NonZeroUsize::new(up_frames.get() - 1) {
+                    Some(up_frames) => Effect::NonLocalReturn { value, up_frames },
+                    None => Effect::Return(value),
+                }
+            }
+        }
+    }
 }
 
 impl ast::Stmt {
@@ -363,7 +380,7 @@ impl ast::Global {
 
 impl<'gc> TypedValue<'gc, tag::Method> {
     pub(super) fn eval(&self, vm: &mut Vm<'gc>, args: Vec<Value<'gc>>) -> Effect<'gc> {
-        let result = match self.get().def.value {
+        match self.get().def.value {
             MethodDef::Code(ref block) => {
                 if let Err(e) = vm.push_frame(
                     block,
@@ -376,26 +393,28 @@ impl<'gc> TypedValue<'gc, tag::Method> {
                     return Effect::Unwind(e);
                 }
 
-                let result = block.eval(vm);
-                vm.pop_frame();
-
-                result
+                block.eval_and_pop_frame(vm)
             }
 
             MethodDef::Primitive(p) => p.eval(vm, args),
-        };
-
-        match result {
-            Effect::None(_) => panic!("block has no return statement"),
-            Effect::Return(value) => Effect::None(value),
-            Effect::Unwind(err) => Effect::Unwind(err),
-            Effect::NonLocalReturn { value, up_frames } => {
-                match NonZeroUsize::new(up_frames.get() - 1) {
-                    Some(up_frames) => Effect::NonLocalReturn { value, up_frames },
-                    None => Effect::Return(value),
-                }
-            }
         }
+    }
+}
+
+impl<'gc> TypedValue<'gc, tag::Block> {
+    pub(super) fn eval(&self, vm: &mut Vm<'gc>, args: Vec<Value<'gc>>) -> Effect<'gc> {
+        if let Err(e) = vm.push_frame(
+            &self.get().code,
+            self.get().location.span(),
+            Callee::Block {
+                block: self.clone(),
+            },
+            args,
+        ) {
+            return Effect::Unwind(e);
+        }
+
+        self.get().code.eval_and_pop_frame(vm)
     }
 }
 
