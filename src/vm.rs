@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ptr;
-use std::rc::Rc;
 
 use crate::ast;
 use crate::ast::visit::{AstRecurse, DefaultVisitor, DefaultVisitorMut};
@@ -109,6 +108,17 @@ fn resolve_upvalues(code: &mut ast::Block) {
             }
         }
 
+        fn visit_stmt(&mut self, stmt: &'a mut ast::Stmt) {
+            match stmt {
+                ast::Stmt::NonLocalReturn(_) if self.frames.len() > 1 => {
+                    // capture `self` -- needed for non-local returns
+                    self.capture_var("self", NonZeroUsize::new(self.frames.len() - 1).unwrap());
+                }
+
+                _ => {}
+            }
+        }
+
         fn visit_field(&mut self, _field: &'a mut ast::Field) {
             if self.frames.len() == 1 {
                 // `self` is a local (not an upvalue) -- nothing to do
@@ -195,7 +205,7 @@ fn check_method_code(code: &ast::Block, fields: &HashSet<&str>) {
 
             for name in &block.upvalues {
                 assert!(
-                    block.locals.iter().any(|local| local.value == *name)
+                    block.locals.iter().chain(&block.params).any(|local| local.value == *name)
                         || captured_upvalues.contains(name),
                     "upvalue {name} must either capture an upvalue or a local in the immediately enclosing frame"
                 );
@@ -220,7 +230,15 @@ fn check_method_code(code: &ast::Block, fields: &HashSet<&str>) {
                 ast::Stmt::NonLocalReturn(_) if self.frame_idx <= 1 => {
                     panic!("Stmt::NonLocalReturn in method body")
                 }
+
+                ast::Stmt::NonLocalReturn(_)
+                    if !self.captured_upvalues.iter().any(|name| name == "self") =>
+                {
+                    panic!("Stmt::NonLocalReturn in a block but `self` was not captured");
+                }
+
                 ast::Stmt::Dummy => panic!("Stmt::Dummy in AST"),
+
                 _ => {}
             }
         }
@@ -511,53 +529,21 @@ impl<'gc> Vm<'gc> {
     }
 
     fn make_block(&mut self, code: Spanned<ast::Block>) -> TypedValue<'gc, tag::Block> {
-        // FIXME: this is wrong.
-        // Counterexample:
-        //
-        // Test = (
-        //   run = (
-        //     |x|
-        //     2 < 3 ifTrue: [
-        //       ^[x]
-        //     ]
-        //   )
-        // )
-        //
-        // At the point of instantiation of the [x] block, the stacktrace is as follows:
-        //   Test/run (method, locals: [self, x])
-        //   True/ifTrue: (method, locals: [self, trueBlock])
-        //   Block1/value (method, locals: [self])
-        //   Test/run/[] (block, locals: [], upvalues: [x in Test/run])
-        //
-        // The code below would take the flag from Block1/value instead of Test/run.
-        let nlret_valid_flag = self
-            .frames
-            .iter()
-            .rev()
-            .find_map(|frame| match frame.callee {
-                Callee::Block { .. } => None,
-                Callee::Method {
-                    ref nlret_valid_flag,
-                    ..
-                } => Some(Rc::downgrade(nlret_valid_flag)),
-            })
-            .expect("must have a method frame");
-
         let upvalues = code
             .value
             .upvalues
             .iter()
             .map(|name| {
                 let frame = self.frames.last().unwrap();
-                let local = frame.get_local_by_name(name).unwrap_or_else(|| match &frame.callee {
-                    Callee::Method { .. } => panic!("unknown upvalue `{}`", name),
-                    Callee::Block { block } => {
-                        match block.get().get_upvalue_by_name(name) {
+                let local = frame
+                    .get_local_by_name(name)
+                    .unwrap_or_else(|| match &frame.callee {
+                        Callee::Method { .. } => panic!("unknown upvalue `{}`", name),
+                        Callee::Block { block } => match block.get().get_upvalue_by_name(name) {
                             Some(upvalue) => upvalue.get_local(),
                             None => panic!("unknown upvalue `{}`", name),
-                        }
-                    }
-                });
+                        },
+                    });
 
                 self.capture_local(local)
             })
@@ -572,7 +558,6 @@ impl<'gc> Vm<'gc> {
         let block = Block {
             location: code.location,
             obj: Default::default(),
-            nlret_valid_flag,
             code: code.value,
             upvalue_map,
             upvalues,
@@ -649,60 +634,24 @@ impl<'gc> Vm<'gc> {
             }
         };
 
-        // FIXME: construct an instance and pass it to the run method
-        self.execute_method(method, vec![])
+        let recv = self.make_object(class.clone());
+        self.execute_method(method, vec![recv.into_value()])
     }
 
     pub fn execute_method(
         &mut self,
         method: TypedValue<'gc, tag::Method>,
-        params: Vec<Value<'gc>>,
+        args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, VmError> {
-        match method.get().def.value {
-            MethodDef::Code(ref block) => {
-                self.push_frame(
-                    block,
-                    None,
-                    Callee::Method {
-                        method: method.clone(),
-                        nlret_valid_flag: Default::default(),
-                    },
-                    params,
-                )?;
-                self.execute(block)
-            }
-
-            MethodDef::Primitive(p) => self.execute_primitive(p, params),
-        }
-    }
-
-    pub fn execute_block(
-        &mut self,
-        block: TypedValue<'gc, tag::Block>,
-        params: Vec<Value<'gc>>,
-    ) -> Result<Value<'gc>, VmError> {
-        todo!()
-    }
-
-    fn execute_primitive(
-        &mut self,
-        p: Primitive,
-        params: Vec<Value<'gc>>,
-    ) -> Result<Value<'gc>, VmError> {
-        todo!()
-    }
-
-    // assumes the frame is already pushed
-    fn execute(&mut self, block: &ast::Block) -> Result<Value<'gc>, VmError> {
         assert!(
             self.frames.len() == 1,
             "expected exactly one frame on the stack"
         );
 
-        let result = match block.eval(self) {
-            Effect::None(_) => panic!("block has no return statement"),
+        let result = match method.eval(self, args) {
+            Effect::None(_) => panic!("method has no return statement"),
             Effect::Return(value) => Ok(value),
-            Effect::NonLocalReturn { value, up_frames } => {
+            Effect::NonLocalReturn { .. } => {
                 panic!("NonLocalReturn through top-level frame")
             }
             Effect::Unwind(e) => Err(e),
@@ -746,7 +695,7 @@ impl<'gc> Vm<'gc> {
             Ordering::Equal => {}
         }
 
-        let mut locals = vec![];
+        let mut locals = Vec::with_capacity(params.len() + block.locals.len());
         let mut local_map = HashMap::new();
 
         for (name, value) in block.params.iter().cloned().zip(params) {
@@ -768,7 +717,7 @@ impl<'gc> Vm<'gc> {
         self.frames.push(Frame {
             callee,
             local_map,
-            locals,
+            locals: locals.into_boxed_slice(),
         });
 
         Ok(())

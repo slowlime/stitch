@@ -1,5 +1,5 @@
 use std::num::NonZeroUsize;
-use std::rc::Rc;
+use std::ptr;
 
 use crate::ast;
 use crate::location::Spanned;
@@ -7,7 +7,7 @@ use crate::location::Spanned;
 use super::error::VmError;
 use super::frame::{Callee, Local, Upvalue};
 use super::method::{MethodDef, Primitive};
-use super::value::Value;
+use super::value::{tag, TypedValue, Value};
 use super::Vm;
 
 /// The result of a computation — either a plain value or a triggered effect.
@@ -99,24 +99,33 @@ impl ast::Stmt {
 
             Self::NonLocalReturn(expr) => {
                 expr.value.eval(vm).and_then(|value| {
-                    let flag = match vm.frames.last().unwrap().callee {
+                    let self_local = match vm.frames.last().unwrap().callee {
                         Callee::Method { .. } => panic!("Stmt::NonLocalReturn in method body"),
 
                         Callee::Block { ref block } => {
-                            match block.get().nlret_valid_flag.upgrade() {
-                                Some(rc) => rc,
+                            let Some(self_upval) = block.get().get_upvalue_by_name("self") else {
+                                panic!("non-local return in a block that does not capture `self`");
+                            };
 
-                                None => {
-                                    // TODO: dispatch to #escapedBlock:
-                                    // ↑ does this mean blocks always have to capture `self`?
-                                    // if they do, the validity flag won't be necessary as nlret is valid
-                                    // iff `self` is not closed.
-                                    // TODO: investigate this as well
-                                    return Effect::Unwind(VmError::NlRetFromEscapedBlock {
+                            if self_upval.is_closed() {
+                                // the method (which defines `self`) is no longer active, meaning the block has escaped.
+                                let obj = self_upval.get_local().value.borrow();
+
+                                return if let Some(method) =
+                                    obj.get_method_by_name(vm, "escapedBlock:").cloned()
+                                {
+                                    let args = vec![obj.clone(), block.clone().into_value()];
+                                    drop(obj);
+
+                                    method.eval(vm, args)
+                                } else {
+                                    Effect::Unwind(VmError::NlRetFromEscapedBlock {
                                         ret_span: expr.span(),
-                                    });
-                                }
+                                    })
+                                };
                             }
+
+                            self_upval.get_local()
                         }
                     };
 
@@ -127,12 +136,10 @@ impl ast::Stmt {
                         .rev()
                         .enumerate()
                         .skip(1) // skip the current frame, which won't match
-                        .find(|(_, frame)| match frame.callee {
-                            Callee::Method {
-                                ref nlret_valid_flag,
-                                ..
-                            } => Rc::ptr_eq(nlret_valid_flag, &flag),
-                            _ => false,
+                        .find(|(_, frame)| {
+                            frame
+                                .get_local_by_name("self")
+                                .is_some_and(|local| ptr::eq(local, self_local))
                         })
                         .and_then(|(idx, _)| NonZeroUsize::new(idx))
                         .expect("non-local return flag valid but no target frame was found");
@@ -276,51 +283,18 @@ impl ast::Dispatch {
 
         let recv = &args[0];
 
-        let Some(method) = recv
-            .get_method_by_name(vm, self.selector.value.name())
-            .cloned()
-        else {
-            let class = recv.get_class(vm).get();
-            return Effect::Unwind(VmError::NoSuchMethod {
-                span: self.location.span(),
-                class_span: class.name.span(),
-                class_name: class.name.value.clone(),
-                method_name: self.selector.value.name().to_owned(),
-            });
-        };
+        match recv.get_method_by_name(vm, self.selector.value.name()) {
+            Some(method) => method.clone().eval(vm, args),
 
-        let result = match method.get().def.value {
-            MethodDef::Code(ref block) => {
-                if let Err(e) = vm.push_frame(
-                    block,
-                    self.location.span(),
-                    Callee::Method {
-                        method: method.clone(),
-                        nlret_valid_flag: Default::default(),
-                    },
-                    args,
-                ) {
-                    return Effect::Unwind(e);
-                }
+            None => {
+                let class = recv.get_class(vm).get();
 
-                let result = block.eval(vm);
-                vm.pop_frame();
-
-                result
-            }
-
-            MethodDef::Primitive(p) => p.eval(vm, args),
-        };
-
-        match result {
-            Effect::None(_) => panic!("block has no return statement"),
-            Effect::Return(value) => Effect::None(value),
-            Effect::Unwind(err) => Effect::Unwind(err),
-            Effect::NonLocalReturn { value, up_frames } => {
-                match NonZeroUsize::new(up_frames.get() - 1) {
-                    Some(up_frames) => Effect::NonLocalReturn { value, up_frames },
-                    None => Effect::Return(value),
-                }
+                Effect::Unwind(VmError::NoSuchMethod {
+                    span: self.location.span(),
+                    class_span: class.name.span(),
+                    class_name: class.name.value.clone(),
+                    method_name: self.selector.value.name().to_owned(),
+                })
             }
         }
     }
@@ -383,6 +357,44 @@ impl ast::Global {
                 span: self.0.span(),
                 name: self.0.value.clone(),
             }),
+        }
+    }
+}
+
+impl<'gc> TypedValue<'gc, tag::Method> {
+    pub(super) fn eval(&self, vm: &mut Vm<'gc>, args: Vec<Value<'gc>>) -> Effect<'gc> {
+        let result = match self.get().def.value {
+            MethodDef::Code(ref block) => {
+                if let Err(e) = vm.push_frame(
+                    block,
+                    self.get().location.span(),
+                    Callee::Method {
+                        method: self.clone(),
+                    },
+                    args,
+                ) {
+                    return Effect::Unwind(e);
+                }
+
+                let result = block.eval(vm);
+                vm.pop_frame();
+
+                result
+            }
+
+            MethodDef::Primitive(p) => p.eval(vm, args),
+        };
+
+        match result {
+            Effect::None(_) => panic!("block has no return statement"),
+            Effect::Return(value) => Effect::None(value),
+            Effect::Unwind(err) => Effect::Unwind(err),
+            Effect::NonLocalReturn { value, up_frames } => {
+                match NonZeroUsize::new(up_frames.get() - 1) {
+                    Some(up_frames) => Effect::NonLocalReturn { value, up_frames },
+                    None => Effect::Return(value),
+                }
+            }
         }
     }
 }

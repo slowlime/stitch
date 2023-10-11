@@ -1,7 +1,6 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
-use std::rc::Rc;
 
 use crate::location::Location;
 use crate::{ast, impl_collect};
@@ -26,7 +25,6 @@ impl Display for CalleeName<'_, '_> {
 pub enum Callee<'gc> {
     Method {
         method: TypedValue<'gc, tag::Method>,
-        nlret_valid_flag: Rc<()>,
     },
 
     Block {
@@ -37,8 +35,8 @@ pub enum Callee<'gc> {
 impl<'gc> Callee<'gc> {
     pub fn location(&self) -> Location {
         match self {
-            Self::Method { method: value, .. } => value.get().location,
-            Self::Block { block: value } => value.get().location,
+            Self::Method { method, .. } => method.get().location,
+            Self::Block { block } => block.get().location,
         }
     }
 
@@ -51,7 +49,7 @@ impl<'gc> Callee<'gc> {
 pub struct Frame<'gc> {
     pub callee: Callee<'gc>,
     pub local_map: HashMap<String, usize>,
-    pub locals: Vec<Local<'gc>>,
+    pub locals: Box<[Local<'gc>]>,
 }
 
 impl<'gc> Frame<'gc> {
@@ -104,6 +102,10 @@ impl<'gc> Upvalue<'gc> {
 
     pub fn get_local(&self) -> &Local<'gc> {
         unsafe { &*self.local.get() }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed_var.get().is_some()
     }
 
     pub fn close(&self) {

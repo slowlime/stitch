@@ -336,8 +336,6 @@ unsafe impl<T: Tag> Collect for TypedValue<'_, T> {
 pub struct Block<'gc> {
     pub location: Location,
     pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
-    // the strong reference is held in Frame
-    pub nlret_valid_flag: Weak<()>,
     pub code: ast::Block,
     pub upvalue_map: HashMap<String, usize>,
     pub upvalues: Vec<Gc<'gc, Upvalue<'gc>>>,
@@ -467,6 +465,7 @@ impl<'gc> Object<'gc> {
     }
 
     pub fn get_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
+        // FIXME: traverse the hierarchy
         self.class.get().get_method_by_name(name)
     }
 }
