@@ -128,8 +128,11 @@ impl ast::Stmt {
                                 // the method (which defines `self`) is no longer active, meaning the block has escaped.
                                 let obj = self_upval.get_local().value.borrow();
 
-                                return if let Some(method) =
-                                    obj.get_method_by_name(vm, "escapedBlock:").cloned()
+                                return if let Some(method) = obj
+                                    .get_class(vm)
+                                    .get()
+                                    .get_method_by_name("escapedBlock:")
+                                    .cloned()
                                 {
                                     let args = vec![obj.clone(), block.clone().into_value()];
                                     drop(obj);
@@ -300,7 +303,17 @@ impl ast::Dispatch {
 
         let recv = &args[0];
 
-        match recv.get_method_by_name(vm, self.selector.value.name()) {
+        let method = if self.supercall {
+            recv.get_class(vm)
+                .get()
+                .get_supermethod_by_name(self.selector.value.name())
+        } else {
+            recv.get_class(vm)
+                .get()
+                .get_method_by_name(self.selector.value.name())
+        };
+
+        match method {
             Some(method) => method.clone().eval(vm, args),
 
             None => {

@@ -70,14 +70,6 @@ impl<'gc> Value<'gc> {
     pub fn get_obj(&self) -> Option<&Object<'gc>> {
         self.0.as_ref()?.get_obj()
     }
-
-    pub fn get_method_by_name<'a>(
-        &'a self,
-        vm: &'a Vm<'gc>,
-        name: &str,
-    ) -> Option<&'a TypedValue<'gc, tag::Method>> {
-        self.0.as_ref()?.get_method_by_name(vm, name)
-    }
 }
 
 impl Finalize for Value<'_> {}
@@ -233,28 +225,6 @@ impl<'gc> ValueKind<'gc> {
             Self::String(_) => &vm.builtins().string,
         }
     }
-
-    pub fn get_method_by_name<'a>(
-        &'a self,
-        vm: &'a Vm<'gc>,
-        name: &str,
-    ) -> Option<&'a TypedValue<'gc, tag::Method>> {
-        let class = match self {
-            Self::Int(_) => &vm.builtins().integer,
-            Self::Float(_) => &vm.builtins().double,
-            Self::Array(_) => &vm.builtins().array,
-            Self::Block(block) => return block.obj.get().unwrap().get().get_method_by_name(name),
-            Self::Class(class) => return class.obj.get().unwrap().get().get_method_by_name(name),
-            Self::Method(method) => {
-                return method.obj.get().unwrap().get().get_method_by_name(name)
-            }
-            Self::Symbol(_) => &vm.builtins().symbol,
-            Self::Object(obj) => return obj.get_method_by_name(name),
-            Self::String(_) => &vm.builtins().string,
-        };
-
-        class.get().get_method_by_name(name)
-    }
 }
 
 impl Finalize for ValueKind<'_> {}
@@ -370,6 +340,34 @@ pub struct Class<'gc> {
 
 impl<'gc> Class<'gc> {
     pub fn get_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
+        let mut next_class = Some(self);
+
+        while let Some(class) = next_class {
+            next_class = class.superclass.as_ref().map(|class| class.get());
+
+            if let method @ Some(_) = class.get_local_method_by_name(name) {
+                return method;
+            }
+        }
+
+        None
+    }
+
+    pub fn get_supermethod_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
+        let mut next_class = self.superclass.as_ref();
+
+        while let Some(class) = next_class {
+            next_class = class.get().superclass.as_ref();
+
+            if let method @ Some(_) = class.get().get_local_method_by_name(name) {
+                return method;
+            }
+        }
+
+        None
+    }
+
+    pub fn get_local_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
         self.method_map.get(name).map(|&idx| &self.methods[idx])
     }
 }
@@ -464,8 +462,11 @@ impl<'gc> Object<'gc> {
     }
 
     pub fn get_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
-        // FIXME: traverse the hierarchy
         self.class.get().get_method_by_name(name)
+    }
+
+    pub fn get_supermethod_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
+        self.class.get().superclass.as_ref()?.get().get_method_by_name(name)
     }
 }
 
