@@ -29,6 +29,18 @@ macro_rules! define_primitives {
             pub fn from_selector(class_name: &str, selector: &ast::Selector) -> Option<Primitive> {
                 Self::from_name(class_name, &selector.to_string())
             }
+
+            pub fn as_selector(&self) -> &'static ast::Selector {
+                static SELECTORS: OnceLock<Box<[ast::Selector]>> = OnceLock::new();
+
+                &SELECTORS.get_or_init(|| vec![
+                    $( ast::Selector::from_string($method_name.to_owned()), )*
+                ].into())[*self as usize]
+            }
+
+            pub fn param_count(&self) -> usize {
+                self.as_selector().param_count()
+            }
         }
     };
 }
@@ -145,5 +157,9 @@ define_primitives! {
 #[derive(Debug, Clone)]
 pub enum MethodDef {
     Code(ast::Block),
-    Primitive(Primitive),
+
+    Primitive {
+        primitive: Primitive,
+        params: Vec<ast::Name>,
+    },
 }

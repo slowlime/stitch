@@ -105,4 +105,29 @@ pub enum VmError {
         class_name: String,
         method_name: String,
     },
+
+    #[error("index `{idx}` is out of bounds for an array of size {size}")]
+    IndexOutOfBounds {
+        #[label]
+        span: Option<Span>,
+
+        idx: i64,
+        size: usize,
+    },
+
+    #[error("array size {size} is too large")]
+    ArrayTooLarge {
+        #[label]
+        span: Option<Span>,
+
+        size: i64,
+    },
+
+    #[error("array size {size} is negative")]
+    ArraySizeNegative {
+        #[label]
+        span: Option<Span>,
+
+        size: i64,
+    },
 }

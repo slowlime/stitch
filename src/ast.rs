@@ -67,6 +67,16 @@ enum SelectorKind {
     Keyword(Box<[usize]>),
 }
 
+impl SelectorKind {
+    pub fn param_count(&self) -> usize {
+        match self {
+            Self::Unary => 1,
+            Self::Binary => 2,
+            Self::Keyword(kws) => kws.len(),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct Selector {
     name: String,
@@ -95,6 +105,10 @@ impl Selector {
         };
 
         Self { name, kind }
+    }
+
+    pub fn param_count(&self) -> usize {
+        self.kind.param_count()
     }
 }
 
@@ -183,7 +197,10 @@ impl SpannedSelector {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MethodDef {
-    Primitive,
+    Primitive {
+        params: Vec<Name>,
+    },
+
     Block(Block),
 }
 
@@ -191,14 +208,14 @@ impl AstRecurse for MethodDef {
     fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         match self {
             MethodDef::Block(ref block) => visitor.visit_block(block),
-            MethodDef::Primitive => {}
+            MethodDef::Primitive { .. } => {}
         }
     }
 
     fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         match self {
             MethodDef::Block(ref mut block) => visitor.visit_block(block),
-            MethodDef::Primitive => {}
+            MethodDef::Primitive { .. } => {}
         }
     }
 }

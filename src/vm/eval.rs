@@ -2,13 +2,14 @@ use std::num::NonZeroUsize;
 use std::ptr;
 
 use crate::ast;
-use crate::location::Spanned;
+use crate::location::{Span, Spanned};
+use crate::vm::gc::GcRef;
 
 use super::error::VmError;
 use super::frame::{Callee, Local, Upvalue};
 use super::method::{MethodDef, Primitive};
 use super::value::{tag, TypedValue, Value};
-use super::Vm;
+use super::{check_arg_count, Vm};
 
 /// The result of a computation — either a plain value or a triggered effect.
 pub enum Effect<'gc> {
@@ -29,6 +30,15 @@ pub enum Effect<'gc> {
         value: Value<'gc>,
         up_frames: NonZeroUsize,
     },
+}
+
+macro_rules! ok_or_unwind {
+    ($e:expr) => {
+        match $e {
+            Ok(value) => value,
+            Err(e) => return Effect::Unwind(e),
+        }
+    };
 }
 
 impl<'gc> Effect<'gc> {
@@ -135,9 +145,10 @@ impl ast::Stmt {
                                     .cloned()
                                 {
                                     let args = vec![obj.clone(), block.clone().into_value()];
+                                    let arg_spans = vec![None];
                                     drop(obj);
 
-                                    method.eval(vm, args)
+                                    method.eval(vm, expr.span(), args, arg_spans)
                                 } else {
                                     Effect::Unwind(VmError::NlRetFromEscapedBlock {
                                         ret_span: expr.span(),
@@ -293,10 +304,15 @@ impl ast::Dispatch {
         };
 
         let mut args = vec![recv];
+        let mut arg_spans = vec![self.recv.location().span()];
 
         for expr in &self.args {
             match expr.eval(vm) {
-                Effect::None(arg) => args.push(arg),
+                Effect::None(arg) => {
+                    args.push(arg);
+                    arg_spans.push(expr.location().span());
+                }
+
                 eff => return eff,
             }
         }
@@ -314,7 +330,9 @@ impl ast::Dispatch {
         };
 
         match method {
-            Some(method) => method.clone().eval(vm, args),
+            Some(method) => method
+                .clone()
+                .eval(vm, self.location.span(), args, arg_spans),
 
             None => {
                 let class = recv.get_class(vm).get();
@@ -392,47 +410,237 @@ impl ast::Global {
 }
 
 impl<'gc> TypedValue<'gc, tag::Method> {
-    pub(super) fn eval(&self, vm: &mut Vm<'gc>, args: Vec<Value<'gc>>) -> Effect<'gc> {
+    pub(super) fn eval(
+        &self,
+        vm: &mut Vm<'gc>,
+        dispatch_span: Option<Span>,
+        args: Vec<Value<'gc>>,
+        arg_spans: Vec<Option<Span>>,
+    ) -> Effect<'gc> {
         match self.get().def.value {
             MethodDef::Code(ref block) => {
                 if let Err(e) = vm.push_frame(
                     block,
-                    self.get().location.span(),
+                    dispatch_span,
                     Callee::Method {
                         method: self.clone(),
                     },
                     args,
                 ) {
-                    return Effect::Unwind(e);
+                    Effect::Unwind(e)
+                } else {
+                    block.eval_and_pop_frame(vm)
                 }
-
-                block.eval_and_pop_frame(vm)
             }
 
-            MethodDef::Primitive(p) => p.eval(vm, args),
+            MethodDef::Primitive {
+                primitive: p,
+                ref params,
+            } => {
+                ok_or_unwind!(check_arg_count(
+                    &args,
+                    params,
+                    dispatch_span,
+                    self.get().location.span(),
+                    p.as_selector().to_string(),
+                ));
+
+                p.eval(vm, dispatch_span, args, arg_spans)
+            }
         }
     }
 }
 
 impl<'gc> TypedValue<'gc, tag::Block> {
     pub(super) fn eval(&self, vm: &mut Vm<'gc>, args: Vec<Value<'gc>>) -> Effect<'gc> {
-        if let Err(e) = vm.push_frame(
+        ok_or_unwind!(vm.push_frame(
             &self.get().code,
             self.get().location.span(),
             Callee::Block {
                 block: self.clone(),
             },
             args,
-        ) {
-            return Effect::Unwind(e);
-        }
+        ));
 
         self.get().code.eval_and_pop_frame(vm)
     }
 }
 
 impl Primitive {
-    pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>, args: Vec<Value<'gc>>) -> Effect<'gc> {
-        todo!()
+    pub(super) fn eval<'gc>(
+        &self,
+        vm: &mut Vm<'gc>,
+        dispatch_span: Option<Span>,
+        args: Vec<Value<'gc>>,
+        arg_spans: Vec<Option<Span>>,
+    ) -> Effect<'gc> {
+        debug_assert_eq!(args.len(), self.param_count());
+        debug_assert_eq!(args.len(), arg_spans.len());
+
+        #[inline]
+        fn check_arr_idx<'a, 'gc>(
+            span: Option<Span>,
+            contents: &GcRef<'a, Vec<Value<'gc>>>,
+            idx: i64,
+        ) -> Result<usize, VmError> {
+            match usize::try_from(idx) {
+                Ok(idx) if idx < contents.len() => Ok(idx),
+                _ => Err(VmError::IndexOutOfBounds {
+                    span,
+                    idx,
+                    size: contents.len(),
+                }),
+            }
+        }
+
+        match self {
+            Primitive::ArrayAt => {
+                let [recv, idx] = args.try_into().unwrap();
+                let arr = ok_or_unwind!(recv.downcast_or_err::<tag::Array>(arg_spans[0]));
+                let idx = ok_or_unwind!(idx.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+                let contents = arr.get().borrow();
+                let idx = ok_or_unwind!(check_arr_idx(dispatch_span, &contents, idx));
+
+                Effect::None(contents[idx].clone())
+            }
+
+            Primitive::ArrayAtPut => {
+                let [recv, idx, value] = args.try_into().unwrap();
+                let arr = ok_or_unwind!(recv.downcast_or_err::<tag::Array>(arg_spans[0]));
+                let idx = ok_or_unwind!(idx.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+                let idx = ok_or_unwind!(check_arr_idx(dispatch_span, &arr.get().borrow(), idx));
+
+                arr.get().borrow_mut()[idx] = value;
+
+                Effect::None(arr.into_value())
+            }
+
+            Primitive::ArrayLength => {
+                let [recv] = args.try_into().unwrap();
+                let arr = ok_or_unwind!(recv.downcast_or_err::<tag::Array>(arg_spans[0]));
+                let len = arr.get().borrow().len();
+
+                Effect::None(vm.make_int(len as _).into_value())
+            }
+
+            Primitive::ArrayNew => {
+                let [recv, len] = args.try_into().unwrap();
+                let _ = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
+                let len = ok_or_unwind!(len.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+                let len = if len < 0 {
+                    return Effect::Unwind(VmError::ArraySizeNegative {
+                        span: dispatch_span,
+                        size: len,
+                    });
+                } else {
+                    match usize::try_from(len) {
+                        Ok(len) if len < isize::MAX as _ => len,
+
+                        _ => {
+                            return Effect::Unwind(VmError::ArrayTooLarge {
+                                span: dispatch_span,
+                                size: len,
+                            })
+                        }
+                    }
+                };
+
+                let mut arr = Vec::with_capacity(len);
+
+                for _ in 0..len {
+                    arr.push(vm.builtins().nil_object.clone().into_value());
+                }
+
+                Effect::None(vm.make_array(arr).into_value())
+            }
+
+            Primitive::BlockValue => todo!(),
+            Primitive::BlockRestart => todo!(),
+            Primitive::Block1Value => todo!(),
+            Primitive::Block2Value => todo!(),
+            Primitive::Block3ValueWith => todo!(),
+            Primitive::ClassName => todo!(),
+            Primitive::ClassNew => todo!(),
+            Primitive::ClassSuperclass => todo!(),
+            Primitive::ClassFields => todo!(),
+            Primitive::ClassMethods => todo!(),
+            Primitive::DoubleAdd => todo!(),
+            Primitive::DoubleSub => todo!(),
+            Primitive::DoubleMul => todo!(),
+            Primitive::DoubleDiv => todo!(),
+            Primitive::DoubleMod => todo!(),
+            Primitive::DoubleSqrt => todo!(),
+            Primitive::DoubleRound => todo!(),
+            Primitive::DoubleAsInteger => todo!(),
+            Primitive::DoubleCos => todo!(),
+            Primitive::DoubleSin => todo!(),
+            Primitive::DoubleEq => todo!(),
+            Primitive::DoubleLt => todo!(),
+            Primitive::DoubleAsString => todo!(),
+            Primitive::DoublePositiveInfinity => todo!(),
+            Primitive::DoubleFromString => todo!(),
+            Primitive::MethodSignature => todo!(),
+            Primitive::MethodHolder => todo!(),
+            Primitive::MethodInvokeOnWith => todo!(),
+            Primitive::PrimitiveSignature => todo!(),
+            Primitive::PrimitiveHolder => todo!(),
+            Primitive::PrimitveInvokeOnWith => todo!(),
+            Primitive::SymbolAsString => todo!(),
+            Primitive::IntegerAdd => todo!(),
+            Primitive::IntegerSub => todo!(),
+            Primitive::IntegerMul => todo!(),
+            Primitive::IntegerDiv => todo!(),
+            Primitive::IntegerFDiv => todo!(),
+            Primitive::IntegerMod => todo!(),
+            Primitive::IntegerBand => todo!(),
+            Primitive::IntegerShl => todo!(),
+            Primitive::IntegerShr => todo!(),
+            Primitive::IntegerBxor => todo!(),
+            Primitive::IntegerSqrt => todo!(),
+            Primitive::IntegerAtRandom => todo!(),
+            Primitive::IntegerEq => todo!(),
+            Primitive::IntegerLt => todo!(),
+            Primitive::IntegerAsString => todo!(),
+            Primitive::IntegerAs32BitSignedValue => todo!(),
+            Primitive::IntegerAs32BitUnsignedValue => todo!(),
+            Primitive::IntegerAsDouble => todo!(),
+            Primitive::IntegerFromString => todo!(),
+            Primitive::ObjectClass => todo!(),
+            Primitive::ObjectObjectSize => todo!(),
+            Primitive::ObjectRefEq => todo!(),
+            Primitive::ObjectHashcode => todo!(),
+            Primitive::ObectInspect => todo!(),
+            Primitive::ObjectHalt => todo!(),
+            Primitive::ObjectPerform => todo!(),
+            Primitive::ObjectPerformWithArguments => todo!(),
+            Primitive::ObjectPerformInSuperclass => todo!(),
+            Primitive::ObjectPerformWithArgmentsInSuperclass => todo!(),
+            Primitive::ObjectInstVarAt => todo!(),
+            Primitive::ObjectInstVarAtPut => todo!(),
+            Primitive::ObjectInstVarNamed => todo!(),
+            Primitive::StringConcatenate => todo!(),
+            Primitive::StringAsSymbol => todo!(),
+            Primitive::StringHashcode => todo!(),
+            Primitive::StringLength => todo!(),
+            Primitive::StringIsWhitespace => todo!(),
+            Primitive::StringIsLetters => todo!(),
+            Primitive::StringIsDigits => todo!(),
+            Primitive::StringEq => todo!(),
+            Primitive::StringPrimSubstringFromTo => todo!(),
+            Primitive::SystemGlobal => todo!(),
+            Primitive::SystemGlobalPut => todo!(),
+            Primitive::SystemHasGlobal => todo!(),
+            Primitive::SystemLoadFile => todo!(),
+            Primitive::SystemLoad => todo!(),
+            Primitive::SystemExit => todo!(),
+            Primitive::SystemPrintString => todo!(),
+            Primitive::SystemPrintNewline => todo!(),
+            Primitive::SystemErrorPrintln => todo!(),
+            Primitive::SystemErrorPrint => todo!(),
+            Primitive::SystemPrintStackTrace => todo!(),
+            Primitive::SystemTime => todo!(),
+            Primitive::SystemTicks => todo!(),
+            Primitive::SystemFullGC => todo!(),
+        }
     }
 }

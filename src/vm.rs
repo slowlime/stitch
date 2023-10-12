@@ -27,6 +27,40 @@ use self::value::{tag, Class, IntoValue, Method, Object, TypedValue, Value};
 
 pub const RUN_METHOD_NAME: &str = "run";
 
+#[inline(always)]
+fn check_arg_count<'gc>(
+    args: &[Value<'gc>],
+    params: &[Spanned<String>],
+    dispatch_span: Option<Span>,
+    callee_span: Option<Span>,
+    callee_name: String,
+) -> Result<(), VmError> {
+    match args.len().cmp(&params.len()) {
+        Ordering::Less => {
+            return Err(VmError::NotEnoughArguments {
+                dispatch_span,
+                callee_span,
+                callee_name,
+                expected_count: params.len(),
+                provided_count: args.len(),
+                missing_params: params[args.len()..].to_vec(),
+            })
+        }
+
+        Ordering::Greater => {
+            return Err(VmError::TooManyArguments {
+                dispatch_span,
+                callee_span,
+                callee_name,
+                expected_count: params.len(),
+                provided_count: args.len(),
+            })
+        }
+
+        Ordering::Equal => Ok(()),
+    }
+}
+
 fn check_method_name_collisions(
     class_method: bool,
     methods: &[ast::Method],
@@ -429,8 +463,11 @@ impl<'gc> Vm<'gc> {
 
         let code = match def {
             ast::MethodDef::Block(blk) => MethodDef::Code(self.process_method_code(blk, fields)),
-            ast::MethodDef::Primitive => {
-                MethodDef::Primitive(self.resolve_primitive(class_name, &method.selector)?)
+            ast::MethodDef::Primitive { params } => {
+                MethodDef::Primitive {
+                    primitive: self.resolve_primitive(class_name, &method.selector)?,
+                    params,
+                }
             }
         };
         let def = Spanned::new(code, def_location);
@@ -644,11 +681,11 @@ impl<'gc> Vm<'gc> {
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, VmError> {
         assert!(
-            self.frames.len() == 1,
-            "expected exactly one frame on the stack"
+            self.frames.len() == 0,
+            "execute_method called with non-empty frame stack"
         );
 
-        let result = match method.eval(self, args) {
+        let result = match method.eval(self, None, args, vec![None]) {
             Effect::None(_) => panic!("method has no return statement"),
             Effect::Return(value) => Ok(value),
             Effect::NonLocalReturn { .. } => {
@@ -668,37 +705,14 @@ impl<'gc> Vm<'gc> {
         block: &ast::Block,
         dispatch_span: Option<Span>,
         callee: Callee<'gc>,
-        params: Vec<Value<'gc>>,
+        args: Vec<Value<'gc>>,
     ) -> Result<(), VmError> {
-        match params.len().cmp(&block.params.len()) {
-            Ordering::Less => {
-                return Err(VmError::NotEnoughArguments {
-                    dispatch_span,
-                    callee_span: callee.location().span(),
-                    callee_name: callee.name().to_string(),
-                    expected_count: block.params.len(),
-                    provided_count: params.len(),
-                    missing_params: block.params[params.len()..].to_vec(),
-                })
-            }
+        check_arg_count(&args, &block.params, dispatch_span, callee.location().span(), callee.name().to_string())?;
 
-            Ordering::Greater => {
-                return Err(VmError::TooManyArguments {
-                    dispatch_span,
-                    callee_span: callee.location().span(),
-                    callee_name: callee.name().to_string(),
-                    expected_count: block.params.len(),
-                    provided_count: params.len(),
-                })
-            }
-
-            Ordering::Equal => {}
-        }
-
-        let mut locals = Vec::with_capacity(params.len() + block.locals.len());
+        let mut locals = Vec::with_capacity(args.len() + block.locals.len());
         let mut local_map = HashMap::new();
 
-        for (name, value) in block.params.iter().cloned().zip(params) {
+        for (name, value) in block.params.iter().cloned().zip(args) {
             local_map.insert(name.value.clone(), locals.len());
             locals.push(Local {
                 name,

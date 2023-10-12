@@ -620,7 +620,7 @@ impl<'a> Parser<'a> {
             Special::Primitive => {
                 let token = self.expect(Special::Primitive).unwrap();
 
-                Spanned::new_spanning(ast::MethodDef::Primitive, token.span)
+                Spanned::new_spanning(ast::MethodDef::Primitive { params }, token.span)
             },
 
             Special::ParenLeft => {
