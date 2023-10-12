@@ -346,6 +346,8 @@ pub struct Builtins<'gc> {
     pub symbol: TypedValue<'gc, tag::Class>,
     pub primitive: TypedValue<'gc, tag::Class>,
     pub string: TypedValue<'gc, tag::Class>,
+    pub true_object: TypedValue<'gc, tag::Object>,
+    pub false_object: TypedValue<'gc, tag::Object>,
 }
 
 pub struct Vm<'gc> {
@@ -633,6 +635,14 @@ impl<'gc> Vm<'gc> {
 
     fn make_float(&self, float: f64) -> TypedValue<'gc, tag::Float> {
         float.into_value(self.gc)
+    }
+
+    fn make_boolean(&self, value: bool) -> TypedValue<'gc, tag::Object> {
+        if value {
+            self.builtins().true_object.clone()
+        } else {
+            self.builtins().false_object.clone()
+        }
     }
 
     fn make_object(&self, class: TypedValue<'gc, tag::Class>) -> TypedValue<'gc, tag::Object> {

@@ -130,4 +130,26 @@ pub enum VmError {
 
         size: i64,
     },
+
+    #[error("floating-point value ({value}) is too large for an integer")]
+    FloatTooLargeForInt {
+        #[label]
+        span: Option<Span>,
+
+        value: f64,
+    },
+
+    #[error("floating-point value is a NaN and cannot be converted to an integer")]
+    NanFloatToInt {
+        #[label]
+        span: Option<Span>,
+    },
+
+    #[error("string does not contain a valid floating-point value")]
+    DoubleFromInvalidString {
+        #[label]
+        span: Option<Span>,
+
+        value: String,
+    },
 }
