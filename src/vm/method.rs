@@ -89,7 +89,7 @@ define_primitives! {
 
         PrimitiveSignature = ("Primitive", "signature"),
         PrimitiveHolder = ("Primitive", "holder"),
-        PrimitveInvokeOnWith = ("Primtive", "invokeOn:with:"),
+        PrimitiveInvokeOnWith = ("Primtive", "invokeOn:with:"),
 
         SymbolAsString = ("Symbol", "asString"),
 

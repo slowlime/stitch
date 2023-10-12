@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::mem;
 use std::ptr;
 
 use crate::ast;
@@ -452,10 +453,16 @@ impl<'gc> TypedValue<'gc, tag::Method> {
 }
 
 impl<'gc> TypedValue<'gc, tag::Block> {
-    pub(super) fn eval(&self, vm: &mut Vm<'gc>, args: Vec<Value<'gc>>) -> Effect<'gc> {
+    pub(super) fn eval(
+        &self,
+        vm: &mut Vm<'gc>,
+        dispatch_span: Option<Span>,
+        args: Vec<Value<'gc>>,
+        arg_spans: Vec<Option<Span>>,
+    ) -> Effect<'gc> {
         ok_or_unwind!(vm.push_frame(
             &self.get().code,
-            self.get().location.span(),
+            dispatch_span,
             Callee::Block {
                 block: self.clone(),
             },
@@ -491,6 +498,19 @@ impl Primitive {
                     size: contents.len(),
                 }),
             }
+        }
+
+        #[inline]
+        fn block_value<'gc>(vm: &mut Vm<'gc>, dispatch_span: Option<Span>, mut args: Vec<Value<'gc>>, mut arg_spans: Vec<Option<Span>>) -> Effect<'gc> {
+            let recv = mem::take(&mut args[0]);
+            let block = ok_or_unwind!(recv.downcast_or_err::<tag::Block>(arg_spans[0]));
+
+            for _ in args.len()..block.get().code.params.len() {
+                args.push(vm.builtins().nil_object.clone().into_value());
+                arg_spans.push(None);
+            }
+
+            block.eval(vm, dispatch_span, args, arg_spans)
         }
 
         match self {
@@ -554,16 +574,19 @@ impl Primitive {
                 Effect::None(vm.make_array(arr).into_value())
             }
 
-            Primitive::BlockValue => todo!(),
-            Primitive::BlockRestart => todo!(),
-            Primitive::Block1Value => todo!(),
-            Primitive::Block2Value => todo!(),
-            Primitive::Block3ValueWith => todo!(),
+            Primitive::BlockValue => block_value(vm, dispatch_span, args, arg_spans),
+            Primitive::BlockRestart => todo!("what is this even supposed to do?"),
+            Primitive::Block1Value => Primitive::BlockValue.eval(vm, dispatch_span, args, arg_spans),
+
+            Primitive::Block2Value => block_value(vm, dispatch_span, args, arg_spans),
+            Primitive::Block3ValueWith => block_value(vm, dispatch_span, args, arg_spans),
+
             Primitive::ClassName => todo!(),
             Primitive::ClassNew => todo!(),
             Primitive::ClassSuperclass => todo!(),
             Primitive::ClassFields => todo!(),
             Primitive::ClassMethods => todo!(),
+
             Primitive::DoubleAdd => todo!(),
             Primitive::DoubleSub => todo!(),
             Primitive::DoubleMul => todo!(),
@@ -579,13 +602,17 @@ impl Primitive {
             Primitive::DoubleAsString => todo!(),
             Primitive::DoublePositiveInfinity => todo!(),
             Primitive::DoubleFromString => todo!(),
+
             Primitive::MethodSignature => todo!(),
             Primitive::MethodHolder => todo!(),
             Primitive::MethodInvokeOnWith => todo!(),
+
             Primitive::PrimitiveSignature => todo!(),
             Primitive::PrimitiveHolder => todo!(),
-            Primitive::PrimitveInvokeOnWith => todo!(),
+            Primitive::PrimitiveInvokeOnWith => todo!(),
+
             Primitive::SymbolAsString => todo!(),
+
             Primitive::IntegerAdd => todo!(),
             Primitive::IntegerSub => todo!(),
             Primitive::IntegerMul => todo!(),
@@ -605,6 +632,7 @@ impl Primitive {
             Primitive::IntegerAs32BitUnsignedValue => todo!(),
             Primitive::IntegerAsDouble => todo!(),
             Primitive::IntegerFromString => todo!(),
+
             Primitive::ObjectClass => todo!(),
             Primitive::ObjectObjectSize => todo!(),
             Primitive::ObjectRefEq => todo!(),
@@ -618,6 +646,7 @@ impl Primitive {
             Primitive::ObjectInstVarAt => todo!(),
             Primitive::ObjectInstVarAtPut => todo!(),
             Primitive::ObjectInstVarNamed => todo!(),
+
             Primitive::StringConcatenate => todo!(),
             Primitive::StringAsSymbol => todo!(),
             Primitive::StringHashcode => todo!(),
