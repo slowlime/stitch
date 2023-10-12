@@ -152,4 +152,12 @@ pub enum VmError {
 
         value: String,
     },
+
+    #[error("string does not contain a valid integer")]
+    IntegerFromInvalidString {
+        #[label]
+        span: Option<Span>,
+
+        value: String,
+    },
 }

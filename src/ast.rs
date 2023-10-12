@@ -452,6 +452,13 @@ impl SymbolLit {
             Self::Selector(sel) => sel.location,
         }
     }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::String(name) => &name.value,
+            Self::Selector(selector) => selector.value.name(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
