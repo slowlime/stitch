@@ -1,5 +1,5 @@
-use std::num::NonZeroUsize;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::ptr;
 
 use crate::ast;
@@ -501,7 +501,12 @@ impl Primitive {
         }
 
         #[inline]
-        fn block_value<'gc>(vm: &mut Vm<'gc>, dispatch_span: Option<Span>, mut args: Vec<Value<'gc>>, mut arg_spans: Vec<Option<Span>>) -> Effect<'gc> {
+        fn block_value<'gc>(
+            vm: &mut Vm<'gc>,
+            dispatch_span: Option<Span>,
+            mut args: Vec<Value<'gc>>,
+            mut arg_spans: Vec<Option<Span>>,
+        ) -> Effect<'gc> {
             let recv = mem::take(&mut args[0]);
             let block = ok_or_unwind!(recv.downcast_or_err::<tag::Block>(arg_spans[0]));
 
@@ -576,16 +581,64 @@ impl Primitive {
 
             Primitive::BlockValue => block_value(vm, dispatch_span, args, arg_spans),
             Primitive::BlockRestart => todo!("what is this even supposed to do?"),
-            Primitive::Block1Value => Primitive::BlockValue.eval(vm, dispatch_span, args, arg_spans),
+            Primitive::Block1Value => {
+                Primitive::BlockValue.eval(vm, dispatch_span, args, arg_spans)
+            }
 
             Primitive::Block2Value => block_value(vm, dispatch_span, args, arg_spans),
             Primitive::Block3ValueWith => block_value(vm, dispatch_span, args, arg_spans),
 
-            Primitive::ClassName => todo!(),
-            Primitive::ClassNew => todo!(),
-            Primitive::ClassSuperclass => todo!(),
-            Primitive::ClassFields => todo!(),
-            Primitive::ClassMethods => todo!(),
+            Primitive::ClassName => {
+                let [recv] = args.try_into().unwrap();
+                let cls = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
+
+                Effect::None(vm.make_string(cls.get().name.value.clone()).into_value())
+            }
+
+            Primitive::ClassNew => {
+                let [recv] = args.try_into().unwrap();
+                let cls = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
+
+                Effect::None(vm.make_object(cls).into_value())
+            }
+
+            Primitive::ClassSuperclass => {
+                let [recv] = args.try_into().unwrap();
+                let cls = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
+
+                Effect::None(match cls.get().superclass {
+                    Some(ref superclass) => superclass.clone().into_value(),
+                    None => vm.builtins().nil_object.clone().into_value(),
+                })
+            }
+
+            Primitive::ClassFields => {
+                let [recv] = args.try_into().unwrap();
+                let obj = match recv.get_obj() {
+                    Some(obj) => obj,
+                    None => return Effect::None(vm.make_array(vec![]).into_value()),
+                };
+
+                let fields = obj.fields.borrow().clone();
+
+                Effect::None(vm.make_array(fields).into_value())
+            }
+
+            Primitive::ClassMethods => {
+                let [recv] = args.try_into().unwrap();
+                let cls = recv.get_class(vm);
+
+                Effect::None(
+                    vm.make_array(
+                        cls.get()
+                            .methods
+                            .iter()
+                            .map(|method| method.clone().into_value())
+                            .collect(),
+                    )
+                    .into_value(),
+                )
+            }
 
             Primitive::DoubleAdd => todo!(),
             Primitive::DoubleSub => todo!(),
