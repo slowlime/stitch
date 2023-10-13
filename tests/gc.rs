@@ -3,7 +3,7 @@ use std::mem;
 use std::rc::Rc;
 
 use stitch::impl_collect;
-use stitch::vm::gc::{Collect, Finalize, GarbageCollector, Gc, GcRefCell, GcOnceCell};
+use stitch::vm::gc::{Collect, Finalize, GarbageCollector, Gc, GcOnceCell, GcRefCell};
 
 #[derive(Debug)]
 struct DropFlagger(Rc<Cell<usize>>);

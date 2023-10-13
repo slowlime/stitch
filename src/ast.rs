@@ -197,9 +197,7 @@ impl SpannedSelector {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MethodDef {
-    Primitive {
-        params: Vec<Name>,
-    },
+    Primitive { params: Vec<Name> },
 
     Block(Block),
 }

@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::hash::{self, Hash};
 use std::marker::PhantomData;
+use std::mem;
 use std::ops::{Deref, DerefMut};
+use std::ptr;
 
 use crate::ast::{self, SymbolLit as Symbol};
 use crate::impl_collect;
@@ -70,6 +73,67 @@ impl<'gc> Value<'gc> {
     pub fn get_obj(&self) -> Option<&Object<'gc>> {
         self.0.as_ref()?.get_obj()
     }
+
+    pub fn size(&self) -> usize {
+        self.0.as_ref().map(|value| value.size()).unwrap_or(0)
+    }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(lhs), Some(rhs)) => lhs.ptr_eq(rhs),
+            _ => false,
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const ValueKind<'gc> {
+        match &self.0 {
+            Some(inner) => &**inner,
+            None => ptr::null(),
+        }
+    }
+
+    pub fn hash_code(&self) -> usize {
+        fxhash::hash(self)
+    }
+}
+
+impl Hash for Value<'_> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        mem::discriminant(&self.0).hash(state);
+
+        match &self.0 {
+            Some(inner) => {
+                let kind: &ValueKind = &**inner;
+                mem::discriminant(kind).hash(state);
+
+                match kind {
+                    ValueKind::Int(i) => i.hash(state),
+                    ValueKind::Float(f) if f.is_nan() => 0x7ff8000000000000u64.hash(state),
+                    ValueKind::Float(f) if *f == 0.0 && f.is_sign_negative() => {
+                        0f64.to_bits().hash(state)
+                    }
+                    ValueKind::Float(f) => f.to_bits().hash(state),
+                    ValueKind::Array(arr) => arr.borrow().hash(state),
+                    ValueKind::Block(block) => block.obj.get().unwrap().hash(state),
+                    ValueKind::Class(class) => class.obj.get().unwrap().hash(state),
+                    ValueKind::Method(method) => method.obj.get().unwrap().hash(state),
+                    ValueKind::Object(_) => self.as_ptr().hash(state),
+                    ValueKind::String(s) => s.hash(state),
+
+                    ValueKind::Symbol(sym) => {
+                        mem::discriminant(sym).hash(state);
+
+                        match sym {
+                            Symbol::String(s) => s.hash(state),
+                            Symbol::Selector(selector) => selector.value.name().hash(state),
+                        }
+                    }
+                }
+            }
+
+            None => {}
+        }
+    }
 }
 
 impl Finalize for Value<'_> {}
@@ -121,14 +185,18 @@ macro_rules! define_value_kind {
             )+
         }
 
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub enum Ty {
+            NamedClass(Box<String>),
+
             $( $name, )+
         }
 
         impl Display for Ty {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 match self {
+                    Self::NamedClass(name) => name.fmt(f),
+
                     $( Self::$name => $display.fmt(f), )+
                 }
             }
@@ -225,6 +293,10 @@ impl<'gc> ValueKind<'gc> {
             Self::String(_) => &vm.builtins().string,
         }
     }
+
+    pub fn size(&self) -> usize {
+        mem::size_of_val(self)
+    }
 }
 
 impl Finalize for ValueKind<'_> {}
@@ -288,6 +360,12 @@ impl<'gc, T: Tag> TypedValue<'gc, T> {
 impl<'gc, T: Tag> Default for TypedValue<'gc, T> {
     fn default() -> Self {
         Self(Value::new_illegal(), PhantomData)
+    }
+}
+
+impl<'gc, T: Tag> Hash for TypedValue<'gc, T> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
     }
 }
 
@@ -369,6 +447,22 @@ impl<'gc> Class<'gc> {
 
     pub fn get_local_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
         self.method_map.get(name).map(|&idx| &self.methods[idx])
+    }
+
+    pub fn is_subclass_of(&self, superclass: &Class<'gc>) -> bool {
+        let mut cls = self;
+
+        loop {
+            if ptr::eq(cls, superclass) {
+                return true;
+            }
+
+            if let Some(parent) = cls.superclass.as_ref() {
+                cls = parent.get();
+            } else {
+                return false;
+            }
+        }
     }
 }
 
@@ -466,7 +560,12 @@ impl<'gc> Object<'gc> {
     }
 
     pub fn get_supermethod_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
-        self.class.get().superclass.as_ref()?.get().get_method_by_name(name)
+        self.class
+            .get()
+            .superclass
+            .as_ref()?
+            .get()
+            .get_method_by_name(name)
     }
 }
 

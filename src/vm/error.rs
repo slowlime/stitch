@@ -89,7 +89,6 @@ pub enum VmError {
     NlRetFromEscapedBlock {
         #[label]
         ret_span: Option<Span>,
-
         // TODO:
         // method_span: Option<Span>,
     },
@@ -159,5 +158,17 @@ pub enum VmError {
         span: Option<Span>,
 
         value: String,
+    },
+
+    #[error("object of class `{class_name}` has no field `{field_name}`")]
+    NoSuchField {
+        #[label]
+        span: Option<Span>,
+
+        #[label = "class `{class_name}` defined here"]
+        class_span: Option<Span>,
+
+        class_name: String,
+        field_name: String,
     },
 }

@@ -465,12 +465,10 @@ impl<'gc> Vm<'gc> {
 
         let code = match def {
             ast::MethodDef::Block(blk) => MethodDef::Code(self.process_method_code(blk, fields)),
-            ast::MethodDef::Primitive { params } => {
-                MethodDef::Primitive {
-                    primitive: self.resolve_primitive(class_name, &method.selector)?,
-                    params,
-                }
-            }
+            ast::MethodDef::Primitive { params } => MethodDef::Primitive {
+                primitive: self.resolve_primitive(class_name, &method.selector)?,
+                params,
+            },
         };
         let def = Spanned::new(code, def_location);
         let method = self.make_method(method.selector, method.location, def);
@@ -717,7 +715,13 @@ impl<'gc> Vm<'gc> {
         callee: Callee<'gc>,
         args: Vec<Value<'gc>>,
     ) -> Result<(), VmError> {
-        check_arg_count(&args, &block.params, dispatch_span, callee.location().span(), callee.name().to_string())?;
+        check_arg_count(
+            &args,
+            &block.params,
+            dispatch_span,
+            callee.location().span(),
+            callee.name().to_string(),
+        )?;
 
         let mut locals = Vec::with_capacity(args.len() + block.locals.len());
         let mut local_map = HashMap::new();

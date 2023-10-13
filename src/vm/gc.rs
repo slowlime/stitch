@@ -469,6 +469,10 @@ impl<'gc, T: ?Sized> Gc<'gc, T> {
     unsafe fn inner(&self) -> &GcBox<'gc, T> {
         unsafe { self.inner.as_ref() }
     }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        self.inner.as_ptr() == other.inner.as_ptr()
+    }
 }
 
 impl<T: ?Sized> Drop for Gc<'_, T> {

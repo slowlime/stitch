@@ -7,9 +7,8 @@ use crate::location::{Span, Spanned};
 
 use super::error::VmError;
 use super::frame::{Callee, Frame, Local, Upvalue};
-use super::gc::GcRef;
 use super::method::{MethodDef, Primitive};
-use super::value::{tag, TypedValue, Value};
+use super::value::{tag, Ty, TypedValue, Value};
 use super::{check_arg_count, Vm};
 
 /// The result of a computation — either a plain value or a triggered effect.
@@ -488,15 +487,15 @@ impl Primitive {
         #[inline]
         fn check_arr_idx<'a, 'gc>(
             span: Option<Span>,
-            contents: &GcRef<'a, Vec<Value<'gc>>>,
+            contents_len: usize,
             idx: i64,
         ) -> Result<usize, VmError> {
             match usize::try_from(idx) {
-                Ok(idx) if idx < contents.len() => Ok(idx),
+                Ok(idx) if idx < contents_len => Ok(idx),
                 _ => Err(VmError::IndexOutOfBounds {
                     span,
                     idx,
-                    size: contents.len(),
+                    size: contents_len,
                 }),
             }
         }
@@ -541,13 +540,61 @@ impl Primitive {
             }
         }
 
+        #[inline]
+        fn object_perform<'gc>(
+            dispatch_span: Option<Span>,
+            vm: &mut Vm<'gc>,
+            recv: Value<'gc>,
+            recv_span: Option<Span>,
+            sym: TypedValue<'gc, tag::Symbol>,
+            sym_span: Option<Span>,
+            class: Option<TypedValue<'gc, tag::Class>>,
+            mut args: Vec<Value<'gc>>,
+        ) -> Effect<'gc> {
+            let class = match class {
+                Some(class) if recv.get_class(vm).get().is_subclass_of(class.get()) => class,
+
+                Some(class) => {
+                    return Effect::Unwind(VmError::IllegalTy {
+                        span: recv_span,
+                        expected: vec![Ty::NamedClass(Box::new(class.get().name.value.clone()))]
+                            .into(),
+                        actual: Ty::NamedClass(Box::new(
+                            recv.get_class(vm).get().name.value.clone(),
+                        )),
+                    })
+                }
+
+                None => recv.get_class(vm).clone(),
+            };
+
+            let method = match class.get().get_method_by_name(sym.get().as_str()) {
+                Some(method) => method,
+
+                None => {
+                    return Effect::Unwind(VmError::NoSuchMethod {
+                        span: sym_span,
+                        class_span: class.get().name.span(),
+                        class_name: class.get().name.value.clone(),
+                        method_name: sym.get().as_str().to_owned(),
+                    })
+                }
+            };
+
+            args.insert(0, recv);
+            let mut arg_spans = vec![None; args.len()];
+            arg_spans[0] = recv_span;
+
+            method.eval(vm, dispatch_span, args, arg_spans)
+        }
+
         match self {
             Primitive::ArrayAt => {
                 let [recv, idx] = args.try_into().unwrap();
                 let arr = ok_or_unwind!(recv.downcast_or_err::<tag::Array>(arg_spans[0]));
                 let idx = ok_or_unwind!(idx.downcast_or_err::<tag::Int>(arg_spans[1])).get();
                 let contents = arr.get().borrow();
-                let idx = ok_or_unwind!(check_arr_idx(dispatch_span, &contents, idx));
+                let idx = ok_or_unwind!(check_arr_idx(dispatch_span, contents.len(), idx));
 
                 Effect::None(contents[idx].clone())
             }
@@ -556,7 +603,8 @@ impl Primitive {
                 let [recv, idx, value] = args.try_into().unwrap();
                 let arr = ok_or_unwind!(recv.downcast_or_err::<tag::Array>(arg_spans[0]));
                 let idx = ok_or_unwind!(idx.downcast_or_err::<tag::Int>(arg_spans[1])).get();
-                let idx = ok_or_unwind!(check_arr_idx(dispatch_span, &arr.get().borrow(), idx));
+                let idx =
+                    ok_or_unwind!(check_arr_idx(dispatch_span, arr.get().borrow().len(), idx));
 
                 arr.get().borrow_mut()[idx] = value;
 
@@ -829,6 +877,8 @@ impl Primitive {
                 // let's assume the following is the intended behavior.
                 let [recv, obj, call_args] = args.try_into().unwrap();
                 let method = ok_or_unwind!(recv.downcast_or_err::<tag::Method>(arg_spans[0]));
+                // TODO: check that the receiver type is compatible with the type of the method holder
+                // (and in other places too)
                 let mut call_args =
                     ok_or_unwind!(call_args.downcast_or_err::<tag::Array>(arg_spans[2]))
                         .get()
@@ -1033,30 +1083,194 @@ impl Primitive {
             Primitive::IntegerFromString => {
                 let [recv, s] = args.try_into().unwrap();
                 let _ = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0])).get();
-                let s = ok_or_unwind!(s.downcast_or_err::<tag::String>(arg_spans[0]));
+                let s = ok_or_unwind!(s.downcast_or_err::<tag::String>(arg_spans[1]));
 
                 match s.get().parse::<i64>() {
                     Ok(i) => Effect::None(vm.make_int(i).into_value()),
                     Err(_) => Effect::Unwind(VmError::IntegerFromInvalidString {
                         span: dispatch_span,
                         value: s.get().to_owned(),
-                    })
+                    }),
                 }
             }
 
-            Primitive::ObjectClass => todo!(),
-            Primitive::ObjectObjectSize => todo!(),
-            Primitive::ObjectRefEq => todo!(),
-            Primitive::ObjectHashcode => todo!(),
-            Primitive::ObectInspect => todo!(),
-            Primitive::ObjectHalt => todo!(),
-            Primitive::ObjectPerform => todo!(),
-            Primitive::ObjectPerformWithArguments => todo!(),
-            Primitive::ObjectPerformInSuperclass => todo!(),
-            Primitive::ObjectPerformWithArgmentsInSuperclass => todo!(),
-            Primitive::ObjectInstVarAt => todo!(),
-            Primitive::ObjectInstVarAtPut => todo!(),
-            Primitive::ObjectInstVarNamed => todo!(),
+            Primitive::ObjectClass => {
+                let [recv] = args.try_into().unwrap();
+                let cls = recv.get_class(vm);
+
+                Effect::None(cls.clone().into_value())
+            }
+
+            Primitive::ObjectObjectSize => {
+                let [recv] = args.try_into().unwrap();
+                let size = recv.size() as i64;
+
+                Effect::None(vm.make_int(size).into_value())
+            }
+
+            Primitive::ObjectRefEq => {
+                let [lhs, rhs] = args.try_into().unwrap();
+
+                // TODO: compare ints/floats by value
+                Effect::None(vm.make_boolean(lhs.ptr_eq(&rhs)).into_value())
+            }
+
+            Primitive::ObjectHashcode => {
+                let [recv] = args.try_into().unwrap();
+
+                Effect::None(vm.make_int(recv.hash_code() as i64).into_value())
+            }
+
+            Primitive::ObjectInspect => todo!("??"),
+            Primitive::ObjectHalt => todo!("???????"),
+
+            Primitive::ObjectPerform => {
+                let [recv, sym] = args.try_into().unwrap();
+                let sym = ok_or_unwind!(sym.downcast_or_err::<tag::Symbol>(arg_spans[1]));
+
+                object_perform(
+                    dispatch_span,
+                    vm,
+                    recv,
+                    arg_spans[0],
+                    sym,
+                    arg_spans[1],
+                    None,
+                    vec![],
+                )
+            }
+
+            Primitive::ObjectPerformWithArguments => {
+                let [recv, sym, call_args] = args.try_into().unwrap();
+                let sym = ok_or_unwind!(sym.downcast_or_err::<tag::Symbol>(arg_spans[1]));
+                let call_args =
+                    ok_or_unwind!(call_args.downcast_or_err::<tag::Array>(arg_spans[2]))
+                        .get()
+                        .borrow()
+                        .clone();
+
+                object_perform(
+                    dispatch_span,
+                    vm,
+                    recv,
+                    arg_spans[0],
+                    sym,
+                    arg_spans[1],
+                    None,
+                    call_args,
+                )
+            }
+
+            Primitive::ObjectPerformInSuperclass => {
+                let [recv, sym, superclass] = args.try_into().unwrap();
+                let sym = ok_or_unwind!(sym.downcast_or_err::<tag::Symbol>(arg_spans[1]));
+                let superclass =
+                    ok_or_unwind!(superclass.downcast_or_err::<tag::Class>(arg_spans[2]));
+
+                object_perform(
+                    dispatch_span,
+                    vm,
+                    recv,
+                    arg_spans[0],
+                    sym,
+                    arg_spans[1],
+                    Some(superclass),
+                    vec![],
+                )
+            }
+
+            Primitive::ObjectPerformWithArgumentsInSuperclass => {
+                let [recv, sym, call_args, superclass] = args.try_into().unwrap();
+                let sym = ok_or_unwind!(sym.downcast_or_err::<tag::Symbol>(arg_spans[1]));
+                let call_args =
+                    ok_or_unwind!(call_args.downcast_or_err::<tag::Array>(arg_spans[2]))
+                        .get()
+                        .borrow()
+                        .clone();
+                let superclass =
+                    ok_or_unwind!(superclass.downcast_or_err::<tag::Class>(arg_spans[3]));
+
+                object_perform(
+                    dispatch_span,
+                    vm,
+                    recv,
+                    arg_spans[0],
+                    sym,
+                    arg_spans[1],
+                    Some(superclass),
+                    call_args,
+                )
+            }
+
+            Primitive::ObjectInstVarAt => {
+                let [recv, idx] = args.try_into().unwrap();
+                let idx = ok_or_unwind!(idx.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+
+                let _fields;
+                let _empty_vec;
+
+                let fields = if let Some(obj) = recv.get_obj() {
+                    _fields = obj.fields.borrow();
+                    &*_fields
+                } else {
+                    _empty_vec = vec![];
+                    &_empty_vec
+                };
+
+                let idx = ok_or_unwind!(check_arr_idx(arg_spans[1], fields.len(), idx));
+
+                // TODO: forbid access to $-fields
+                Effect::None(fields[idx].clone())
+            }
+
+            Primitive::ObjectInstVarAtPut => {
+                let [recv, idx, value] = args.try_into().unwrap();
+                let idx = ok_or_unwind!(idx.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+
+                {
+                    let mut _fields;
+                    let mut _empty_vec;
+
+                    let fields = if let Some(obj) = recv.get_obj() {
+                        _fields = obj.fields.borrow_mut();
+                        &mut *_fields
+                    } else {
+                        _empty_vec = vec![];
+                        &mut _empty_vec
+                    };
+
+                    let idx = ok_or_unwind!(check_arr_idx(arg_spans[1], fields.len(), idx));
+
+                    // TODO: forbid access to $-fields
+                    fields[idx] = value;
+                }
+
+                Effect::None(recv)
+            }
+
+            Primitive::ObjectInstVarNamed => {
+                let [recv, sym] = args.try_into().unwrap();
+                let sym = ok_or_unwind!(sym.downcast_or_err::<tag::Symbol>(arg_spans[1]));
+
+                match recv
+                    .get_obj()
+                    .and_then(|obj| obj.get_field_by_name(sym.get().as_str()))
+                    .map(|field| field.clone())
+                {
+                    Some(value) => Effect::None(value),
+
+                    None => {
+                        let class = recv.get_class(vm).get();
+
+                        return Effect::Unwind(VmError::NoSuchField {
+                            span: dispatch_span,
+                            class_span: class.name.span(),
+                            class_name: class.name.value.clone(),
+                            field_name: sym.get().as_str().to_owned(),
+                        });
+                    }
+                }
+            }
 
             Primitive::StringConcatenate => todo!(),
             Primitive::StringAsSymbol => todo!(),

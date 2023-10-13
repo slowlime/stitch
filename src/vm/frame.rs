@@ -5,7 +5,7 @@ use std::fmt::{self, Display};
 use crate::location::Location;
 use crate::{ast, impl_collect};
 
-use super::gc::{Collect, Finalize, Gc, GcRefCell, GcOnceCell};
+use super::gc::{Collect, Finalize, Gc, GcOnceCell, GcRefCell};
 use super::value::{tag, TypedValue, Value};
 
 pub struct CalleeName<'s, 'gc>(&'s Callee<'gc>);
