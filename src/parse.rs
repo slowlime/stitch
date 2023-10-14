@@ -10,6 +10,8 @@ pub use parser::{Parser, ParserError};
 use crate::ast;
 use crate::sourcemap::SourceFile;
 
+pub use self::lexer::is_ident;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum BigNumberBehavior {
     #[default]

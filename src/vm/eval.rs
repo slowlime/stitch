@@ -2,7 +2,7 @@ use std::mem;
 use std::num::NonZeroUsize;
 use std::ptr;
 
-use crate::ast;
+use crate::ast::{self, SymbolLit as Symbol};
 use crate::location::{Span, Spanned};
 
 use super::error::VmError;
@@ -490,8 +490,8 @@ impl Primitive {
             contents_len: usize,
             idx: i64,
         ) -> Result<usize, VmError> {
-            match usize::try_from(idx) {
-                Ok(idx) if idx < contents_len => Ok(idx),
+            match usize::try_from(idx).ok().and_then(|idx| idx.checked_sub(1)) {
+                Some(idx) if idx < contents_len => Ok(idx),
                 _ => Err(VmError::IndexOutOfBounds {
                     span,
                     idx,
@@ -650,12 +650,10 @@ impl Primitive {
                 Effect::None(vm.make_array(arr).into_value())
             }
 
-            Primitive::BlockValue => block_value(vm, dispatch_span, args, arg_spans),
-            Primitive::BlockRestart => todo!("what is this even supposed to do?"),
-            Primitive::Block1Value => {
-                Primitive::BlockValue.eval(vm, this_method, dispatch_span, args, arg_spans)
+            Primitive::BlockValue | Primitive::Block1Value => {
+                block_value(vm, dispatch_span, args, arg_spans)
             }
-
+            Primitive::BlockRestart => todo!("what is this even supposed to do?"),
             Primitive::Block2Value => block_value(vm, dispatch_span, args, arg_spans),
             Primitive::Block3ValueWith => block_value(vm, dispatch_span, args, arg_spans),
 
@@ -855,7 +853,7 @@ impl Primitive {
                 }
             }
 
-            Primitive::MethodSignature => {
+            Primitive::MethodSignature | Primitive::PrimitiveSignature => {
                 let [recv] = args.try_into().unwrap();
                 let method = ok_or_unwind!(recv.downcast_or_err::<tag::Method>(arg_spans[0]));
 
@@ -865,14 +863,14 @@ impl Primitive {
                 )
             }
 
-            Primitive::MethodHolder => {
+            Primitive::MethodHolder | Primitive::PrimitiveHolder => {
                 let [recv] = args.try_into().unwrap();
                 let method = ok_or_unwind!(recv.downcast_or_err::<tag::Method>(arg_spans[0]));
 
                 Effect::None(method.get().holder.get().unwrap().clone().into_value())
             }
 
-            Primitive::MethodInvokeOnWith => {
+            Primitive::MethodInvokeOnWith | Primitive::PrimitiveInvokeOnWith => {
                 // this is a nebulous method: neither SOM nor ykSOM seem to define its semantics.
                 // let's assume the following is the intended behavior.
                 let [recv, obj, call_args] = args.try_into().unwrap();
@@ -901,16 +899,6 @@ impl Primitive {
                 vm.frames.pop();
 
                 result
-            }
-
-            Primitive::PrimitiveSignature => {
-                Primitive::MethodSignature.eval(vm, this_method, dispatch_span, args, arg_spans)
-            }
-            Primitive::PrimitiveHolder => {
-                Primitive::MethodHolder.eval(vm, this_method, dispatch_span, args, arg_spans)
-            }
-            Primitive::PrimitiveInvokeOnWith => {
-                Primitive::MethodInvokeOnWith.eval(vm, this_method, dispatch_span, args, arg_spans)
             }
 
             Primitive::SymbolAsString => {
@@ -1115,7 +1103,7 @@ impl Primitive {
                 Effect::None(vm.make_boolean(lhs.ptr_eq(&rhs)).into_value())
             }
 
-            Primitive::ObjectHashcode => {
+            Primitive::ObjectHashcode | Primitive::StringHashcode => {
                 let [recv] = args.try_into().unwrap();
 
                 Effect::None(vm.make_int(recv.hash_code() as i64).into_value())
@@ -1272,15 +1260,84 @@ impl Primitive {
                 }
             }
 
-            Primitive::StringConcatenate => todo!(),
-            Primitive::StringAsSymbol => todo!(),
-            Primitive::StringHashcode => todo!(),
-            Primitive::StringLength => todo!(),
-            Primitive::StringIsWhitespace => todo!(),
-            Primitive::StringIsLetters => todo!(),
-            Primitive::StringIsDigits => todo!(),
-            Primitive::StringEq => todo!(),
-            Primitive::StringPrimSubstringFromTo => todo!(),
+            Primitive::StringConcatenate => {
+                let [lhs, rhs] = args.try_into().unwrap();
+                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::String>(arg_spans[0]));
+                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::String>(arg_spans[1]));
+
+                Effect::None(
+                    vm.make_string(lhs.get().to_owned() + rhs.get())
+                        .into_value(),
+                )
+            }
+
+            Primitive::StringAsSymbol => {
+                let [recv] = args.try_into().unwrap();
+                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+
+                Effect::None(
+                    vm.make_symbol(Symbol::from_string(
+                        recv.get().to_owned(),
+                        arg_spans[0].into(),
+                    ))
+                    .into_value(),
+                )
+            }
+
+            Primitive::StringLength => {
+                let [recv] = args.try_into().unwrap();
+                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+
+                Effect::None(vm.make_int(recv.get().len() as i64).into_value())
+            }
+
+            Primitive::StringIsWhitespace => {
+                let [recv] = args.try_into().unwrap();
+                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+
+                Effect::None(
+                    vm.make_boolean(recv.get().chars().all(char::is_whitespace))
+                        .into_value(),
+                )
+            }
+
+            Primitive::StringIsLetters => {
+                let [recv] = args.try_into().unwrap();
+                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+
+                Effect::None(
+                    vm.make_boolean(recv.get().chars().all(char::is_alphabetic))
+                        .into_value(),
+                )
+            }
+
+            Primitive::StringIsDigits => {
+                let [recv] = args.try_into().unwrap();
+                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+
+                Effect::None(
+                    vm.make_boolean(recv.get().chars().all(char::is_numeric))
+                        .into_value(),
+                )
+            }
+
+            Primitive::StringEq => {
+                let [lhs, rhs] = args.try_into().unwrap();
+                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::String>(arg_spans[0]));
+                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::String>(arg_spans[1]));
+
+                Effect::None(vm.make_boolean(lhs.get() == rhs.get()).into_value())
+            }
+
+            Primitive::StringPrimSubstringFromTo => {
+                let [recv, from, to] = args.try_into().unwrap();
+                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+                let from = ok_or_unwind!(from.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+                let to = ok_or_unwind!(to.downcast_or_err::<tag::Int>(arg_spans[2])).get();
+
+                todo!()
+            }
+
             Primitive::SystemGlobal => todo!(),
             Primitive::SystemGlobalPut => todo!(),
             Primitive::SystemHasGlobal => todo!(),

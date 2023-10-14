@@ -3,7 +3,8 @@ pub mod visit;
 use std::fmt::{self, Debug, Display, Write};
 use std::num::NonZeroUsize;
 
-use crate::location::{Location, Spanned};
+use crate::location::{Location, Span, Spanned};
+use crate::parse::is_ident;
 use crate::parse::token::is_bin_op_char;
 
 use self::visit::AstRecurse;
@@ -88,7 +89,7 @@ impl Selector {
         &self.name
     }
 
-    pub fn from_string(name: String) -> Self {
+    pub fn from_string(name: String) -> Result<Self, String> {
         let kind = if name.chars().all(is_bin_op_char) {
             SelectorKind::Binary
         } else {
@@ -100,15 +101,24 @@ impl Selector {
             if colons.is_empty() {
                 SelectorKind::Unary
             } else {
+                // the last colon must be at the very end of the name
+                if colons.last().unwrap() + 1 != name.len() {
+                    return Err(name);
+                }
+
                 SelectorKind::Keyword(colons.into())
             }
         };
 
-        Self { name, kind }
+        Ok(Self { name, kind })
     }
 
     pub fn param_count(&self) -> usize {
         self.kind.param_count()
+    }
+
+    pub fn keywords(&self) -> KeywordIter<'_> {
+        KeywordIter::new(self)
     }
 }
 
@@ -124,6 +134,52 @@ impl Display for Selector {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct KeywordIter<'a> {
+    selector: &'a Selector,
+    next_idx: usize,
+}
+
+impl<'a> KeywordIter<'a> {
+    fn new(selector: &'a Selector) -> Self {
+        Self {
+            selector,
+            next_idx: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for KeywordIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = match &self.selector.kind {
+            SelectorKind::Unary | SelectorKind::Binary => {
+                (self.next_idx == 0).then_some(self.selector.name.as_str())
+            }
+
+            SelectorKind::Keyword(kws) if self.next_idx >= kws.len() => None,
+
+            SelectorKind::Keyword(kws) => {
+                let start_pos = self
+                    .next_idx
+                    .checked_sub(1)
+                    .map(|idx| kws[idx] + 1) // kws[idx] is at `:`, and kws[idx]` is at the next char
+                    .unwrap_or_default();
+                let end_pos = kws[self.next_idx];
+
+                Some(&self.selector.name[start_pos..end_pos])
+            }
+        };
+
+        if result.is_some() {
+            self.next_idx += 1;
+        }
+
+        result
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpannedSelector {
     pub location: Location,
@@ -132,6 +188,56 @@ pub struct SpannedSelector {
 }
 
 impl SpannedSelector {
+    pub fn from_selector(selector: Selector, location: Location) -> Self {
+        match location {
+            Location::Builtin => {
+                let kws = match selector.kind {
+                    SelectorKind::Unary | SelectorKind::Binary => None,
+                    SelectorKind::Keyword(ref kws) => {
+                        Some(vec![Location::Builtin; kws.len()].into())
+                    }
+                };
+
+                SpannedSelector {
+                    location,
+                    value: selector,
+                    kws,
+                }
+            }
+
+            Location::UserCode(span) => {
+                let kws = match selector.kind {
+                    SelectorKind::Unary | SelectorKind::Binary => None,
+
+                    SelectorKind::Keyword(ref kws) => {
+                        let mut result = Vec::with_capacity(kws.len());
+                        let offset = span.start().offset();
+
+                        for (idx, colon_pos) in kws.iter().enumerate() {
+                            let start_pos =
+                                idx.checked_sub(1).map(|idx| kws[idx]).unwrap_or_default();
+                            let end_pos = colon_pos + 1;
+                            let len = end_pos - start_pos;
+
+                            result.push(Location::UserCode(Span::new_with_extent(
+                                start_pos + offset,
+                                len,
+                            )));
+                        }
+
+                        Some(result.into_boxed_slice())
+                    }
+                };
+
+                SpannedSelector {
+                    location,
+                    value: selector,
+                    kws,
+                }
+            }
+        }
+    }
+
     pub fn new_unary(name: Name) -> Self {
         let Spanned {
             location,
@@ -444,6 +550,19 @@ pub enum SymbolLit {
 }
 
 impl SymbolLit {
+    pub fn from_string(s: String, location: Location) -> Self {
+        let selector = Selector::from_string(s).and_then(|selector| match selector.kind {
+            SelectorKind::Binary => Ok(selector),
+            _ if selector.keywords().all(is_ident) => Ok(selector),
+            _ => Err(selector.name),
+        });
+
+        match selector {
+            Ok(selector) => Self::Selector(SpannedSelector::from_selector(selector, location)),
+            Err(name) => Self::String(Spanned::new(name, location)),
+        }
+    }
+
     pub fn location(&self) -> Location {
         match self {
             Self::String(name) => name.location,

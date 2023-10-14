@@ -34,7 +34,7 @@ macro_rules! define_primitives {
                 static SELECTORS: OnceLock<Box<[ast::Selector]>> = OnceLock::new();
 
                 &SELECTORS.get_or_init(|| vec![
-                    $( ast::Selector::from_string($method_name.to_owned()), )*
+                    $( ast::Selector::from_string($method_name.to_owned()).expect("invalid selector"), )*
                 ].into())[*self as usize]
             }
 

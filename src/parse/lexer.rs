@@ -42,6 +42,14 @@ fn make_ident_matcher() -> impl FnMut(char) -> bool {
     }
 }
 
+pub fn is_ident(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    s.chars().all(make_ident_matcher())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MatchMode {
     Exact,

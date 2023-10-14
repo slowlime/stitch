@@ -136,6 +136,12 @@ impl From<Location> for Option<SourceSpan> {
     }
 }
 
+impl From<Option<Span>> for Location {
+    fn from(span: Option<Span>) -> Self {
+        span.map(Self::UserCode).unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Spanned<T> {
     pub location: Location,
