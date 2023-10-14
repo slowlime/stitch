@@ -5,12 +5,14 @@ pub mod gc;
 mod method;
 mod value;
 
-use std::cell::RefCell;
+use std::cell::{RefCell, Cell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ptr;
+use std::time::{Instant, Duration};
 
 use crate::ast;
 use crate::ast::visit::{AstRecurse, DefaultVisitor, DefaultVisitorMut};
@@ -356,6 +358,7 @@ pub struct Vm<'gc> {
     frames: Vec<Frame<'gc>>,
     builtins: Option<Builtins<'gc>>,
     upvalues: RefCell<Option<Gc<'gc, Upvalue<'gc>>>>,
+    start_time: Cell<Instant>,
 }
 
 impl<'gc> Vm<'gc> {
@@ -366,6 +369,7 @@ impl<'gc> Vm<'gc> {
             frames: vec![],
             builtins: None,
             upvalues: RefCell::new(None),
+            start_time: Cell::new(Instant::now()),
         }
     }
 
@@ -693,6 +697,8 @@ impl<'gc> Vm<'gc> {
             "execute_method called with non-empty frame stack"
         );
 
+        self.start_time.set(Instant::now());
+
         let result = match method.eval(self, None, args, vec![None]) {
             Effect::None(_) => panic!("method has no return statement"),
             Effect::Return(value) => Ok(value),
@@ -774,5 +780,21 @@ impl<'gc> Vm<'gc> {
         *self.upvalues.borrow_mut() = Some(upvalue.clone());
 
         upvalue
+    }
+
+    fn print(&mut self, msg: impl Display) {
+        todo!()
+    }
+
+    fn eprint(&mut self, s: impl Display) {
+        todo!()
+    }
+
+    fn full_gc(&self) {
+        self.gc.collect()
+    }
+
+    fn ticks(&self) -> Duration {
+        Instant::now().duration_since(self.start_time.get())
     }
 }

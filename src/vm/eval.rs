@@ -1338,20 +1338,102 @@ impl Primitive {
                 todo!()
             }
 
-            Primitive::SystemGlobal => todo!(),
-            Primitive::SystemGlobalPut => todo!(),
-            Primitive::SystemHasGlobal => todo!(),
+            Primitive::SystemGlobal => {
+                let [_, name] = args.try_into().unwrap();
+                let name = ok_or_unwind!(name.downcast_or_err::<tag::Symbol>(arg_spans[1]));
+
+                match vm.get_global(name.get().as_str()) {
+                    Some(value) => Effect::None(value.clone()),
+
+                    None => Effect::Unwind(VmError::UndefinedName {
+                        span: arg_spans[1],
+                        name: name.get().as_str().to_owned(),
+                    }),
+                }
+            }
+
+            Primitive::SystemGlobalPut => {
+                let [recv, name, value] = args.try_into().unwrap();
+                let name = ok_or_unwind!(name.downcast_or_err::<tag::Symbol>(arg_spans[1]));
+
+                vm.set_global(name.get().as_str().to_owned(), value);
+
+                Effect::None(recv)
+            }
+
+            Primitive::SystemHasGlobal => {
+                let [_, name] = args.try_into().unwrap();
+                let name = ok_or_unwind!(name.downcast_or_err::<tag::Symbol>(arg_spans[1]));
+
+                Effect::None(
+                    vm.make_boolean(vm.get_global(name.get().as_str()).is_some())
+                        .into_value(),
+                )
+            }
+
             Primitive::SystemLoadFile => todo!(),
             Primitive::SystemLoad => todo!(),
-            Primitive::SystemExit => todo!(),
-            Primitive::SystemPrintString => todo!(),
-            Primitive::SystemPrintNewline => todo!(),
-            Primitive::SystemErrorPrintln => todo!(),
-            Primitive::SystemErrorPrint => todo!(),
+
+            Primitive::SystemExit => {
+                let [_, code] = args.try_into().unwrap();
+                let code = ok_or_unwind!(code.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+
+                Effect::Unwind(VmError::Exited {
+                    span: dispatch_span,
+                    code,
+                })
+            }
+
+            Primitive::SystemPrintString => {
+                let [recv, msg] = args.try_into().unwrap();
+                let msg = ok_or_unwind!(msg.downcast_or_err::<tag::String>(arg_spans[1]));
+
+                vm.print(msg.get());
+
+                Effect::None(recv)
+            }
+
+            Primitive::SystemPrintNewline => {
+                let [recv] = args.try_into().unwrap();
+                vm.print('\n');
+
+                Effect::None(recv)
+            }
+
+            Primitive::SystemErrorPrintln => {
+                let [recv, msg] = args.try_into().unwrap();
+                let msg = ok_or_unwind!(msg.downcast_or_err::<tag::String>(arg_spans[1]));
+
+                vm.eprint(format_args!("{}\n", msg.get()));
+
+                Effect::None(recv)
+            }
+
+            Primitive::SystemErrorPrint => {
+                let [recv, msg] = args.try_into().unwrap();
+                let msg = ok_or_unwind!(msg.downcast_or_err::<tag::String>(arg_spans[1]));
+
+                vm.eprint(msg.get());
+
+                Effect::None(recv)
+            }
+
             Primitive::SystemPrintStackTrace => todo!(),
             Primitive::SystemTime => todo!(),
-            Primitive::SystemTicks => todo!(),
-            Primitive::SystemFullGC => todo!(),
+
+            Primitive::SystemTicks => {
+                let [_] = args.try_into().unwrap();
+
+                Effect::None(vm.make_int(vm.ticks().as_micros() as i64).into_value())
+            }
+
+            Primitive::SystemFullGC => {
+                let [recv] = args.try_into().unwrap();
+
+                vm.full_gc();
+
+                Effect::None(recv)
+            }
         }
     }
 }

@@ -171,4 +171,12 @@ pub enum VmError {
         class_name: String,
         field_name: String,
     },
+
+    #[error("program exited with code {code}")]
+    Exited {
+        #[label]
+        span: Option<Span>,
+
+        code: i64,
+    },
 }
