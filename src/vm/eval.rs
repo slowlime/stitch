@@ -8,7 +8,7 @@ use crate::location::{Span, Spanned};
 use super::error::VmError;
 use super::frame::{Callee, Frame, Local, Upvalue};
 use super::method::{MethodDef, Primitive};
-use super::value::{tag, Ty, TypedValue, Value};
+use super::value::{tag, SubstrError, Ty, TypedValue, Value};
 use super::{check_arg_count, Vm};
 
 /// The result of a computation — either a plain value or a triggered effect.
@@ -844,11 +844,11 @@ impl Primitive {
                 let _ = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0])).get();
                 let s = ok_or_unwind!(s.downcast_or_err::<tag::String>(arg_spans[1]));
 
-                match s.get().parse::<f64>() {
+                match s.get().as_str().parse::<f64>() {
                     Ok(f) => Effect::None(vm.make_float(f).into_value()),
                     Err(_) => Effect::Unwind(VmError::DoubleFromInvalidString {
                         span: dispatch_span,
-                        value: s.get().to_owned(),
+                        value: s.get().to_string(),
                     }),
                 }
             }
@@ -1073,11 +1073,11 @@ impl Primitive {
                 let _ = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0])).get();
                 let s = ok_or_unwind!(s.downcast_or_err::<tag::String>(arg_spans[1]));
 
-                match s.get().parse::<i64>() {
+                match s.get().as_str().parse::<i64>() {
                     Ok(i) => Effect::None(vm.make_int(i).into_value()),
                     Err(_) => Effect::Unwind(VmError::IntegerFromInvalidString {
                         span: dispatch_span,
-                        value: s.get().to_owned(),
+                        value: s.get().to_string(),
                     }),
                 }
             }
@@ -1265,10 +1265,7 @@ impl Primitive {
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::String>(arg_spans[0]));
                 let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::String>(arg_spans[1]));
 
-                Effect::None(
-                    vm.make_string(lhs.get().to_owned() + rhs.get())
-                        .into_value(),
-                )
+                Effect::None(vm.make_string(lhs.get().concat(rhs.get())).into_value())
             }
 
             Primitive::StringAsSymbol => {
@@ -1277,7 +1274,7 @@ impl Primitive {
 
                 Effect::None(
                     vm.make_symbol(Symbol::from_string(
-                        recv.get().to_owned(),
+                        recv.get().to_string(),
                         arg_spans[0].into(),
                     ))
                     .into_value(),
@@ -1288,7 +1285,7 @@ impl Primitive {
                 let [recv] = args.try_into().unwrap();
                 let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
 
-                Effect::None(vm.make_int(recv.get().len() as i64).into_value())
+                Effect::None(vm.make_int(recv.get().char_count() as i64).into_value())
             }
 
             Primitive::StringIsWhitespace => {
@@ -1335,7 +1332,23 @@ impl Primitive {
                 let from = ok_or_unwind!(from.downcast_or_err::<tag::Int>(arg_spans[1])).get();
                 let to = ok_or_unwind!(to.downcast_or_err::<tag::Int>(arg_spans[2])).get();
 
-                todo!()
+                let from =
+                    ok_or_unwind!(check_arr_idx(arg_spans[1], recv.get().char_count(), from));
+                let to = ok_or_unwind!(check_arr_idx(arg_spans[2], recv.get().char_count(), to));
+
+                match recv.get().substr(from..=to) {
+                    Ok(s) => Effect::None(vm.make_string(s).into_value()),
+
+                    Err(SubstrError::StartGtEnd) => Effect::Unwind(VmError::StartGtEnd {
+                        span: dispatch_span,
+                        start: from,
+                        end: to,
+                    }),
+
+                    Err(SubstrError::StartOutOfBounds | SubstrError::EndOutOfBounds) => {
+                        unreachable!("check_arr_idx should have already checked this");
+                    }
+                }
             }
 
             Primitive::SystemGlobal => {

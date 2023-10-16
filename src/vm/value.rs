@@ -3,8 +3,10 @@ use std::fmt::{self, Display};
 use std::hash::{self, Hash};
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, RangeBounds};
 use std::ptr;
+
+use thiserror::Error;
 
 use crate::ast::{self, SymbolLit as Symbol};
 use crate::impl_collect;
@@ -60,7 +62,7 @@ impl<'gc> Value<'gc> {
         } else {
             Err(VmError::IllegalTy {
                 span: span.into(),
-                expected: [T::TY].as_slice().into(),
+                expected: vec![T::TY].into(),
                 actual: self.0.as_ref().unwrap().ty(),
             })
         }
@@ -261,7 +263,7 @@ define_value_kind! {
         Method("method", Method<'gc> => &'a Method<'gc>): ref method => method,
         Symbol("symbol", Symbol => &'a Symbol): ref sym => sym,
         Object("object", Object<'gc> => &'a Object<'gc>): ref obj => obj,
-        String("string", String => &'a str): ref s => s,
+        String("string", SomString => &'a SomString): ref s => s,
     }
 }
 
@@ -577,5 +579,139 @@ unsafe impl Collect for Object<'_> {
             visit(&self.class);
             visit(&self.fields);
         }
+    }
+}
+
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubstrError {
+    #[error("start position comes after end")]
+    StartGtEnd,
+
+    #[error("start position is out of bounds")]
+    StartOutOfBounds,
+
+    #[error("end position is out of bounds")]
+    EndOutOfBounds,
+}
+
+#[derive(Debug, Clone)]
+pub struct SomString {
+    value: Box<str>,
+    char_count: usize,
+}
+
+impl SomString {
+    pub fn new(value: Box<str>) -> Self {
+        let char_count = value.chars().count();
+
+        Self { value, char_count }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+
+    pub fn char_count(&self) -> usize {
+        self.char_count
+    }
+
+    pub fn chars(&self) -> std::str::Chars<'_> {
+        self.value.chars()
+    }
+
+    pub fn concat(&self, other: &Self) -> Self {
+        let mut result = String::with_capacity(self.value.len() + other.value.len());
+        result.push_str(&self.value);
+        result.push_str(&other.value);
+
+        Self {
+            value: result.into_boxed_str(),
+            char_count: self.char_count + other.char_count,
+        }
+    }
+
+    pub fn substr(&self, range: impl RangeBounds<usize>) -> Result<Self, SubstrError> {
+        use std::ops::Bound;
+
+        let start = match range.start_bound() {
+            Bound::Included(&pos) => pos,
+            Bound::Excluded(&pos) => pos + 1,
+            Bound::Unbounded => 0,
+        };
+
+        let end = match range.end_bound() {
+            Bound::Included(&pos) => pos + 1,
+            Bound::Excluded(&pos) => pos,
+            Bound::Unbounded => self.char_count,
+        };
+
+        if start > end {
+            Err(SubstrError::StartGtEnd)
+        } else if start > self.char_count {
+            Err(SubstrError::StartOutOfBounds)
+        } else if end > self.char_count {
+            Err(SubstrError::EndOutOfBounds)
+        } else if start == end {
+            Ok(Self {
+                value: String::new().into_boxed_str(),
+                char_count: 0,
+            })
+        } else {
+            let mut chars = self.value.char_indices().map(|(idx, _)| idx).skip(start);
+            let first_char_pos = chars.next().unwrap();
+            let end_char_pos = chars.nth(end - start - 1).unwrap_or(self.value.len());
+            let value = self.value[first_char_pos..end_char_pos]
+                .to_owned()
+                .into_boxed_str();
+
+            Ok(Self {
+                value,
+                char_count: end - start,
+            })
+        }
+    }
+}
+
+impl PartialEq for SomString {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl Eq for SomString {}
+
+impl Hash for SomString {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
+impl Display for SomString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl From<String> for SomString {
+    fn from(s: String) -> Self {
+        Self::new(s.into_boxed_str())
+    }
+}
+
+impl From<Box<str>> for SomString {
+    fn from(s: Box<str>) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<SomString> for Box<str> {
+    fn from(s: SomString) -> Self {
+        s.value
+    }
+}
+
+impl From<SomString> for String {
+    fn from(s: SomString) -> Self {
+        s.value.into()
     }
 }

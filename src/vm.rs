@@ -25,7 +25,7 @@ use self::eval::Effect;
 use self::frame::{Callee, Frame, Upvalue};
 use self::gc::{GarbageCollector, Gc, GcRefCell};
 use self::method::{MethodDef, Primitive};
-use self::value::{tag, Class, IntoValue, Method, Object, TypedValue, Value};
+use self::value::{tag, Class, IntoValue, Method, Object, TypedValue, Value, SomString};
 
 pub const RUN_METHOD_NAME: &str = "run";
 
@@ -627,8 +627,8 @@ impl<'gc> Vm<'gc> {
         sym.into_value(self.gc)
     }
 
-    fn make_string(&self, s: String) -> TypedValue<'gc, tag::String> {
-        s.into_value(self.gc)
+    fn make_string(&self, s: impl Into<SomString>) -> TypedValue<'gc, tag::String> {
+        Into::<SomString>::into(s).into_value(self.gc)
     }
 
     fn make_int(&self, int: i64) -> TypedValue<'gc, tag::Int> {

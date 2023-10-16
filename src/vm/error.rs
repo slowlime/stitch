@@ -179,4 +179,13 @@ pub enum VmError {
 
         code: i64,
     },
+
+    #[error("start position ({start}) is greater than the end ({end})")]
+    StartGtEnd {
+        #[label]
+        span: Option<Span>,
+
+        start: usize,
+        end: usize,
+    },
 }
