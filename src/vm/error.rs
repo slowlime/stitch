@@ -1,14 +1,16 @@
 use std::borrow::Cow;
+use std::io;
 
 use miette::Diagnostic;
 use thiserror::Error;
 
 use crate::location::{Span, Spanned};
+use crate::parse::ParserError;
 use crate::util::format_list;
 
 use super::value::Ty;
 
-#[derive(Diagnostic, Error, Debug, Clone)]
+#[derive(Diagnostic, Error, Debug)]
 pub enum VmError {
     #[error("name not defined: `{name}`")]
     UndefinedName {
@@ -188,4 +190,10 @@ pub enum VmError {
         start: usize,
         end: usize,
     },
+
+    #[error(transparent)]
+    ParserError(#[from] ParserError),
+
+    #[error(transparent)]
+    FileLoadError(io::Error),
 }

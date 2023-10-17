@@ -511,7 +511,7 @@ impl Primitive {
             let block = ok_or_unwind!(recv.downcast_or_err::<tag::Block>(arg_spans[0]));
 
             for _ in args.len()..block.get().code.params.len() {
-                args.push(vm.builtins().nil_object.clone().into_value());
+                args.push(vm.builtins.nil_object.clone().into_value());
                 arg_spans.push(None);
             }
 
@@ -644,7 +644,7 @@ impl Primitive {
                 let mut arr = Vec::with_capacity(len);
 
                 for _ in 0..len {
-                    arr.push(vm.builtins().nil_object.clone().into_value());
+                    arr.push(vm.builtins.nil_object.clone().into_value());
                 }
 
                 Effect::None(vm.make_array(arr).into_value())
@@ -675,9 +675,9 @@ impl Primitive {
                 let [recv] = args.try_into().unwrap();
                 let cls = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
 
-                Effect::None(match cls.get().superclass {
-                    Some(ref superclass) => superclass.clone().into_value(),
-                    None => vm.builtins().nil_object.clone().into_value(),
+                Effect::None(match cls.get().get_superclass() {
+                    Some(superclass) => superclass.clone().into_value(),
+                    None => vm.builtins.nil_object.clone().into_value(),
                 })
             }
 

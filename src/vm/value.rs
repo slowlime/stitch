@@ -284,15 +284,15 @@ impl<'gc> ValueKind<'gc> {
 
     pub fn get_class<'a>(&'a self, vm: &'a Vm<'gc>) -> &'a TypedValue<'gc, tag::Class> {
         match self {
-            Self::Int(_) => &vm.builtins().integer,
-            Self::Float(_) => &vm.builtins().double,
-            Self::Array(_) => &vm.builtins().array,
-            Self::Block(block) => &block.obj.get().unwrap().get().class,
-            Self::Class(class) => &class.obj.get().unwrap().get().class,
-            Self::Method(method) => &method.obj.get().unwrap().get().class,
-            Self::Symbol(_) => &vm.builtins().symbol,
-            Self::Object(obj) => &obj.class,
-            Self::String(_) => &vm.builtins().string,
+            Self::Int(_) => &vm.builtins.integer,
+            Self::Float(_) => &vm.builtins.double,
+            Self::Array(_) => &vm.builtins.array,
+            Self::Block(block) => block.obj.get().unwrap().get().get_class(),
+            Self::Class(class) => class.obj.get().unwrap().get().get_class(),
+            Self::Method(method) => method.obj.get().unwrap().get().get_class(),
+            Self::Symbol(_) => &vm.builtins.symbol,
+            Self::Object(obj) => obj.get_class(),
+            Self::String(_) => &vm.builtins.string,
         }
     }
 
@@ -348,6 +348,10 @@ impl<'gc, T: Tag> TypedValue<'gc, T> {
         );
 
         unsafe { T::get_unchecked(self.0 .0.as_ref().unwrap()) }
+    }
+
+    pub fn checked_get(&self) -> Option<T::Value<'_, 'gc>> {
+        self.is_legal().then(|| self.get())
     }
 
     pub fn as_value(&self) -> &Value<'gc> {
@@ -411,7 +415,7 @@ unsafe impl Collect for Block<'_> {
 pub struct Class<'gc> {
     pub name: Spanned<String>,
     pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
-    pub superclass: Option<TypedValue<'gc, tag::Class>>,
+    pub superclass: GcOnceCell<Option<TypedValue<'gc, tag::Class>>>,
     pub method_map: HashMap<String, usize>,
     pub methods: Vec<TypedValue<'gc, tag::Method>>,
     pub instance_field_map: HashMap<String, usize>,
@@ -419,11 +423,15 @@ pub struct Class<'gc> {
 }
 
 impl<'gc> Class<'gc> {
+    pub fn get_superclass(&self) -> Option<&TypedValue<'gc, tag::Class>> {
+        self.superclass.get().unwrap().as_ref()
+    }
+
     pub fn get_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
         let mut next_class = Some(self);
 
         while let Some(class) = next_class {
-            next_class = class.superclass.as_ref().map(|class| class.get());
+            next_class = class.get_superclass().map(|class| class.get());
 
             if let method @ Some(_) = class.get_local_method_by_name(name) {
                 return method;
@@ -434,10 +442,10 @@ impl<'gc> Class<'gc> {
     }
 
     pub fn get_supermethod_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
-        let mut next_class = self.superclass.as_ref();
+        let mut next_class = self.get_superclass();
 
         while let Some(class) = next_class {
-            next_class = class.get().superclass.as_ref();
+            next_class = class.get().get_superclass();
 
             if let method @ Some(_) = class.get().get_local_method_by_name(name) {
                 return method;
@@ -459,12 +467,20 @@ impl<'gc> Class<'gc> {
                 return true;
             }
 
-            if let Some(parent) = cls.superclass.as_ref() {
+            if let Some(parent) = cls.get_superclass() {
                 cls = parent.get();
             } else {
                 return false;
             }
         }
+    }
+
+    pub fn get_obj(&self) -> &TypedValue<'gc, tag::Object> {
+        self.obj.get().unwrap()
+    }
+
+    pub fn get_metaclass(&self) -> &TypedValue<'gc, tag::Class> {
+        self.get_obj().get().get_class()
     }
 }
 
@@ -502,7 +518,7 @@ unsafe impl Collect for Method<'_> {
 
 #[derive(Debug, Clone)]
 pub struct Object<'gc> {
-    pub class: TypedValue<'gc, tag::Class>,
+    pub class: GcOnceCell<TypedValue<'gc, tag::Class>>,
     pub fields: GcRefCell<Vec<Value<'gc>>>,
 }
 
@@ -539,8 +555,12 @@ impl<'gc> DerefMut for FieldProjMut<'_, 'gc> {
 }
 
 impl<'gc> Object<'gc> {
+    pub fn get_class(&self) -> &TypedValue<'gc, tag::Class> {
+        self.class.get().unwrap()
+    }
+
     pub fn field_idx(&self, name: &str) -> Option<usize> {
-        self.class.get().instance_field_map.get(name).copied()
+        self.get_class().get().instance_field_map.get(name).copied()
     }
 
     pub fn get_field_by_name(&self, name: &str) -> Option<FieldProj<'_, 'gc>> {
@@ -558,14 +578,13 @@ impl<'gc> Object<'gc> {
     }
 
     pub fn get_method_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
-        self.class.get().get_method_by_name(name)
+        self.get_class().get().get_method_by_name(name)
     }
 
     pub fn get_supermethod_by_name(&self, name: &str) -> Option<&TypedValue<'gc, tag::Method>> {
-        self.class
+        self.get_class()
             .get()
-            .superclass
-            .as_ref()?
+            .get_superclass()?
             .get()
             .get_method_by_name(name)
     }

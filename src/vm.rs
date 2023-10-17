@@ -5,27 +5,30 @@ pub mod gc;
 mod method;
 mod value;
 
-use std::cell::{RefCell, Cell};
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ptr;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 use crate::ast;
 use crate::ast::visit::{AstRecurse, DefaultVisitor, DefaultVisitorMut};
+use crate::file::FileLoader;
 use crate::location::{Location, Span, Spanned};
+use crate::parse::{parse, ParserOptions};
+use crate::sourcemap::SourceFile;
 use crate::vm::frame::Local;
 use crate::vm::value::Block;
 
 use self::error::VmError;
 use self::eval::Effect;
 use self::frame::{Callee, Frame, Upvalue};
-use self::gc::{GarbageCollector, Gc, GcRefCell};
+use self::gc::{GarbageCollector, Gc, GcOnceCell, GcRefCell};
 use self::method::{MethodDef, Primitive};
-use self::value::{tag, Class, IntoValue, Method, Object, TypedValue, Value, SomString};
+use self::value::{tag, Class, IntoValue, Method, Object, SomString, TypedValue, Value};
 
 pub const RUN_METHOD_NAME: &str = "run";
 
@@ -330,8 +333,20 @@ fn check_method_code(code: &ast::Block, fields: &HashSet<&str>) {
     checker.visit_block(code);
 }
 
+pub struct LoadClassOptions {
+    pub allow_nil_superclass: bool,
+}
+
+impl Default for LoadClassOptions {
+    fn default() -> Self {
+        Self {
+            allow_nil_superclass: false,
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct Builtins<'gc> {
-    pub array: TypedValue<'gc, tag::Class>,
     pub object: TypedValue<'gc, tag::Class>,
     pub object_class: TypedValue<'gc, tag::Class>,
     pub class: TypedValue<'gc, tag::Class>,
@@ -339,6 +354,7 @@ pub struct Builtins<'gc> {
     pub metaclass_class: TypedValue<'gc, tag::Class>,
     pub method: TypedValue<'gc, tag::Class>,
     pub nil_object: TypedValue<'gc, tag::Object>,
+    pub array: TypedValue<'gc, tag::Class>,
     pub block: TypedValue<'gc, tag::Class>,
     pub block1: TypedValue<'gc, tag::Class>,
     pub block2: TypedValue<'gc, tag::Class>,
@@ -356,35 +372,212 @@ pub struct Vm<'gc> {
     gc: &'gc GarbageCollector,
     globals: HashMap<String, Value<'gc>>,
     frames: Vec<Frame<'gc>>,
-    builtins: Option<Builtins<'gc>>,
+    builtins: Builtins<'gc>,
     upvalues: RefCell<Option<Gc<'gc, Upvalue<'gc>>>>,
     start_time: Cell<Instant>,
+    file_loader: Box<dyn FileLoader>,
 }
 
 impl<'gc> Vm<'gc> {
-    pub fn new(gc: &'gc GarbageCollector) -> Self {
-        Self {
+    pub fn new(gc: &'gc GarbageCollector, file_loader: Box<dyn FileLoader>) -> Self {
+        let mut result = Self {
             gc,
             globals: Default::default(),
             frames: vec![],
-            builtins: None,
+            builtins: Default::default(),
             upvalues: RefCell::new(None),
             start_time: Cell::new(Instant::now()),
-        }
+            file_loader,
+        };
+
+        result.initialize();
+
+        result
     }
 
-    pub fn builtins(&self) -> &Builtins<'gc> {
-        self.builtins.as_ref().expect("Builtins not initialized")
+    fn initialize(&mut self) {
+        // Object:
+        // - superclass: None
+        // - metaclass: Object class
+        // Object class:
+        // - superclass: <uninit>
+        // - metaclass: <uninit>
+        self.builtins.object = self
+            .parse_and_load_builtin(
+                "Object",
+                LoadClassOptions {
+                    allow_nil_superclass: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        self.builtins.object_class = self.builtins.object.get().get_metaclass().clone();
+
+        // Metaclass:
+        // - superclass: Object
+        // - metaclass: Metaclass class
+        // Metaclass class:
+        // - superclass: Object class
+        // - metaclass: <uninit>
+        self.builtins.metaclass = self
+            .parse_and_load_builtin("Metaclass", Default::default())
+            .unwrap();
+        self.builtins.metaclass_class = self.builtins.metaclass.get().get_metaclass().clone();
+
+        // [Metaclass class].metaclass = Metaclass
+        self.builtins
+            .metaclass_class
+            .get()
+            .get_obj()
+            .get()
+            .class
+            .set(self.builtins.metaclass.clone())
+            .unwrap();
+        // [Object class].metaclass = Metaclass
+        self.builtins
+            .object_class
+            .get()
+            .get_obj()
+            .get()
+            .class
+            .set(self.builtins.metaclass.clone())
+            .unwrap();
+
+        self.builtins.class = self
+            .parse_and_load_builtin("Class", Default::default())
+            .unwrap();
+
+        // [Object class].superclass = Class
+        self.builtins
+            .object_class
+            .get()
+            .superclass
+            .set(Some(self.builtins.class.clone()))
+            .unwrap();
+
+        self.builtins.method = self
+            .parse_and_load_builtin("Method", Default::default())
+            .unwrap();
+
+        fn fix_method_objects<'gc>(vm: &Vm<'gc>, class: &TypedValue<'gc, tag::Class>) {
+            for method in &class.get().methods {
+                let method_obj = method.get().obj.get().unwrap();
+                method_obj
+                    .get()
+                    .class
+                    .set(vm.builtins.method.clone())
+                    .unwrap();
+            }
+
+            for method in &class.get().get_metaclass().get().methods {
+                let method_obj = method.get().obj.get().unwrap();
+                method_obj
+                    .get()
+                    .class
+                    .set(vm.builtins.method.clone())
+                    .unwrap();
+            }
+        }
+
+        fix_method_objects(self, &self.builtins.object);
+        fix_method_objects(self, &self.builtins.metaclass);
+        fix_method_objects(self, &self.builtins.class);
+        fix_method_objects(self, &self.builtins.method);
+
+        // at this point all object references in the classes created so far should be initialized.
+
+        let nil = self
+            .parse_and_load_builtin("Nil", Default::default())
+            .unwrap();
+        self.builtins.nil_object = self.make_object(nil);
+
+        self.builtins.array = self
+            .parse_and_load_builtin("Array", Default::default())
+            .unwrap();
+        self.builtins.block = self
+            .parse_and_load_builtin("Block", Default::default())
+            .unwrap();
+        self.builtins.block1 = self
+            .parse_and_load_builtin("Block1", Default::default())
+            .unwrap();
+        self.builtins.block2 = self
+            .parse_and_load_builtin("Block2", Default::default())
+            .unwrap();
+        self.builtins.block3 = self
+            .parse_and_load_builtin("Block3", Default::default())
+            .unwrap();
+        self.builtins.integer = self
+            .parse_and_load_builtin("Integer", Default::default())
+            .unwrap();
+        self.builtins.double = self
+            .parse_and_load_builtin("Double", Default::default())
+            .unwrap();
+        self.builtins.symbol = self
+            .parse_and_load_builtin("Symbol", Default::default())
+            .unwrap();
+        self.builtins.primitive = self
+            .parse_and_load_builtin("Primitive", Default::default())
+            .unwrap();
+        self.builtins.string = self
+            .parse_and_load_builtin("String", Default::default())
+            .unwrap();
+
+        let r#true = self
+            .parse_and_load_builtin("True", Default::default())
+            .unwrap();
+        let r#false = self
+            .parse_and_load_builtin("False", Default::default())
+            .unwrap();
+        self.builtins.true_object = self.make_object(r#true);
+        self.builtins.false_object = self.make_object(r#false);
+    }
+
+    fn parse_and_load_builtin(
+        &mut self,
+        class_name: &str,
+        options: LoadClassOptions,
+    ) -> Result<TypedValue<'gc, tag::Class>, VmError> {
+        let file = self
+            .file_loader
+            .load_builtin_class(class_name)
+            .map_err(VmError::FileLoadError)?;
+        let ast = parse(file, Default::default())?;
+
+        self.load_class(ast, options)
+    }
+
+    fn parse_and_load_user_class(
+        &mut self,
+        class_name: &str,
+    ) -> Result<TypedValue<'gc, tag::Class>, VmError> {
+        let file = self
+            .file_loader
+            .load_user_class(class_name)
+            .map_err(VmError::FileLoadError)?;
+        let ast = parse(file, Default::default())?;
+
+        self.load_class(ast, Default::default())
+    }
+
+    pub fn parse_and_load_class(
+        &mut self,
+        file: &SourceFile,
+        options: ParserOptions,
+    ) -> Result<TypedValue<'gc, tag::Class>, VmError> {
+        self.load_class(parse(file, options)?, Default::default())
     }
 
     pub fn load_class(
         &mut self,
         class: ast::Class,
+        options: LoadClassOptions,
     ) -> Result<TypedValue<'gc, tag::Class>, VmError> {
         let superclass = match class.superclass {
-            Some(name) => {
+            Some(name) => 'superclass: {
                 let value = match self.globals.get(&name.value) {
                     Some(value) => value.clone(),
+                    None if options.allow_nil_superclass => break 'superclass None,
+
                     None => {
                         return Err(VmError::UndefinedName {
                             span: name.span(),
@@ -393,17 +586,21 @@ impl<'gc> Vm<'gc> {
                     }
                 };
 
-                value.downcast_or_err::<tag::Class>(name.span())?
+                Some(value.downcast_or_err::<tag::Class>(name.span())?)
             }
 
-            None => self.builtins().object.clone(),
+            None => Some(self.builtins.object.clone()),
         };
 
         check_method_name_collisions(false, &class.object_methods)?;
         check_method_name_collisions(true, &class.class_methods)?;
 
         let class_fields = class.class_fields;
-        let mut object_fields = superclass.get().instance_fields.clone();
+        let mut object_fields = superclass
+            .as_ref()
+            .and_then(|superclass| superclass.checked_get())
+            .map(|superclass| superclass.instance_fields.clone())
+            .unwrap_or_default();
         object_fields.extend(class.object_fields);
 
         let class_field_set = class_fields
@@ -426,11 +623,10 @@ impl<'gc> Vm<'gc> {
             .map(|method| self.load_method(method, &class.name.value, &object_field_set))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // TODO: set fields
         let metaclass = self.make_class(
             Spanned::new(format!("{} class", class.name.value), class.name.location),
-            self.builtins().metaclass.clone(),
-            Some(self.builtins().object_class.clone()),
+            self.builtins.metaclass.clone(),
+            Some(self.builtins.object_class.clone()),
             class_methods,
             class_fields,
         );
@@ -442,7 +638,7 @@ impl<'gc> Vm<'gc> {
         let cls = self.make_class(
             class.name,
             metaclass,
-            Some(superclass),
+            superclass,
             object_methods,
             object_fields,
         );
@@ -522,9 +718,7 @@ impl<'gc> Vm<'gc> {
 
         let value = method.into_value(self.gc);
 
-        // TODO: make sure field assignments are consistent
-        let obj = self.make_object(self.builtins().method.clone());
-        *obj.get().get_field_by_name_mut("$method").unwrap() = value.clone().into_value();
+        let obj = self.make_object(self.builtins.method.clone());
         value.get().obj.set(obj).unwrap();
 
         value
@@ -552,7 +746,11 @@ impl<'gc> Vm<'gc> {
         let cls = Class {
             name,
             obj: Default::default(),
-            superclass,
+            superclass: match superclass {
+                Some(ref class) if class.is_legal() => GcOnceCell::new_init(superclass),
+                Some(_) => GcOnceCell::new(),
+                None => GcOnceCell::new_init(None),
+            },
             method_map,
             methods,
             instance_field_map,
@@ -561,9 +759,7 @@ impl<'gc> Vm<'gc> {
 
         let value = cls.into_value(self.gc);
 
-        // TODO: make sure field assignments are consistent
         let obj = self.make_object(metaclass);
-        *obj.get().get_field_by_name_mut("$class").unwrap() = value.clone().into_value();
         value.get().obj.set(obj).unwrap();
 
         value
@@ -605,15 +801,14 @@ impl<'gc> Vm<'gc> {
         };
 
         let class = match block.code.params.len() {
-            0 => self.builtins().block1.clone(),
-            1 => self.builtins().block2.clone(),
-            2 => self.builtins().block3.clone(),
-            _ => self.builtins().block.clone(),
+            0 => self.builtins.block1.clone(),
+            1 => self.builtins.block2.clone(),
+            2 => self.builtins.block3.clone(),
+            _ => self.builtins.block.clone(),
         };
 
         let block = block.into_value(self.gc);
         let obj = self.make_object(class);
-        *obj.get().get_field_by_name_mut("$block").unwrap() = block.clone().into_value();
         block.get().obj.set(obj).unwrap();
 
         block
@@ -641,22 +836,29 @@ impl<'gc> Vm<'gc> {
 
     fn make_boolean(&self, value: bool) -> TypedValue<'gc, tag::Object> {
         if value {
-            self.builtins().true_object.clone()
+            self.builtins.true_object.clone()
         } else {
-            self.builtins().false_object.clone()
+            self.builtins.false_object.clone()
         }
     }
 
     fn make_object(&self, class: TypedValue<'gc, tag::Class>) -> TypedValue<'gc, tag::Object> {
-        let field_count = class.get().instance_fields.len();
+        let field_count = class
+            .checked_get()
+            .map(|class| class.instance_fields.len())
+            .unwrap_or(0);
         let mut fields = Vec::with_capacity(field_count);
 
         for _ in 0..field_count {
-            fields.push(self.builtins().nil_object.clone().into_value());
+            fields.push(self.builtins.nil_object.clone().into_value());
         }
 
         let obj = Object {
-            class,
+            class: if class.is_legal() {
+                GcOnceCell::new_init(class)
+            } else {
+                GcOnceCell::new()
+            },
             fields: GcRefCell::new(fields),
         };
 
@@ -744,7 +946,7 @@ impl<'gc> Vm<'gc> {
             local_map.insert(local.value.clone(), locals.len());
             locals.push(Local {
                 name: local.clone(),
-                value: GcRefCell::new(self.builtins().nil_object.clone().into_value()),
+                value: GcRefCell::new(self.builtins.nil_object.clone().into_value()),
             });
         }
 
