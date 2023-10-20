@@ -1,4 +1,4 @@
-mod error;
+pub mod error;
 mod eval;
 mod frame;
 pub mod gc;
@@ -8,7 +8,7 @@ mod value;
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
+use std::fmt::{Display, Write};
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ptr;
@@ -375,11 +375,18 @@ pub struct Vm<'gc> {
     builtins: Builtins<'gc>,
     upvalues: RefCell<Option<Gc<'gc, Upvalue<'gc>>>>,
     start_time: Cell<Instant>,
-    file_loader: Box<dyn FileLoader>,
+    stdout: Box<dyn Write>,
+    stderr: Box<dyn Write>,
+    pub file_loader: Box<dyn FileLoader>,
 }
 
 impl<'gc> Vm<'gc> {
-    pub fn new(gc: &'gc GarbageCollector, file_loader: Box<dyn FileLoader>) -> Self {
+    pub fn new(
+        gc: &'gc GarbageCollector,
+        file_loader: Box<dyn FileLoader>,
+        stdout: Box<dyn Write>,
+        stderr: Box<dyn Write>,
+    ) -> Self {
         let mut result = Self {
             gc,
             globals: Default::default(),
@@ -387,6 +394,8 @@ impl<'gc> Vm<'gc> {
             builtins: Default::default(),
             upvalues: RefCell::new(None),
             start_time: Cell::new(Instant::now()),
+            stdout,
+            stderr,
             file_loader,
         };
 
@@ -546,7 +555,7 @@ impl<'gc> Vm<'gc> {
         self.load_class(ast, options)
     }
 
-    fn parse_and_load_user_class(
+    pub fn parse_and_load_user_class(
         &mut self,
         class_name: &str,
     ) -> Result<TypedValue<'gc, tag::Class>, VmError> {
@@ -985,11 +994,11 @@ impl<'gc> Vm<'gc> {
     }
 
     fn print(&mut self, msg: impl Display) {
-        todo!()
+        let _ = write!(&mut self.stdout, "{}", msg);
     }
 
-    fn eprint(&mut self, s: impl Display) {
-        todo!()
+    fn eprint(&mut self, msg: impl Display) {
+        let _ = write!(&mut self.stderr, "{}", msg);
     }
 
     fn full_gc(&self) {

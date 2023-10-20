@@ -1,5 +1,5 @@
 pub mod ast;
-mod file;
+pub mod file;
 pub mod location;
 pub mod parse;
 pub mod sourcemap;

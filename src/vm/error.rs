@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::io;
+use std::error::Error;
 
 use miette::Diagnostic;
 use thiserror::Error;
@@ -191,9 +191,9 @@ pub enum VmError {
         end: usize,
     },
 
-    #[error(transparent)]
+    #[error("parsing failed")]
     ParserError(#[from] ParserError),
 
-    #[error(transparent)]
-    FileLoadError(io::Error),
+    #[error("file loading failed")]
+    FileLoadError(#[source] Box<dyn Error + Send + Sync>),
 }

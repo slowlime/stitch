@@ -1,0 +1,10 @@
+"test:
+output:
+  contains: hello world!
+"
+
+Test = (
+  run = (
+    'hello world!' println.
+  )
+)

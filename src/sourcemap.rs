@@ -99,3 +99,14 @@ impl SourceCode for SourceMap {
         )))
     }
 }
+
+impl SourceCode for &'_ SourceMap {
+    fn read_span<'a>(
+        &'a self,
+        span: &SourceSpan,
+        context_lines_before: usize,
+        context_lines_after: usize,
+    ) -> Result<Box<dyn miette::SpanContents<'a> + 'a>, MietteError> {
+        <SourceMap as SourceCode>::read_span(self, span, context_lines_before, context_lines_after)
+    }
+}
