@@ -6,8 +6,9 @@ output:
     A#z
     3
     B#do:
-    45
-    103
+    43
+    A#+
+    101
 "
 
 Test = (
@@ -16,7 +17,7 @@ Test = (
     c := C new init.
 
     c z println.
-    c do: [42] println.
+    (c do: [42]) println.
     (c + 100) println.
   )
 )

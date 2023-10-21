@@ -980,12 +980,21 @@ impl<'a> Parser<'a> {
         &mut self,
         parsed_name: Option<ast::Name>,
     ) -> Result<(ast::Expr, SuperRecv), ParserError> {
-        let name = match parsed_name {
+        let mut name = match parsed_name {
             Some(name) => name,
             None => self.parse_ident(PrimitiveAllowed::Yes)?,
         };
 
-        let super_recv = (name.value == "super").into();
+        let super_recv;
+        name.value = if name.value == "super" {
+            super_recv = true.into();
+
+            "self".into()
+        } else {
+            super_recv = false.into();
+
+            name.value
+        };
 
         let expr = match self.resolve_var(&name.value) {
             ResolvedVar::Local => ast::Expr::Local(ast::Local(name)),

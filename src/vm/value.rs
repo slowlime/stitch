@@ -392,6 +392,7 @@ pub struct Block<'gc> {
     pub code: ast::Block,
     pub upvalue_map: HashMap<String, usize>,
     pub upvalues: Vec<Gc<'gc, Upvalue<'gc>>>,
+    pub defining_method: TypedValue<'gc, tag::Method>,
 }
 
 impl<'gc> Block<'gc> {

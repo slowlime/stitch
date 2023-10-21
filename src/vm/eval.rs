@@ -257,8 +257,10 @@ impl ast::Assign {
 
 impl Spanned<ast::Block> {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
+        let frame = vm.frames.last().expect("stack frame is empty");
+
         // TODO: whoa, cloning the whole ast here seems excessive
-        Effect::None(vm.make_block(self.clone()).into_value())
+        Effect::None(vm.make_block(frame.get_defining_method().clone(), self.clone()).into_value())
     }
 }
 
@@ -325,9 +327,9 @@ impl ast::Dispatch {
         let recv = &args[0];
 
         let method = if self.supercall {
-            recv.get_class(vm)
-                .get()
-                .get_supermethod_by_name(self.selector.value.name())
+            let frame = vm.frames.last().expect("frame stack is empty");
+            let holder = frame.get_defining_method().get().holder.get().unwrap();
+            holder.get().get_supermethod_by_name(self.selector.value.name())
         } else {
             recv.get_class(vm)
                 .get()
@@ -424,7 +426,6 @@ impl<'gc> TypedValue<'gc, tag::Method> {
     ) -> Effect<'gc> {
         match self.get().def.value {
             MethodDef::Code(ref block) => {
-                dbg!(block);
                 if let Err(e) = vm.push_frame(
                     block,
                     dispatch_span,

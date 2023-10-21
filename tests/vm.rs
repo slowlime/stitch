@@ -179,7 +179,6 @@ fn run_test_class(test_class_path: PathBuf) {
 
             if !test.output.is_empty() {
                 if let Err(matcher_msg) = test.output.check(&output) {
-                    eprintln!("Test failed with unexpected message: {matcher_msg}.");
                     eprintln!("Test output:\n{output}");
 
                     if let Err(e) = result {

@@ -14,9 +14,15 @@ pub struct CalleeName<'s, 'gc>(&'s Callee<'gc>);
 impl Display for CalleeName<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Callee::Method { method: value, .. } => {
-                write!(f, "method {}", value.get().selector.value.name())
+            Callee::Method { method } => {
+                write!(
+                    f,
+                    "method `{}` of class `{}`",
+                    method.get().selector.value.name(),
+                    method.get().holder.get().unwrap().get().name.value,
+                )
             }
+
             Callee::Block { .. } => write!(f, "<block>"),
         }
     }
@@ -36,7 +42,7 @@ pub enum Callee<'gc> {
 impl<'gc> Callee<'gc> {
     pub fn location(&self) -> Location {
         match self {
-            Self::Method { method, .. } => method.get().location,
+            Self::Method { method } => method.get().location,
             Self::Block { block } => block.get().location,
         }
     }
@@ -65,6 +71,13 @@ impl<'gc> Frame<'gc> {
                 .get()
                 .get_upvalue_by_name("self")
                 .map(|upvalue| &upvalue.get_local().value),
+        }
+    }
+
+    pub fn get_defining_method(&self) -> &TypedValue<'gc, tag::Method> {
+        match &self.callee {
+            Callee::Method { method } => method,
+            Callee::Block { block } => &block.get().defining_method,
         }
     }
 }

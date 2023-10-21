@@ -100,19 +100,42 @@ fn resolve_names(block: &mut ast::Block, fields: &HashSet<&str>) {
 
     impl DefaultVisitorMut<'_> for NameResolver<'_> {
         fn visit_expr(&mut self, expr: &mut ast::Expr) {
-            if let ast::Expr::UnresolvedName(_) = expr {
-                let ast::Expr::UnresolvedName(name) = mem::take(expr) else {
-                    unreachable!()
-                };
+            match expr {
+                ast::Expr::UnresolvedName(_) => {
+                    let ast::Expr::UnresolvedName(name) = mem::take(expr) else {
+                        unreachable!()
+                    };
 
-                *expr = if self.fields.contains(name.0.value.as_str()) {
-                    ast::Expr::Field(ast::Field(name.0))
-                } else {
-                    ast::Expr::Global(ast::Global(name.0))
-                };
-            } else {
-                expr.recurse_mut(self);
+                    *expr = if self.fields.contains(name.0.value.as_str()) {
+                        ast::Expr::Field(ast::Field(name.0))
+                    } else {
+                        ast::Expr::Global(ast::Global(name.0))
+                    };
+                }
+
+                ast::Expr::Assign(assign)
+                    if matches!(assign.var, ast::AssignVar::UnresolvedName(_)) =>
+                {
+                    let ast::Expr::Assign(mut assign) = mem::take(expr) else {
+                        unreachable!()
+                    };
+                    let ast::AssignVar::UnresolvedName(name) = assign.var else {
+                        unreachable!()
+                    };
+
+                    assign.var = if self.fields.contains(name.0.value.as_str()) {
+                        ast::AssignVar::Field(ast::Field(name.0))
+                    } else {
+                        ast::AssignVar::Global(ast::Global(name.0))
+                    };
+
+                    *expr = ast::Expr::Assign(assign);
+                }
+
+                _ => {}
             }
+
+            expr.recurse_mut(self);
         }
     }
 
@@ -134,9 +157,6 @@ fn resolve_upvalues(code: &mut ast::Block) {
             for upvalues in self.frames.iter_mut().rev().take(up_frames.get()) {
                 if !upvalues.iter().any(|upvalue| upvalue == name) {
                     upvalues.push(name.to_owned());
-                } else {
-                    // only register each upvalue once
-                    break;
                 }
             }
         }
@@ -149,6 +169,8 @@ fn resolve_upvalues(code: &mut ast::Block) {
             for stmt in &mut block.body {
                 self.visit_stmt(stmt);
             }
+
+            self.frames.pop().expect("empty frame stack");
         }
 
         fn visit_stmt(&mut self, stmt: &'a mut ast::Stmt) {
@@ -284,22 +306,14 @@ fn check_method_code(
             let captured_upvalues = mem::replace(&mut self.captured_upvalues, &block.upvalues);
 
             for name in &block.upvalues {
-                if !block
-                    .locals
-                    .iter()
-                    .chain(&block.params)
-                    .any(|local| local.value == *name)
+                if !self.locals_iter().any(|local| local == name)
                     && !captured_upvalues.contains(name)
                 {
                     let mut diagnostic = diagnostic!(
                         help = format!(
                             "captured upvalues: {:?}; available locals: {:?}",
-                            block.upvalues,
-                            block.locals
-                                .iter()
-                                .chain(&block.params)
-                                .map(|name| name.value.clone())
-                                .collect::<Vec<_>>()
+                            captured_upvalues,
+                            self.locals(),
                         ),
                         "declared upvalue `{name}` must capture either an upvalue or a local in the immediately enclosing frame"
                     );
@@ -884,8 +898,8 @@ impl<'gc> Vm<'gc> {
         #[cfg(debug_assertions)] method_name: &str,
     ) -> ast::Block {
         resolve_names(&mut code, fields);
-        resolve_upvalues(&mut code);
         add_implicit_returns(&mut code);
+        resolve_upvalues(&mut code);
 
         #[cfg(debug_assertions)]
         {
@@ -978,7 +992,7 @@ impl<'gc> Vm<'gc> {
         value
     }
 
-    fn make_block(&mut self, code: Spanned<ast::Block>) -> TypedValue<'gc, tag::Block> {
+    fn make_block(&mut self, defining_method: TypedValue<'gc, tag::Method>, code: Spanned<ast::Block>) -> TypedValue<'gc, tag::Block> {
         let upvalues = code
             .value
             .upvalues
@@ -989,7 +1003,7 @@ impl<'gc> Vm<'gc> {
                     .get_local_by_name(name)
                     .unwrap_or_else(|| match &frame.callee {
                         Callee::Method { .. } => panic!("unknown upvalue `{}`", name),
-                        Callee::Block { block } => match block.get().get_upvalue_by_name(name) {
+                        Callee::Block { block, .. } => match block.get().get_upvalue_by_name(name) {
                             Some(upvalue) => upvalue.get_local(),
                             None => panic!("unknown upvalue `{}`", name),
                         },
@@ -1011,6 +1025,7 @@ impl<'gc> Vm<'gc> {
             code: code.value,
             upvalue_map,
             upvalues,
+            defining_method,
         };
 
         let class = match block.code.params.len() {
