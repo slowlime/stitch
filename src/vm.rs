@@ -15,12 +15,15 @@ use std::pin::Pin;
 use std::ptr;
 use std::time::{Duration, Instant};
 
+use miette::Diagnostic;
+use thiserror::Error;
+
 use crate::ast;
 use crate::ast::visit::{AstRecurse, DefaultVisitor, DefaultVisitorMut};
 use crate::file::FileLoader;
 use crate::location::{Location, Span, Spanned};
 use crate::parse::{parse, ParserOptions};
-use crate::sourcemap::SourceFile;
+use crate::sourcemap::{SourceFile, SourceMap};
 use crate::vm::frame::Local;
 use crate::vm::value::Block;
 
@@ -157,6 +160,8 @@ fn resolve_upvalues(code: &mut ast::Block) {
 
                 _ => {}
             }
+
+            stmt.recurse_mut(self);
         }
 
         fn visit_field(&mut self, _field: &'a mut ast::Field) {
@@ -226,17 +231,52 @@ fn add_implicit_returns(code: &mut ast::Block) {
     code.recurse_mut(&mut BlockReturns);
 }
 
-fn check_method_code(code: &ast::Block, fields: &HashSet<&str>) {
+fn check_method_code(
+    class_name: &str,
+    method_name: &str,
+    source: &SourceMap,
+    code: &ast::Block,
+    fields: &HashSet<&str>,
+) {
+    use miette::{diagnostic, LabeledSpan, MietteDiagnostic};
+
     struct Checker<'a> {
         frame_idx: usize,
         captured_upvalues: &'a [String],
         locals: &'a [Spanned<String>],
+        params: &'a [Spanned<String>],
         fields: &'a HashSet<&'a str>,
+        diagnostics: Vec<MietteDiagnostic>,
+    }
+
+    impl Checker<'_> {
+        fn push_diagnostic(&mut self, diagnostic: MietteDiagnostic) -> &mut MietteDiagnostic {
+            self.diagnostics.push(diagnostic);
+
+            self.diagnostics.last_mut().unwrap()
+        }
+
+        fn locals_iter(&self) -> impl Iterator<Item = &'_ str> {
+            self.locals
+                .iter()
+                .chain(self.params)
+                .map(|local| local.value.as_str())
+        }
+
+        fn locals(&self) -> Vec<String> {
+            self.locals_iter().map(|name| name.to_owned()).collect()
+        }
     }
 
     impl<'a> DefaultVisitor<'a> for Checker<'a> {
         fn visit_unresolved_name(&mut self, name: &'a ast::UnresolvedName) {
-            panic!("name {} left unresolved", name.0.value);
+            let mut diagnostic = diagnostic!("name {} left unresolved", name.0.value);
+
+            if let Some(span) = name.0.span() {
+                diagnostic = diagnostic.and_label(LabeledSpan::underline(span));
+            }
+
+            self.push_diagnostic(diagnostic);
         }
 
         fn visit_block(&mut self, block: &'a ast::Block) {
@@ -244,23 +284,59 @@ fn check_method_code(code: &ast::Block, fields: &HashSet<&str>) {
             let captured_upvalues = mem::replace(&mut self.captured_upvalues, &block.upvalues);
 
             for name in &block.upvalues {
-                assert!(
-                    block.locals.iter().chain(&block.params).any(|local| local.value == *name)
-                        || captured_upvalues.contains(name),
-                    "upvalue {name} must either capture an upvalue or a local in the immediately enclosing frame"
-                );
+                if !block
+                    .locals
+                    .iter()
+                    .chain(&block.params)
+                    .any(|local| local.value == *name)
+                    && !captured_upvalues.contains(name)
+                {
+                    let mut diagnostic = diagnostic!(
+                        help = format!(
+                            "captured upvalues: {:?}; available locals: {:?}",
+                            block.upvalues,
+                            block.locals
+                                .iter()
+                                .chain(&block.params)
+                                .map(|name| name.value.clone())
+                                .collect::<Vec<_>>()
+                        ),
+                        "declared upvalue `{name}` must capture either an upvalue or a local in the immediately enclosing frame"
+                    );
+
+                    if let Some(span) = block.body_location().and_then(|loc| loc.span()) {
+                        diagnostic =
+                            diagnostic.and_label(LabeledSpan::at(span, "block defined here"));
+                    }
+
+                    self.push_diagnostic(diagnostic);
+                }
             }
 
             let locals = mem::replace(&mut self.locals, &block.locals);
+            let params = mem::replace(&mut self.params, &block.params);
 
             block.recurse(self);
 
             match block.body.last() {
                 Some(ast::Stmt::Return(_) | ast::Stmt::NonLocalReturn(_)) => {}
-                _ => panic!("block must be terminated with Stmt::Return / Stmt::NonLocalReturn"),
+
+                _ => {
+                    let mut diagnostic = diagnostic!(
+                        "block must be terminated with Stmt::Return / Stmt::NonLocalReturn"
+                    );
+
+                    if let Some(span) = block.body_location().and_then(|loc| loc.span()) {
+                        diagnostic =
+                            diagnostic.and_label(LabeledSpan::at(span, "block defined here"));
+                    }
+
+                    self.push_diagnostic(diagnostic);
+                }
             }
 
             self.locals = locals;
+            self.params = params;
             self.captured_upvalues = captured_upvalues;
             self.frame_idx -= 1;
         }
@@ -268,70 +344,147 @@ fn check_method_code(code: &ast::Block, fields: &HashSet<&str>) {
         fn visit_stmt(&mut self, stmt: &'a ast::Stmt) {
             match stmt {
                 ast::Stmt::NonLocalReturn(_) if self.frame_idx <= 1 => {
-                    panic!("Stmt::NonLocalReturn in method body")
+                    let mut diagnostic = diagnostic!("Stmt::NonLocalReturn in method body");
+
+                    if let Some(span) = stmt.location().span() {
+                        diagnostic = diagnostic.and_label(LabeledSpan::underline(span));
+                    }
+
+                    self.push_diagnostic(diagnostic);
                 }
 
                 ast::Stmt::NonLocalReturn(_)
                     if !self.captured_upvalues.iter().any(|name| name == "self") =>
                 {
-                    panic!("Stmt::NonLocalReturn in a block but `self` was not captured");
+                    let mut diagnostic = diagnostic!(
+                        help = format!("captured upvalues: {:?}", self.captured_upvalues),
+                        "Stmt::NonLocalReturn in a block but `self` was not captured"
+                    );
+
+                    if let Some(span) = stmt.location().span() {
+                        diagnostic = diagnostic.and_label(LabeledSpan::underline(span));
+                    }
+
+                    self.push_diagnostic(diagnostic);
                 }
 
                 ast::Stmt::Dummy => panic!("Stmt::Dummy in AST"),
 
-                _ => {}
+                _ => stmt.recurse(self),
             }
         }
 
         fn visit_expr(&mut self, expr: &'a ast::Expr) {
             match expr {
                 ast::Expr::Dummy => panic!("Expr::Dummy in AST"),
-                _ => {}
+                _ => expr.recurse(self),
             }
         }
 
         fn visit_field(&mut self, field: &'a ast::Field) {
             if self.frame_idx > 1 {
-                assert!(
-                    self.captured_upvalues.iter().any(|name| name == "self"),
-                    "`self` implicitly captured by field access but missing from the upvalue list"
-                );
+                if !self.captured_upvalues.iter().any(|name| name == "self") {
+                    let mut diagnostic = diagnostic!(
+                        help = format!("captured upvalues: {:?}", self.captured_upvalues),
+                        "`self` implicitly captured by field access but missing from the upvalue list"
+                    );
+
+                    if let Some(span) = field.0.span() {
+                        diagnostic = diagnostic
+                            .and_label(LabeledSpan::at(span, "captured by this field access"));
+                    }
+
+                    self.push_diagnostic(diagnostic);
+                }
             }
 
-            assert!(
-                self.fields.contains(field.0.value.as_str()),
-                "unknown field `{}`",
-                field.0.value
-            );
+            if !self.fields.contains(field.0.value.as_str()) {
+                let mut diagnostic = diagnostic!(
+                    help = format!("available fields: {:?}", self.fields),
+                    "unknown field `{}`",
+                    field.0.value
+                );
+
+                if let Some(span) = field.0.span() {
+                    diagnostic = diagnostic.and_label(LabeledSpan::at(span, "field accessed here"));
+                }
+
+                self.push_diagnostic(diagnostic);
+            }
         }
 
         fn visit_upvalue(&mut self, upvalue: &'a ast::Upvalue) {
-            assert!(
-                self.captured_upvalues.contains(&upvalue.name.value),
-                "upvalue {} not captured",
-                upvalue.name.value
-            );
+            if !self.captured_upvalues.contains(&upvalue.name.value) {
+                let mut diagnostic = diagnostic!(
+                    help = format!("captured upvalues: {:?}", self.captured_upvalues),
+                    "upvalue `{}` not captured",
+                    upvalue.name.value
+                );
+
+                if let Some(span) = upvalue.name.span() {
+                    diagnostic =
+                        diagnostic.and_label(LabeledSpan::at(span, "upvalue accessed here"));
+                }
+
+                self.push_diagnostic(diagnostic);
+            }
         }
 
         fn visit_local(&mut self, local: &'a ast::Local) {
-            assert!(
-                self.locals.iter().any(|name| name.value == local.0.value),
-                "unknown local `{}`",
-                local.0.value
-            );
+            if !self.locals_iter().any(|name| name == local.0.value) {
+                let mut diagnostic = diagnostic!(
+                    help = format!("available locals: {:?}", self.locals()),
+                    "unknown local `{}`",
+                    local.0.value
+                );
+
+                if let Some(span) = local.0.span() {
+                    diagnostic = diagnostic.and_label(LabeledSpan::at(span, "local accessed here"));
+                }
+
+                self.push_diagnostic(diagnostic);
+            }
         }
     }
-
-    assert!(code.upvalues.is_empty(), "method captures a variable");
 
     let mut checker = Checker {
         frame_idx: 0,
         captured_upvalues: &[],
         locals: &[],
+        params: &[],
         fields,
+        diagnostics: vec![],
     };
 
+    if !code.upvalues.is_empty() {
+        checker.push_diagnostic(diagnostic!(
+            help = format!("upvalue list: {:?}", code.upvalues),
+            "method captures a variable"
+        ));
+    }
+
     checker.visit_block(code);
+
+    if !checker.diagnostics.is_empty() {
+        #[derive(Diagnostic, Error, Debug)]
+        #[error("code validation failed (while checking method `{method_name}` of class `{class_name}`)")]
+        struct AggregateDiagnostics {
+            class_name: String,
+            method_name: String,
+
+            #[related]
+            diagnostics: Vec<MietteDiagnostic>,
+        }
+
+        let report = miette::Report::new(AggregateDiagnostics {
+            class_name: class_name.to_owned(),
+            method_name: method_name.to_owned(),
+            diagnostics: checker.diagnostics,
+        })
+        .with_source_code(source.clone());
+
+        panic!("{:?}", report);
+    }
 }
 
 pub struct LoadClassOptions {
@@ -448,11 +601,25 @@ impl<'gc> Vm<'gc> {
         let uninit_metaclass_classes = [
             &self.builtins.metaclass_class,
             &self.builtins.object_class,
-            &self.builtins.class.get().get_obj().get().class.get().unwrap(),
+            &self
+                .builtins
+                .class
+                .get()
+                .get_obj()
+                .get()
+                .class
+                .get()
+                .unwrap(),
         ];
 
         for class in uninit_metaclass_classes {
-            class.get().get_obj().get().class.set(self.builtins.metaclass.clone()).unwrap();
+            class
+                .get()
+                .get_obj()
+                .get()
+                .class
+                .set(self.builtins.metaclass.clone())
+                .unwrap();
         }
 
         // [Object class].superclass = Class
@@ -532,7 +699,8 @@ impl<'gc> Vm<'gc> {
             .parse_and_load_builtin("Primitive", Default::default())
             .unwrap();
 
-        self.parse_and_load_builtin("Boolean", Default::default()).unwrap();
+        self.parse_and_load_builtin("Boolean", Default::default())
+            .unwrap();
         let r#true = self
             .parse_and_load_builtin("True", Default::default())
             .unwrap();
@@ -541,10 +709,18 @@ impl<'gc> Vm<'gc> {
             .unwrap();
         self.builtins.true_object = self.make_object(r#true);
         self.builtins.false_object = self.make_object(r#false);
-        self.set_global("true".into(), self.builtins.true_object.clone().into_value());
-        self.set_global("false".into(), self.builtins.false_object.clone().into_value());
+        self.set_global(
+            "true".into(),
+            self.builtins.true_object.clone().into_value(),
+        );
+        self.set_global(
+            "false".into(),
+            self.builtins.false_object.clone().into_value(),
+        );
 
-        let system = self.parse_and_load_builtin("System", Default::default()).unwrap();
+        let system = self
+            .parse_and_load_builtin("System", Default::default())
+            .unwrap();
         self.set_global("system".into(), self.make_object(system).into_value());
     }
 
@@ -680,7 +856,15 @@ impl<'gc> Vm<'gc> {
         } = method.def;
 
         let code = match def {
-            ast::MethodDef::Block(blk) => MethodDef::Code(self.process_method_code(blk, fields)),
+            ast::MethodDef::Block(blk) => MethodDef::Code(self.process_method_code(
+                blk,
+                fields,
+                #[cfg(debug_assertions)]
+                class_name,
+                #[cfg(debug_assertions)]
+                method.selector.value.name(),
+            )),
+
             ast::MethodDef::Primitive { params } => MethodDef::Primitive {
                 primitive: self.resolve_primitive(class_name, &method.selector)?,
                 params,
@@ -692,13 +876,26 @@ impl<'gc> Vm<'gc> {
         Ok(method)
     }
 
-    fn process_method_code(&self, mut code: ast::Block, fields: &HashSet<&str>) -> ast::Block {
+    fn process_method_code(
+        &self,
+        mut code: ast::Block,
+        fields: &HashSet<&str>,
+        #[cfg(debug_assertions)] class_name: &str,
+        #[cfg(debug_assertions)] method_name: &str,
+    ) -> ast::Block {
         resolve_names(&mut code, fields);
         resolve_upvalues(&mut code);
         add_implicit_returns(&mut code);
 
-        if cfg!(debug_assertions) {
-            check_method_code(&code, fields);
+        #[cfg(debug_assertions)]
+        {
+            check_method_code(
+                class_name,
+                method_name,
+                self.file_loader.get_source(),
+                &code,
+                fields,
+            );
         }
 
         code
@@ -975,8 +1172,12 @@ impl<'gc> Vm<'gc> {
     }
 
     fn pop_frame(&mut self) {
-        let frame = self.frames.pop().expect("trying to pop an empty frame stack");
-        let local_addresses: HashSet<_> = frame.locals.iter().map(|local| local as *const _).collect();
+        let frame = self
+            .frames
+            .pop()
+            .expect("trying to pop an empty frame stack");
+        let local_addresses: HashSet<_> =
+            frame.locals.iter().map(|local| local as *const _).collect();
 
         let mut maybe_upvalue = self.upvalues.borrow().clone();
 

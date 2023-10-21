@@ -79,7 +79,7 @@ pub enum VmError {
         #[label]
         dispatch_span: Option<Span>,
 
-        #[label]
+        #[label = "callee defined here"]
         callee_span: Option<Span>,
 
         callee_name: String,

@@ -1,0 +1,7 @@
+C = B (
+  z = (
+    'C#z' println.
+    z := z + 1.
+    ^super z + 1
+  )
+)

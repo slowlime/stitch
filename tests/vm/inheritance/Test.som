@@ -1,0 +1,22 @@
+"test:
+output:
+  contains: |
+    C#z
+    B#z
+    A#z
+    3
+    B#do:
+    45
+    103
+"
+
+Test = (
+  run = (
+    |c|
+    c := C new init.
+
+    c z println.
+    c do: [42] println.
+    (c + 100) println.
+  )
+)

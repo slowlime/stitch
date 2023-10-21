@@ -332,6 +332,14 @@ pub struct Block {
     pub upvalues: Vec<String>,
 }
 
+impl Block {
+    pub fn body_location(&self) -> Option<Location> {
+        self.body.iter()
+            .map(|stmt| stmt.location())
+            .reduce(|acc, l| acc.convex_hull(l))
+    }
+}
+
 impl AstRecurse for Block {
     fn recurse<'a, V: visit::Visitor<'a>>(&'a self, visitor: &mut V) {
         for stmt in &self.body {
@@ -354,6 +362,17 @@ pub enum Stmt {
 
     #[default]
     Dummy,
+}
+
+impl Stmt {
+    pub fn location(&self) -> Location {
+        match self {
+            Stmt::Return(stmt) => stmt.location,
+            Stmt::NonLocalReturn(stmt) => stmt.location,
+            Stmt::Expr(e) => e.location,
+            Stmt::Dummy => Default::default(),
+        }
+    }
 }
 
 impl AstRecurse for Stmt {

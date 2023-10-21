@@ -1,0 +1,22 @@
+A = (
+  |z|
+
+  init = (
+    z isNil ifTrue: [z := 0]
+  )
+
+  z = (
+    'A#z' println.
+    ^z
+  )
+
+  do: block = (
+    'A#do:' println.
+    ^block value.
+  )
+
+  + x = (
+    'A#+' println.
+    ^z + x
+  )
+)

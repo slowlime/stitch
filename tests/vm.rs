@@ -111,13 +111,14 @@ impl FileLoader for TestFileLoader {
     }
 }
 
-fn run_test_class(base_path: PathBuf) {
+fn run_test_class(test_class_path: PathBuf) {
     miette::set_panic_hook();
 
-    let class_name = base_path.file_stem().unwrap().to_str().unwrap();
+    let class_name = test_class_path.file_stem().unwrap().to_str().unwrap();
+    let base_path = test_class_path.parent().unwrap().to_owned();
 
     let gc = GarbageCollector::new();
-    let mut file_loader = TestFileLoader::new(base_path.parent().unwrap().to_owned());
+    let mut file_loader = TestFileLoader::new(base_path.clone());
     let test: VmTest =
         common::parse_comment_header(file_loader.load_user_class(class_name).unwrap());
 
@@ -126,9 +127,41 @@ fn run_test_class(base_path: PathBuf) {
     let stderr = Box::new(VmOutput(output.clone()));
 
     let mut vm = Vm::new(&gc, Box::new(file_loader), stdout, stderr);
+
+    let mut entries = fs::read_dir(&base_path)
+        .expect("could not open the test directory")
+        .map(|entry| entry.map(|entry| entry.path()))
+        .filter(|path| match path {
+            Ok(path) => {
+                path.extension().is_some_and(|ext| ext == "som")
+                    && path.file_stem().is_some_and(|name| name != class_name)
+                    && fs::metadata(&path)
+                        .expect("could not read metadata")
+                        .is_file()
+            }
+
+            Err(_) => true,
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    entries
+        .sort_unstable_by_key(|path| path.file_stem().map(|class_name| class_name.to_os_string()));
+
+    for path in entries {
+        vm.parse_and_load_user_class(&path.file_stem().unwrap().to_string_lossy())
+            .map_err(|e| {
+                miette::Report::new(e)
+                    .wrap_err(format!("could not load {}", path.display()))
+                    .with_source_code(vm.file_loader.get_source().clone())
+            })
+            .unwrap();
+    }
+
     let test_class = vm
         .parse_and_load_user_class(class_name)
-        .expect("loading test class failed");
+        .map_err(|e| format!("loading class `{class_name}` failed: {e}"))
+        .unwrap();
 
     let result = vm
         .run(test_class)

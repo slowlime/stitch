@@ -224,7 +224,11 @@ impl ast::Assign {
             }
 
             ast::AssignVar::Field(name) => {
-                let recv = vm.frames.last().unwrap().get_recv().unwrap().borrow();
+                let frame = vm.frames.last().expect("frame stack is empty");
+                let recv = frame
+                    .get_recv()
+                    .expect("recv not found for field access")
+                    .borrow();
                 let obj = recv.get_obj().expect("self has no associated object");
                 let Some(mut field) = obj.get_field_by_name_mut(&name.0.value) else {
                     panic!("unknown field `{}`", name.0.value);
@@ -420,6 +424,7 @@ impl<'gc> TypedValue<'gc, tag::Method> {
     ) -> Effect<'gc> {
         match self.get().def.value {
             MethodDef::Code(ref block) => {
+                dbg!(block);
                 if let Err(e) = vm.push_frame(
                     block,
                     dispatch_span,
@@ -457,9 +462,12 @@ impl<'gc> TypedValue<'gc, tag::Block> {
         &self,
         vm: &mut Vm<'gc>,
         dispatch_span: Option<Span>,
-        args: Vec<Value<'gc>>,
+        mut args: Vec<Value<'gc>>,
         arg_spans: Vec<Option<Span>>,
     ) -> Effect<'gc> {
+        // remove the implicit receiver argument (pointing to self)
+        args.remove(0);
+
         ok_or_unwind!(vm.push_frame(
             &self.get().code,
             dispatch_span,
