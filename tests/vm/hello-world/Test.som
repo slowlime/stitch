@@ -1,6 +1,6 @@
 "test:
 output:
-  contains: |
+  verbatim: |
     hello world!
     hello world!
 "

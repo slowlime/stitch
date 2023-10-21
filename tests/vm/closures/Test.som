@@ -1,0 +1,29 @@
+"test:
+output:
+  verbatim: |
+    0
+    1
+    2
+    2
+"
+
+Test = (
+  counterMaker = (
+    ^[self makeCounter]
+  )
+
+  makeCounter = ( |count|
+    count := 0.
+
+    ^Pair new: [count] with: [count := count + 1]
+  )
+
+  run = ( |c|
+    c := self counterMaker value.
+
+    c left value println.
+    c right value println.
+    c right value println.
+    c left value println.
+  )
+)

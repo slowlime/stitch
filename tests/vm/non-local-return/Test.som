@@ -1,0 +1,30 @@
+"test:
+output:
+  verbatim: |
+    escapedBlock: instance of Block1
+    256
+"
+
+Test = (
+  escapedBlock: block = (
+    'escapedBlock: ' print.
+    block println.
+
+    ^256
+  )
+
+  makeBlock = ( |count|
+    count := 0.
+
+    ^[count = 0
+        ifTrue: [
+          count := count + 1.
+          ^42]
+        ifFalse: [104]]
+  )
+
+  run = ( |b|
+    b := self makeBlock.
+    b value println.
+  )
+)

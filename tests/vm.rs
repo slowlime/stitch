@@ -160,7 +160,11 @@ fn run_test_class(test_class_path: PathBuf) {
 
     let test_class = vm
         .parse_and_load_user_class(class_name)
-        .map_err(|e| format!("loading class `{class_name}` failed: {e}"))
+        .map_err(|e| {
+            miette::Report::new(e)
+                .wrap_err(format!("loading class `{class_name}` failed"))
+                .with_source_code(vm.file_loader.get_source().clone())
+        })
         .unwrap();
 
     let result = vm

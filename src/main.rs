@@ -2,6 +2,7 @@ mod args;
 
 use std::fmt;
 use std::io;
+use std::process::ExitCode;
 
 use clap::Parser;
 
@@ -28,7 +29,7 @@ impl<W: io::Write> fmt::Write for FormattedWriter<W> {
     }
 }
 
-fn main() -> Result<(), VmError> {
+fn main() -> ExitCode {
     let args = Args::parse();
 
     let gc = GarbageCollector::new();
@@ -36,7 +37,26 @@ fn main() -> Result<(), VmError> {
     let stdout = Box::new(FormattedWriter(io::stdout()));
     let stderr = Box::new(FormattedWriter(io::stderr()));
     let mut vm = Vm::new(&gc, Box::new(file_loader), stdout, stderr);
-    let main_class = vm.parse_and_load_user_class(&args.main_class_name)?;
+    let result = vm
+        .parse_and_load_user_class(&args.main_class_name)
+        .and_then(|class| vm.run(class));
 
-    vm.run(main_class).map(|_| ())
+    match result {
+        Ok(_) | Err(VmError::Exited { code: 0, .. }) => ExitCode::SUCCESS,
+
+        Err(e) => {
+            let code = if let VmError::Exited { code, .. } = e {
+                code
+            } else {
+                1
+            };
+
+            let e = miette::Report::new(e)
+                .wrap_err("VM has terminated with an error")
+                .with_source_code(vm.file_loader.get_source().clone());
+            eprintln!("{:?}", e);
+
+            ExitCode::from(code as u8)
+        }
+    }
 }

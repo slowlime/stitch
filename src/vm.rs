@@ -681,6 +681,7 @@ impl<'gc> Vm<'gc> {
             .parse_and_load_builtin("Nil", Default::default())
             .unwrap();
         self.builtins.nil_object = self.make_object(nil);
+        self.set_global("nil".into(), self.builtins.nil_object.clone().into_value());
 
         self.builtins.array = self
             .parse_and_load_builtin("Array", Default::default())

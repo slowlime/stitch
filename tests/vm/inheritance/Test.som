@@ -1,6 +1,6 @@
 "test:
 output:
-  contains: |
+  verbatim: |
     C#z
     B#z
     A#z

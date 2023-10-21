@@ -1,0 +1,54 @@
+"test:
+output:
+  verbatim: |
+    true
+    True
+    False
+    True class
+    Metaclass
+    Metaclass class
+    Metaclass
+
+    Boolean
+    Boolean class
+    Metaclass
+
+    Object
+    Object class
+    Object class
+
+    Object
+    Object class
+    Class
+    Object
+    Class class
+"
+
+Test = (
+  run = (
+    true println.
+    true class println.
+    false class println.
+    true class class println.
+    true class class class println.
+    true class class class class println.
+    true class class class class class println.
+    system printNewline.
+
+    true class superclass println.
+    true class superclass class println.
+    true class superclass class class println.
+    system printNewline.
+
+    true class superclass superclass println.
+    true class superclass superclass class println.
+    true class class superclass println.
+    system printNewline.
+
+    Object println.
+    Object class println.
+    Object class superclass println.
+    Object class superclass superclass println.
+    Object class superclass class println.
+  )
+)

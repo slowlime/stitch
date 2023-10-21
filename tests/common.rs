@@ -46,6 +46,8 @@ pub enum Matcher {
 
     #[serde(deserialize_with = "deserialize_regex")]
     Regex(Regex),
+
+    Verbatim(String),
 }
 
 impl Matcher {
@@ -56,6 +58,9 @@ impl Matcher {
 
             Self::Regex(r) if r.is_match(s) => Ok(()),
             Self::Regex(r) => Err(format!("expected to match regexp `{r}`")),
+
+            Self::Verbatim(expected) if s == expected => Ok(()),
+            Self::Verbatim(expected) => Err(format!("expected to equal `{expected}`")),
         }
     }
 }

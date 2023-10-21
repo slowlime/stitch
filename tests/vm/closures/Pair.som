@@ -1,0 +1,28 @@
+Pair = (
+  |l r|
+
+  left = (^l)
+  right = (^r)
+
+  left: left = (
+    l := left.
+  )
+
+  right: right = (
+    r := right.
+  )
+
+  left: left right: right = (
+    self left: left.
+    self right: right.
+  )
+
+  ----
+
+  new: left with: right = ( |result|
+    result := Pair new.
+    result left: left right: right.
+
+    ^result
+  )
+)

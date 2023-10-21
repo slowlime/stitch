@@ -1,0 +1,80 @@
+"test:
+output:
+  verbatim: |
+    # Boolean
+    1. false
+    2. false
+    3. true
+    4. true
+    5. false
+    6. true
+    7. false
+    8. true
+
+    # Integer
+    1. 5
+    2. -51
+    3. 33
+    4. 24
+    5. -36
+    6. 0
+    7. -2
+
+    # Integer comparisons
+    1. false
+    2. true
+    3. true
+"
+
+Test = (
+  |i|
+
+  run = (
+    i := 0.
+    self testBoolean.
+    self testInteger.
+  )
+
+  category: name = (
+    i = 0 ifFalse: [system printNewline].
+    i := 0.
+    '# ' print. name println.
+  )
+
+  test: value = (
+    i := i + 1.
+    i print. '. ' print. value println.
+  )
+
+  testBoolean = (
+    self category: 'Boolean'.
+
+    self test: true == false.
+    self test: false == true.
+    self test: true == true.
+    self test: false == false.
+
+    self test: false || false.
+    self test: true || false.
+    self test: true && false.
+    self test: true && true.
+  )
+
+  testInteger = (
+    self category: 'Integer'.
+
+    self test: 2 + 3.
+    self test: -9 + -42.
+    self test: -9 - -42.
+    self test: 3 * 8.
+    self test: -4 * 9.
+    self test: 2 / 3.
+    self test: -9 / 4.
+
+    self category: 'Integer comparisons'.
+
+    self test: 2 = 0.
+    self test: 2 = 2.
+    self test: (4 + 8) = (3 + 9).
+  )
+)

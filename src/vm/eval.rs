@@ -13,6 +13,7 @@ use super::value::{tag, SubstrError, Ty, TypedValue, Value};
 use super::{check_arg_count, Vm};
 
 /// The result of a computation — either a plain value or a triggered effect.
+#[derive(Debug)]
 pub enum Effect<'gc> {
     /// The computation has completed successfully and terminated with the given value.
     None(Value<'gc>),
@@ -86,14 +87,7 @@ impl ast::Block {
         for stmt in &self.body {
             match stmt.eval(vm) {
                 Effect::None(_) => {}
-                eff @ (Effect::Return(_) | Effect::Unwind(_)) => return eff,
-
-                Effect::NonLocalReturn { value, up_frames } => {
-                    return match NonZeroUsize::new(up_frames.get() - 1) {
-                        Some(up_frames) => Effect::NonLocalReturn { value, up_frames },
-                        None => Effect::Return(value),
-                    }
-                }
+                eff @ (Effect::Return(_) | Effect::Unwind(_) | Effect::NonLocalReturn { .. }) => return eff,
             }
         }
 
@@ -149,7 +143,7 @@ impl ast::Stmt {
                                     let arg_spans = vec![None];
                                     drop(obj);
 
-                                    method.eval(vm, expr.span(), args, arg_spans)
+                                    method.eval(vm, expr.span(), args, arg_spans).then_return()
                                 } else {
                                     Effect::Unwind(VmError::NlRetFromEscapedBlock {
                                         ret_span: expr.span(),
