@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::pin::Pin;
 
 use crate::location::Location;
 use crate::{ast, impl_collect};
@@ -49,7 +50,7 @@ impl<'gc> Callee<'gc> {
 pub struct Frame<'gc> {
     pub callee: Callee<'gc>,
     pub local_map: HashMap<String, usize>,
-    pub locals: Box<[Local<'gc>]>,
+    pub locals: Pin<Box<[Local<'gc>]>>,
 }
 
 impl<'gc> Frame<'gc> {

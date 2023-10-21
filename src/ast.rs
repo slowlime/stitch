@@ -73,7 +73,7 @@ impl SelectorKind {
         match self {
             Self::Unary => 1,
             Self::Binary => 2,
-            Self::Keyword(kws) => kws.len(),
+            Self::Keyword(kws) => 1 + kws.len(),
         }
     }
 }

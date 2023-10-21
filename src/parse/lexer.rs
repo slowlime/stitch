@@ -341,16 +341,6 @@ impl<'a> Lexer<'a> {
         Ok(TokenValue::BinOp(BinOp::new(op)))
     }
 
-    fn scan_block_param(&mut self) -> ScanResult<'a> {
-        self.cursor.consume_expecting(":").unwrap();
-        let id = self.cursor.consume_while(make_ident_matcher());
-
-        // guaranteed by the main scan loop
-        debug_assert!(!id.is_empty());
-
-        Ok(TokenValue::BlockParam(id.into()))
-    }
-
     fn scan_ident(&mut self) -> ScanResult<'a> {
         let ident = self.cursor.consume_while(make_ident_matcher());
         debug_assert!(!ident.is_empty());
@@ -440,10 +430,6 @@ impl<'a> Iterator for Lexer<'a> {
                 Some('\'') => self.scan_string(),
 
                 Some('#') => self.scan_symbol_or_array(),
-
-                Some(':') if self.cursor.peek_nth(1).is_some_and(is_ident_start) => {
-                    self.scan_block_param()
-                }
 
                 Some(c)
                     if is_bin_op_char(c) && self.cursor.peek_nth(1).is_some_and(is_bin_op_char) =>

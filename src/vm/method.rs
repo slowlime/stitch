@@ -50,7 +50,7 @@ define_primitives! {
         ArrayAt = ("Array", "at:"),
         ArrayAtPut = ("Array", "at:put:"),
         ArrayLength = ("Array", "length"),
-        ArrayNew = ("Array", "new"),
+        ArrayNew = ("Array", "new:"),
 
         BlockValue = ("Block", "value"),
         BlockRestart = ("Block", "restart"),
@@ -81,7 +81,7 @@ define_primitives! {
         DoubleLt = ("Double", "<"),
         DoubleAsString = ("Double", "asString"),
         DoublePositiveInfinity = ("Double", "PositiveInfinity"),
-        DoubleFromString = ("Double", "fromString"),
+        DoubleFromString = ("Double", "fromString:"),
 
         MethodSignature = ("Method", "signature"),
         MethodHolder = ("Method", "holder"),
@@ -89,7 +89,7 @@ define_primitives! {
 
         PrimitiveSignature = ("Primitive", "signature"),
         PrimitiveHolder = ("Primitive", "holder"),
-        PrimitiveInvokeOnWith = ("Primtive", "invokeOn:with:"),
+        PrimitiveInvokeOnWith = ("Primitive", "invokeOn:with:"),
 
         SymbolAsString = ("Symbol", "asString"),
 
@@ -99,6 +99,7 @@ define_primitives! {
         IntegerDiv = ("Integer", "/"),
         IntegerFDiv = ("Integer", "//"),
         IntegerMod = ("Integer", "%"),
+        IntegerRem = ("Integer", "rem:"),
         IntegerBand = ("Integer", "&"),
         IntegerShl = ("Integer", "<<"),
         IntegerShr = ("Integer", ">>>"),
@@ -111,7 +112,7 @@ define_primitives! {
         IntegerAs32BitSignedValue = ("Integer", "as32BitSignedValue"),
         IntegerAs32BitUnsignedValue = ("Integer", "as32BitUnsignedValue"),
         IntegerAsDouble = ("Integer", "asDouble"),
-        IntegerFromString = ("Integer", "fromString"),
+        IntegerFromString = ("Integer", "fromString:"),
 
         ObjectClass = ("Object", "class"),
         ObjectObjectSize = ("Object", "objectSize"),
@@ -131,7 +132,7 @@ define_primitives! {
         StringAsSymbol = ("String", "asSymbol"),
         StringHashcode = ("String", "hashcode"),
         StringLength = ("String", "length"),
-        StringIsWhitespace = ("String", "isWhitespace"),
+        StringIsWhitespace = ("String", "isWhiteSpace"),
         StringIsLetters = ("String", "isLetters"),
         StringIsDigits = ("String", "isDigits"),
         StringEq = ("String", "="),
@@ -144,7 +145,7 @@ define_primitives! {
         SystemLoad = ("System", "load:"),
         SystemExit = ("System", "exit:"),
         SystemPrintString = ("System", "printString:"),
-        SystemPrintNewline = ("System", "printNewline:"),
+        SystemPrintNewline = ("System", "printNewline"),
         SystemErrorPrintln = ("System", "errorPrintln:"),
         SystemErrorPrint = ("System", "errorPrint:"),
         SystemPrintStackTrace = ("System", "printStackTrace"),

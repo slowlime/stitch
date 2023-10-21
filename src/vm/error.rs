@@ -192,6 +192,7 @@ pub enum VmError {
     },
 
     #[error("parsing failed")]
+    #[diagnostic_source]
     ParserError(#[from] ParserError),
 
     #[error("file loading failed")]

@@ -92,21 +92,13 @@ impl SourceCode for SourceMap {
         Ok(Box::new(MietteSpanContents::new_named(
             file.name.clone(),
             contents.data(),
-            *contents.span(),
+            SourceSpan::new(
+                (contents.span().offset() + file.offset).into(),
+                contents.span().len().into(),
+            ),
             contents.line(),
             contents.column(),
             contents.line_count(),
         )))
-    }
-}
-
-impl SourceCode for &'_ SourceMap {
-    fn read_span<'a>(
-        &'a self,
-        span: &SourceSpan,
-        context_lines_before: usize,
-        context_lines_after: usize,
-    ) -> Result<Box<dyn miette::SpanContents<'a> + 'a>, MietteError> {
-        <SourceMap as SourceCode>::read_span(self, span, context_lines_before, context_lines_after)
     }
 }

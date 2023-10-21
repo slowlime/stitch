@@ -1,5 +1,6 @@
 use std::mem;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::ptr;
 
 use crate::ast::{self, SymbolLit as Symbol};
@@ -481,7 +482,12 @@ impl Primitive {
         args: Vec<Value<'gc>>,
         arg_spans: Vec<Option<Span>>,
     ) -> Effect<'gc> {
-        debug_assert_eq!(args.len(), self.param_count());
+        debug_assert_eq!(
+            args.len(),
+            self.param_count(),
+            "argument count does not match parameter count while calling primitive {:?}",
+            self
+        );
         debug_assert_eq!(args.len(), arg_spans.len());
 
         #[inline]
@@ -893,7 +899,7 @@ impl Primitive {
                         method: this_method.clone(),
                     },
                     local_map: Default::default(),
-                    locals: Default::default(),
+                    locals: Pin::new(Default::default()),
                 });
                 let result = method.eval(vm, dispatch_span, call_args, call_arg_spans);
                 vm.frames.pop();
@@ -954,6 +960,20 @@ impl Primitive {
             }
 
             Primitive::IntegerMod => {
+                let [lhs, rhs] = args.try_into().unwrap();
+                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
+                // TODO: float
+                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+
+                let result = match lhs.checked_rem(rhs).unwrap_or(0) {
+                    rem if rem >= 0 && rhs >= 0 || rem < 0 && rhs < 0 => rem,
+                    rem => rem - rhs,
+                };
+
+                Effect::None(vm.make_int(result).into_value())
+            }
+
+            Primitive::IntegerRem => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
                 // TODO: float?

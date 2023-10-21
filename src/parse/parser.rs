@@ -706,16 +706,15 @@ impl<'a> Parser<'a> {
         let mut params = vec![];
 
         if params_allowed.is_yes() {
-            while let Some(Token { span, value }) = self.try_consume(TokenType::BlockParam)? {
-                let TokenValue::BlockParam(param) = value else {
-                    unreachable!()
-                };
+            while let Some(Token {
+                span: colon_span, ..
+            }) = self.try_consume(Special::Colon)?
+            {
+                let ident = self.parse_ident(PrimitiveAllowed::Yes)?;
+                let span = colon_span.convex_hull(&ident.location.span().unwrap());
 
-                self.define_var(
-                    param.clone().into_owned(),
-                    Var::Local(Location::UserCode(span)),
-                )?;
-                params.push(Spanned::new_spanning(param.into_owned(), span));
+                self.define_var(ident.value.clone(), Var::Local(Location::UserCode(span)))?;
+                params.push(Spanned::new_spanning(ident.value, span));
             }
 
             if !params.is_empty() {

@@ -1,10 +1,12 @@
 "test:
 output:
-  contains: hello world!
+  contains: |
+    hello world!
+    hello world!
 "
 
 Test = (
   run = (
-    'hello world!' println.
+    'hello world!' println println.
   )
 )

@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Write};
 use std::mem;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::ptr;
 use std::time::{Duration, Instant};
 
@@ -422,6 +423,16 @@ impl<'gc> Vm<'gc> {
             .unwrap();
         self.builtins.object_class = self.builtins.object.get().get_metaclass().clone();
 
+        // Class:
+        // - superclass: Object
+        // - metaclass: Class class
+        // Class class:
+        // - superclass: Object class
+        // - metaclass: <uninit>
+        self.builtins.class = self
+            .parse_and_load_builtin("Class", Default::default())
+            .unwrap();
+
         // Metaclass:
         // - superclass: Object
         // - metaclass: Metaclass class
@@ -433,28 +444,16 @@ impl<'gc> Vm<'gc> {
             .unwrap();
         self.builtins.metaclass_class = self.builtins.metaclass.get().get_metaclass().clone();
 
-        // [Metaclass class].metaclass = Metaclass
-        self.builtins
-            .metaclass_class
-            .get()
-            .get_obj()
-            .get()
-            .class
-            .set(self.builtins.metaclass.clone())
-            .unwrap();
-        // [Object class].metaclass = Metaclass
-        self.builtins
-            .object_class
-            .get()
-            .get_obj()
-            .get()
-            .class
-            .set(self.builtins.metaclass.clone())
-            .unwrap();
+        // set metaclasses
+        let uninit_metaclass_classes = [
+            &self.builtins.metaclass_class,
+            &self.builtins.object_class,
+            &self.builtins.class.get().get_obj().get().class.get().unwrap(),
+        ];
 
-        self.builtins.class = self
-            .parse_and_load_builtin("Class", Default::default())
-            .unwrap();
+        for class in uninit_metaclass_classes {
+            class.get().get_obj().get().class.set(self.builtins.metaclass.clone()).unwrap();
+        }
 
         // [Object class].superclass = Class
         self.builtins
@@ -468,13 +467,20 @@ impl<'gc> Vm<'gc> {
             .parse_and_load_builtin("Method", Default::default())
             .unwrap();
 
-        fn fix_method_objects<'gc>(vm: &Vm<'gc>, class: &TypedValue<'gc, tag::Class>) {
+        let uninit_method_classes = [
+            &self.builtins.object,
+            &self.builtins.metaclass,
+            &self.builtins.class,
+            &self.builtins.method,
+        ];
+
+        for class in uninit_method_classes {
             for method in &class.get().methods {
                 let method_obj = method.get().obj.get().unwrap();
                 method_obj
                     .get()
                     .class
-                    .set(vm.builtins.method.clone())
+                    .set(self.builtins.method.clone())
                     .unwrap();
             }
 
@@ -483,15 +489,10 @@ impl<'gc> Vm<'gc> {
                 method_obj
                     .get()
                     .class
-                    .set(vm.builtins.method.clone())
+                    .set(self.builtins.method.clone())
                     .unwrap();
             }
         }
-
-        fix_method_objects(self, &self.builtins.object);
-        fix_method_objects(self, &self.builtins.metaclass);
-        fix_method_objects(self, &self.builtins.class);
-        fix_method_objects(self, &self.builtins.method);
 
         // at this point all object references in the classes created so far should be initialized.
 
@@ -521,16 +522,17 @@ impl<'gc> Vm<'gc> {
         self.builtins.double = self
             .parse_and_load_builtin("Double", Default::default())
             .unwrap();
+        self.builtins.string = self
+            .parse_and_load_builtin("String", Default::default())
+            .unwrap();
         self.builtins.symbol = self
             .parse_and_load_builtin("Symbol", Default::default())
             .unwrap();
         self.builtins.primitive = self
             .parse_and_load_builtin("Primitive", Default::default())
             .unwrap();
-        self.builtins.string = self
-            .parse_and_load_builtin("String", Default::default())
-            .unwrap();
 
+        self.parse_and_load_builtin("Boolean", Default::default()).unwrap();
         let r#true = self
             .parse_and_load_builtin("True", Default::default())
             .unwrap();
@@ -539,6 +541,11 @@ impl<'gc> Vm<'gc> {
             .unwrap();
         self.builtins.true_object = self.make_object(r#true);
         self.builtins.false_object = self.make_object(r#false);
+        self.set_global("true".into(), self.builtins.true_object.clone().into_value());
+        self.set_global("false".into(), self.builtins.false_object.clone().into_value());
+
+        let system = self.parse_and_load_builtin("System", Default::default()).unwrap();
+        self.set_global("system".into(), self.make_object(system).into_value());
     }
 
     fn parse_and_load_builtin(
@@ -911,15 +918,14 @@ impl<'gc> Vm<'gc> {
         self.start_time.set(Instant::now());
 
         let result = match method.eval(self, None, args, vec![None]) {
-            Effect::None(_) => panic!("method has no return statement"),
-            Effect::Return(value) => Ok(value),
-            Effect::NonLocalReturn { .. } => {
-                panic!("NonLocalReturn through top-level frame")
-            }
+            Effect::None(value) => Ok(value),
             Effect::Unwind(e) => Err(e),
+
+            Effect::Return(_) | Effect::NonLocalReturn { .. } => {
+                panic!("non-local return through top-level frame")
+            }
         };
 
-        self.pop_frame();
         assert!(self.frames.is_empty(), "frame push/pop mismatch");
 
         result
@@ -962,14 +968,25 @@ impl<'gc> Vm<'gc> {
         self.frames.push(Frame {
             callee,
             local_map,
-            locals: locals.into_boxed_slice(),
+            locals: Pin::new(locals.into_boxed_slice()),
         });
 
         Ok(())
     }
 
     fn pop_frame(&mut self) {
-        todo!("close upvalues and pop the frame off the stack")
+        let frame = self.frames.pop().expect("trying to pop an empty frame stack");
+        let local_addresses: HashSet<_> = frame.locals.iter().map(|local| local as *const _).collect();
+
+        let mut maybe_upvalue = self.upvalues.borrow().clone();
+
+        while let Some(upvalue) = maybe_upvalue {
+            if local_addresses.contains(&(upvalue.get_local() as *const _)) {
+                upvalue.close();
+            }
+
+            maybe_upvalue = upvalue.next.borrow().clone();
+        }
     }
 
     fn capture_local(&self, local: &Local<'gc>) -> Gc<'gc, Upvalue<'gc>> {

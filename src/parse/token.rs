@@ -95,7 +95,6 @@ pub enum TokenType<'a> {
     Ident,
     Keyword,
     Symbol,
-    BlockParam,
     BinOp(BinOp<'a>),
     Special(Special),
     Eof,
@@ -110,7 +109,6 @@ impl Display for TokenType<'_> {
             Self::Ident => write!(f, "identifier"),
             Self::Keyword => write!(f, "keyword"),
             Self::Symbol => write!(f, "symbol"),
-            Self::BlockParam => write!(f, "block parameter"),
             Self::BinOp(op) if f.alternate() => write!(f, "`{}`", op.as_str()),
             Self::BinOp(op) => write!(f, "{}", op.as_str()),
             Self::Special(s) if f.alternate() => write!(f, "`{}`", s.as_str()),
@@ -129,7 +127,6 @@ impl CloneStatic<TokenType<'static>> for TokenType<'_> {
             Self::Ident => TokenType::Ident,
             Self::Keyword => TokenType::Keyword,
             Self::Symbol => TokenType::Symbol,
-            Self::BlockParam => TokenType::BlockParam,
             Self::BinOp(op) => TokenType::BinOp(op.clone_static()),
             Self::Special(s) => TokenType::Special(*s),
             Self::Eof => TokenType::Eof,
@@ -180,7 +177,6 @@ pub enum TokenValue<'a> {
     Ident(Cow<'a, str>),
     Keyword(Cow<'a, str>),
     Symbol(Symbol<'a>),
-    BlockParam(Cow<'a, str>),
     BinOp(BinOp<'a>),
     Special(Special),
     Eof,
@@ -195,7 +191,6 @@ impl<'a> TokenValue<'a> {
             Self::Ident(_) => TokenType::Ident,
             Self::Keyword(_) => TokenType::Keyword,
             Self::Symbol(_) => TokenType::Symbol,
-            Self::BlockParam(_) => TokenType::BlockParam,
             Self::BinOp(ref op) => TokenType::BinOp(op.clone()),
             Self::Special(s) => TokenType::Special(s),
             Self::Eof => TokenType::Eof,
@@ -220,7 +215,6 @@ impl CloneStatic<TokenValue<'static>> for TokenValue<'_> {
             Self::Ident(id) => TokenValue::Ident(id.clone_static()),
             Self::Keyword(kw) => TokenValue::Keyword(kw.clone_static()),
             Self::Symbol(s) => TokenValue::Symbol(s.clone_static()),
-            Self::BlockParam(p) => TokenValue::BlockParam(p.clone_static()),
             Self::BinOp(op) => TokenValue::BinOp(op.clone_static()),
             Self::Special(s) => TokenValue::Special(*s),
             Self::Eof => TokenValue::Eof,
@@ -257,6 +251,7 @@ macro_rules! specials {
             pub fn parse_prefix(input: &str) -> Option<Special> {
                 Self::get_prefix_lengths()
                     .iter()
+                    .rev()
                     .filter_map(|&len| input.get(0..len))
                     .find_map(|prefix| Self::SPECIALS.get(prefix))
                     .copied()
@@ -298,6 +293,7 @@ specials! {
     "." => Dot,
     "^" => Circumflex,
     ":=" => Assign,
+    ":" => Colon,
 
     "primitive" => Primitive,
     "#(" => ArrayLeft,
