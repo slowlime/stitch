@@ -46,6 +46,8 @@ macro_rules! define_primitives {
 }
 
 define_primitives! {
+    // this is to allow Primitive::Primitive*
+    #[allow(clippy::enum_variant_names)]
     pub enum Primitive {
         ArrayAt = ("Array", "at:"),
         ArrayAtPut = ("Array", "at:put:"),

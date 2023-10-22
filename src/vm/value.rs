@@ -105,7 +105,7 @@ impl Hash for Value<'_> {
 
         match &self.0 {
             Some(inner) => {
-                let kind: &ValueKind = &**inner;
+                let kind: &ValueKind = inner;
                 mem::discriminant(kind).hash(state);
 
                 match kind {

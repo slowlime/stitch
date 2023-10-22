@@ -218,6 +218,12 @@ impl GarbageCollector {
     }
 }
 
+impl Default for GarbageCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for GarbageCollector {
     fn drop(&mut self) {
         // since Gc<T>s are bound to GarbageCollector by a lifetime parameter,
@@ -265,7 +271,7 @@ impl Header {
             "reference count limit exceeded"
         );
         self.ref_mark
-            .set(Self::MARK_MASK * marked.is_yes() as u32 | ref_count as u32);
+            .set((Self::MARK_MASK * marked.is_yes() as u32) | ref_count as u32);
     }
 
     fn inc_ref_count(&self) {
@@ -316,12 +322,10 @@ impl GcVTable {
 
         unsafe fn drop<T: Collect>(gc_box: *mut ()) -> usize {
             let gc_box = gc_box as *mut GcBox<T>;
-
             let gc_box = Box::from_raw(gc_box);
-            let size = size_of_val(&*gc_box);
 
             // the box goes out of scope and gets deallocated
-            size
+            size_of_val(&*gc_box)
         }
 
         let offset = GcBox::<T>::data_offset();
@@ -574,10 +578,6 @@ impl<'a, 'b, T: PartialEq + ?Sized> PartialEq<Gc<'a, T>> for Gc<'b, T> {
     fn eq(&self, other: &Gc<'a, T>) -> bool {
         <T as PartialEq>::eq(self, other)
     }
-
-    fn ne(&self, other: &Gc<'a, T>) -> bool {
-        <T as PartialEq>::ne(self, other)
-    }
 }
 
 impl<T> Finalize for Gc<'_, T> {}
@@ -655,7 +655,7 @@ impl RefCellStatus {
         // - all ones (borrowed for writing) to 0
         // - all zeros (no borrows) to 1
         // - everything else (borrowed for reading) to values above 1
-        self.0 + 1 & Self::REF_MASK > 1
+        (self.0 + 1) & Self::REF_MASK > 1
     }
 
     fn with_reader_added(self) -> Option<Self> {
@@ -668,7 +668,7 @@ impl RefCellStatus {
     }
 
     fn with_reader_dropped(self) -> Option<Self> {
-        if self.0 + 1 & Self::REF_MASK <= 1 {
+        if (self.0 + 1) & Self::REF_MASK <= 1 {
             // writing or zero reader count
             None
         } else {
@@ -714,9 +714,6 @@ pub struct GcRefCell<T: ?Sized> {
 }
 
 impl<T> GcRefCell<T> {
-    const STRONG_MASK: u32 = 1 << 31;
-    const REF_MASK: u32 = !Self::STRONG_MASK;
-
     pub fn new(value: T) -> Self {
         Self {
             status: Cell::new(RefCellStatus::new()),
@@ -788,10 +785,6 @@ impl<T: Eq + ?Sized> Eq for GcRefCell<T> {}
 impl<T: PartialEq + ?Sized> PartialEq for GcRefCell<T> {
     fn eq(&self, other: &Self) -> bool {
         <T as PartialEq>::eq(&self.borrow(), &other.borrow())
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        <T as PartialEq>::ne(&self.borrow(), &other.borrow())
     }
 }
 
@@ -1276,9 +1269,8 @@ impl<T> Finalize for Option<T> {}
 unsafe impl<T: Collect> Collect for Option<T> {
     impl_collect! {
         fn visit(&self) {
-            match *self {
-                Some(ref value) => visit::<T>(value),
-                None => {},
+            if let Some(value) = self {
+                visit::<T>(value);
             }
         }
     }

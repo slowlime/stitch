@@ -87,7 +87,9 @@ impl ast::Block {
         for stmt in &self.body {
             match stmt.eval(vm) {
                 Effect::None(_) => {}
-                eff @ (Effect::Return(_) | Effect::Unwind(_) | Effect::NonLocalReturn { .. }) => return eff,
+                eff @ (Effect::Return(_) | Effect::Unwind(_) | Effect::NonLocalReturn { .. }) => {
+                    return eff
+                }
             }
         }
 
@@ -254,7 +256,10 @@ impl Spanned<ast::Block> {
         let frame = vm.frames.last().expect("stack frame is empty");
 
         // TODO: whoa, cloning the whole ast here seems excessive
-        Effect::None(vm.make_block(frame.get_defining_method().clone(), self.clone()).into_value())
+        Effect::None(
+            vm.make_block(frame.get_defining_method().clone(), self.clone())
+                .into_value(),
+        )
     }
 }
 
@@ -323,7 +328,9 @@ impl ast::Dispatch {
         let method = if self.supercall {
             let frame = vm.frames.last().expect("frame stack is empty");
             let holder = frame.get_defining_method().get().holder.get().unwrap();
-            holder.get().get_supermethod_by_name(self.selector.value.name())
+            holder
+                .get()
+                .get_supermethod_by_name(self.selector.value.name())
         } else {
             recv.get_class(vm)
                 .get()
@@ -458,11 +465,12 @@ impl<'gc> TypedValue<'gc, tag::Block> {
         vm: &mut Vm<'gc>,
         dispatch_span: Option<Span>,
         mut args: Vec<Value<'gc>>,
-        arg_spans: Vec<Option<Span>>,
+        _arg_spans: Vec<Option<Span>>,
     ) -> Effect<'gc> {
         // remove the implicit receiver argument (pointing to self)
         args.remove(0);
 
+        // TODO: use arg_spans for diagnostics
         ok_or_unwind!(vm.push_frame(
             &self.get().code,
             dispatch_span,
@@ -494,7 +502,7 @@ impl Primitive {
         debug_assert_eq!(args.len(), arg_spans.len());
 
         #[inline]
-        fn check_arr_idx<'a, 'gc>(
+        fn check_arr_idx(
             span: Option<Span>,
             contents_len: usize,
             idx: i64,
@@ -550,6 +558,7 @@ impl Primitive {
         }
 
         #[inline]
+        #[allow(clippy::too_many_arguments)]
         fn object_perform<'gc>(
             dispatch_span: Option<Span>,
             vm: &mut Vm<'gc>,

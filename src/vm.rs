@@ -45,26 +45,22 @@ fn check_arg_count<'gc>(
     callee_name: String,
 ) -> Result<(), VmError> {
     match args.len().cmp(&params.len()) {
-        Ordering::Less => {
-            return Err(VmError::NotEnoughArguments {
-                dispatch_span,
-                callee_span,
-                callee_name,
-                expected_count: params.len(),
-                provided_count: args.len(),
-                missing_params: params[args.len()..].to_vec(),
-            })
-        }
+        Ordering::Less => Err(VmError::NotEnoughArguments {
+            dispatch_span,
+            callee_span,
+            callee_name,
+            expected_count: params.len(),
+            provided_count: args.len(),
+            missing_params: params[args.len()..].to_vec(),
+        }),
 
-        Ordering::Greater => {
-            return Err(VmError::TooManyArguments {
-                dispatch_span,
-                callee_span,
-                callee_name,
-                expected_count: params.len(),
-                provided_count: args.len(),
-            })
-        }
+        Ordering::Greater => Err(VmError::TooManyArguments {
+            dispatch_span,
+            callee_span,
+            callee_name,
+            expected_count: params.len(),
+            provided_count: args.len(),
+        }),
 
         Ordering::Equal => Ok(()),
     }
@@ -396,20 +392,18 @@ fn check_method_code(
         }
 
         fn visit_field(&mut self, field: &'a ast::Field) {
-            if self.frame_idx > 1 {
-                if !self.captured_upvalues.iter().any(|name| name == "self") {
-                    let mut diagnostic = diagnostic!(
-                        help = format!("captured upvalues: {:?}", self.captured_upvalues),
-                        "`self` implicitly captured by field access but missing from the upvalue list"
-                    );
+            if self.frame_idx > 1 && !self.captured_upvalues.iter().any(|name| name == "self") {
+                let mut diagnostic = diagnostic!(
+                    help = format!("captured upvalues: {:?}", self.captured_upvalues),
+                    "`self` implicitly captured by field access but missing from the upvalue list"
+                );
 
-                    if let Some(span) = field.0.span() {
-                        diagnostic = diagnostic
-                            .and_label(LabeledSpan::at(span, "captured by this field access"));
-                    }
-
-                    self.push_diagnostic(diagnostic);
+                if let Some(span) = field.0.span() {
+                    diagnostic = diagnostic
+                        .and_label(LabeledSpan::at(span, "captured by this field access"));
                 }
+
+                self.push_diagnostic(diagnostic);
             }
 
             if !self.fields.contains(field.0.value.as_str()) {
@@ -501,16 +495,9 @@ fn check_method_code(
     }
 }
 
+#[derive(Default)]
 pub struct LoadClassOptions {
     pub allow_nil_superclass: bool,
-}
-
-impl Default for LoadClassOptions {
-    fn default() -> Self {
-        Self {
-            allow_nil_superclass: false,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -584,7 +571,6 @@ impl<'gc> Vm<'gc> {
                 "Object",
                 LoadClassOptions {
                     allow_nil_superclass: true,
-                    ..Default::default()
                 },
             )
             .unwrap();
@@ -993,7 +979,11 @@ impl<'gc> Vm<'gc> {
         value
     }
 
-    fn make_block(&mut self, defining_method: TypedValue<'gc, tag::Method>, code: Spanned<ast::Block>) -> TypedValue<'gc, tag::Block> {
+    fn make_block(
+        &mut self,
+        defining_method: TypedValue<'gc, tag::Method>,
+        code: Spanned<ast::Block>,
+    ) -> TypedValue<'gc, tag::Block> {
         let upvalues = code
             .value
             .upvalues
@@ -1004,10 +994,12 @@ impl<'gc> Vm<'gc> {
                     .get_local_by_name(name)
                     .unwrap_or_else(|| match &frame.callee {
                         Callee::Method { .. } => panic!("unknown upvalue `{}`", name),
-                        Callee::Block { block, .. } => match block.get().get_upvalue_by_name(name) {
-                            Some(upvalue) => upvalue.get_local(),
-                            None => panic!("unknown upvalue `{}`", name),
-                        },
+                        Callee::Block { block, .. } => {
+                            match block.get().get_upvalue_by_name(name) {
+                                Some(upvalue) => upvalue.get_local(),
+                                None => panic!("unknown upvalue `{}`", name),
+                            }
+                        }
                     });
 
                 self.capture_local(local)
@@ -1124,7 +1116,7 @@ impl<'gc> Vm<'gc> {
         args: Vec<Value<'gc>>,
     ) -> Result<Value<'gc>, VmError> {
         assert!(
-            self.frames.len() == 0,
+            self.frames.is_empty(),
             "execute_method called with non-empty frame stack"
         );
 
