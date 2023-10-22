@@ -3,6 +3,7 @@ output:
   verbatim: |
     escapedBlock: instance of Block1
     256
+    104
 "
 
 Test = (
@@ -16,15 +17,22 @@ Test = (
   makeBlock = ( |count|
     count := 0.
 
-    ^[count = 0
-        ifTrue: [
-          count := count + 1.
-          ^42]
-        ifFalse: [104]]
+    2 = (1 + 1) ifTrue: [
+      ^[count = 0
+          ifTrue: [
+            count := count + 1.
+            ^42]
+          ifFalse: [104]]].
+
+    'should not happen' println.
+
+    ^42.
   )
 
   run = ( |b|
     b := self makeBlock.
     b value println.
+    true ifTrue: [^b value println].
+    'should not happen' println.
   )
 )

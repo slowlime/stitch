@@ -45,11 +45,11 @@ impl<'gc> Value<'gc> {
         }
     }
 
-    pub fn downcast<T: Tag>(self) -> Option<TypedValue<'gc, T>> {
+    pub fn downcast<T: Tag>(self) -> Result<TypedValue<'gc, T>, Self> {
         if self.is::<T>() {
-            Some(unsafe { TypedValue::new(self) })
+            Ok(unsafe { TypedValue::new(self) })
         } else {
-            None
+            Err(self)
         }
     }
 
@@ -261,6 +261,7 @@ define_value_kind! {
         Block("block", Block<'gc> => &'a Block<'gc>): ref blk => blk,
         Class("class", Class<'gc> => &'a Class<'gc>): ref cls => cls,
         Method("method", Method<'gc> => &'a Method<'gc>): ref method => method,
+        // FIXME: Symbols are also strings: add Value::as_string() for casting and change the repr of symbols
         Symbol("symbol", Symbol => &'a Symbol): ref sym => sym,
         Object("object", Object<'gc> => &'a Object<'gc>): ref obj => obj,
         String("string", SomString => &'a SomString): ref s => s,

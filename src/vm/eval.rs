@@ -21,6 +21,9 @@ pub enum Effect<'gc> {
     /// The computation directs the control flow to pop the current frame, returning the given value.
     Return(Value<'gc>),
 
+    /// The current method should be restarted from the beginning.
+    Restart,
+
     /// The computation has encountered an error, which lead to unwinding the stack.
     Unwind(VmError),
 
@@ -59,7 +62,7 @@ impl<'gc> Effect<'gc> {
     pub fn then_nlret(self, up_frames: NonZeroUsize) -> Self {
         match self {
             Self::None(value) => Self::NonLocalReturn { value, up_frames },
-            Self::Unwind(_) | Self::Return(_) => self,
+            Self::Unwind(_) | Self::Restart | Self::Return(_) => self,
             Self::NonLocalReturn {
                 value,
                 up_frames: inner_up_frames,
@@ -77,20 +80,25 @@ impl<'gc> Effect<'gc> {
         // can i haz monads pls
         match self {
             Self::None(value) => f(value),
-            Self::Return(_) | Self::Unwind(_) | Self::NonLocalReturn { .. } => self,
+            Self::Return(_) | Self::Restart | Self::Unwind(_) | Self::NonLocalReturn { .. } => self,
         }
     }
 }
 
 impl ast::Block {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
-        for stmt in &self.body {
-            match stmt.eval(vm) {
-                Effect::None(_) => {}
-                eff @ (Effect::Return(_) | Effect::Unwind(_) | Effect::NonLocalReturn { .. }) => {
-                    return eff
+        'restart: loop {
+            for stmt in &self.body {
+                match stmt.eval(vm) {
+                    Effect::None(_) => {}
+                    Effect::Restart => continue 'restart,
+                    eff @ (Effect::Return(_) | Effect::Unwind(_) | Effect::NonLocalReturn { .. }) => {
+                        return eff
+                    }
                 }
             }
+
+            break;
         }
 
         panic!("block has no return statement");
@@ -103,6 +111,7 @@ impl ast::Block {
         match result {
             Effect::None(_) => panic!("block has no return statement"),
             Effect::Return(value) => Effect::None(value),
+            Effect::Restart => Effect::Restart,
             Effect::Unwind(err) => Effect::Unwind(err),
             Effect::NonLocalReturn { value, up_frames } => {
                 match NonZeroUsize::new(up_frames.get() - 1) {
@@ -142,7 +151,7 @@ impl ast::Stmt {
                                     .cloned()
                                 {
                                     let args = vec![obj.clone(), block.clone().into_value()];
-                                    let arg_spans = vec![None];
+                                    let arg_spans = vec![None; args.len()];
                                     drop(obj);
 
                                     method.eval(vm, expr.span(), args, arg_spans).then_return()
@@ -343,14 +352,27 @@ impl ast::Dispatch {
                 .eval(vm, self.location.span(), args, arg_spans),
 
             None => {
+                let recv = args.remove(0);
                 let class = recv.get_class(vm).get();
 
-                Effect::Unwind(VmError::NoSuchMethod {
-                    span: self.location.span(),
-                    class_span: class.name.span(),
-                    class_name: class.name.value.clone(),
-                    method_name: self.selector.value.name().to_owned(),
-                })
+                if let Some(method) = class
+                    .get_method_by_name("doesNotUnderstand:arguments:")
+                    .cloned()
+                {
+                    let args = vm.make_array(args);
+                    let sym = vm.make_symbol(Symbol::Selector(self.selector.clone()));
+                    let args = vec![recv.clone(), sym.into_value(), args.into_value()];
+                    let arg_spans = vec![None; args.len()];
+
+                    method.eval(vm, self.location.span(), args, arg_spans)
+                } else {
+                    Effect::Unwind(VmError::NoSuchMethod {
+                        span: self.location.span(),
+                        class_span: class.name.span(),
+                        class_name: class.name.value.clone(),
+                        method_name: self.selector.value.name().to_owned(),
+                    })
+                }
             }
         }
     }
@@ -409,10 +431,33 @@ impl ast::Global {
         match vm.get_global(&self.0.value) {
             Some(value) => Effect::None(value.clone()),
 
-            None => Effect::Unwind(VmError::UndefinedName {
-                span: self.0.span(),
-                name: self.0.value.clone(),
-            }),
+            None => {
+                // TODO: make a helper method for this...
+                let frame = vm.frames.last().expect("frame stack is empty");
+                let recv = frame
+                    .get_recv()
+                    .expect("`self` was not captured when accessing a global")
+                    .borrow();
+                let sym = vm.make_symbol(Symbol::String(self.0.clone()));
+
+                if let Some(method) = recv
+                    .get_class(vm)
+                    .get()
+                    .get_method_by_name("unknownGlobal:")
+                    .cloned()
+                {
+                    let args = vec![recv.clone(), sym.into_value()];
+                    let arg_spans = vec![None; args.len()];
+                    drop(recv);
+
+                    method.eval(vm, self.0.span(), args, arg_spans)
+                } else {
+                    Effect::Unwind(VmError::UndefinedName {
+                        span: self.0.span(),
+                        name: self.0.value.clone(),
+                    })
+                }
+            }
         }
     }
 }
@@ -671,7 +716,14 @@ impl Primitive {
             Primitive::BlockValue | Primitive::Block1Value => {
                 block_value(vm, dispatch_span, args, arg_spans)
             }
-            Primitive::BlockRestart => todo!("what is this even supposed to do?"),
+
+            Primitive::BlockRestart => {
+                let [recv] = args.try_into().unwrap();
+                let _ = ok_or_unwind!(recv.downcast_or_err::<tag::Block>(arg_spans[0]));
+
+                Effect::Restart
+            }
+
             Primitive::Block2Value => block_value(vm, dispatch_span, args, arg_spans),
             Primitive::Block3ValueWith => block_value(vm, dispatch_span, args, arg_spans),
 
@@ -828,7 +880,7 @@ impl Primitive {
                     vm.make_boolean(
                         // TODO: int?
                         rhs.downcast::<tag::Float>()
-                            .is_some_and(|rhs| lhs == rhs.get()),
+                            .is_ok_and(|rhs| lhs == rhs.get()),
                     )
                     .into_value(),
                 )
@@ -1056,8 +1108,7 @@ impl Primitive {
                 Effect::None(
                     vm.make_boolean(
                         // TODO: float?
-                        rhs.downcast::<tag::Int>()
-                            .is_some_and(|rhs| lhs == rhs.get()),
+                        rhs.downcast::<tag::Int>().is_ok_and(|rhs| lhs == rhs.get()),
                     )
                     .into_value(),
                 )
@@ -1431,9 +1482,13 @@ impl Primitive {
 
             Primitive::SystemPrintString => {
                 let [recv, msg] = args.try_into().unwrap();
-                let msg = ok_or_unwind!(msg.downcast_or_err::<tag::String>(arg_spans[1]));
 
-                vm.print(msg.get());
+                match msg.downcast::<tag::Symbol>() {
+                    Ok(sym) => vm.print(sym.get().as_str()),
+                    Err(msg) => vm.print(
+                        ok_or_unwind!(msg.downcast_or_err::<tag::String>(arg_spans[1])).get(),
+                    ),
+                }
 
                 Effect::None(recv)
             }

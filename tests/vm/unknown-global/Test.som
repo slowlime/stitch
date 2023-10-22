@@ -1,0 +1,18 @@
+"test:
+output:
+  verbatim: |
+    unknownGlobal: #hello
+    44
+"
+
+Test = (
+  unknownGlobal: sym = (
+    'unknownGlobal: ' print.
+    sym println.
+    ^42
+  )
+
+  run = (
+    (hello + 2) println.
+  )
+)

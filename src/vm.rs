@@ -156,6 +156,15 @@ fn resolve_upvalues(code: &mut ast::Block) {
                 }
             }
         }
+
+        fn capture_recv(&mut self) {
+            if self.frames.len() <= 1 {
+                // `self` is a local and does not need to be captured
+                return;
+            }
+
+            self.capture_var("self", NonZeroUsize::new(self.frames.len() - 1).unwrap());
+        }
     }
 
     impl<'a> DefaultVisitorMut<'a> for UpvalueResolver<'a> {
@@ -169,27 +178,27 @@ fn resolve_upvalues(code: &mut ast::Block) {
             self.frames.pop().expect("empty frame stack");
         }
 
-        fn visit_stmt(&mut self, stmt: &'a mut ast::Stmt) {
-            match stmt {
-                ast::Stmt::NonLocalReturn(_) if self.frames.len() > 1 => {
-                    // capture `self` -- needed for non-local returns
-                    self.capture_var("self", NonZeroUsize::new(self.frames.len() - 1).unwrap());
-                }
+        fn visit_expr(&mut self, expr: &'a mut ast::Expr) {
+            if matches!(expr, ast::Expr::Global(_)) {
+                // for dispatching to unknownGlobal:
+                self.capture_recv();
+            }
 
-                _ => {}
+            expr.recurse_mut(self);
+        }
+
+        fn visit_stmt(&mut self, stmt: &'a mut ast::Stmt) {
+            if matches!(stmt, ast::Stmt::NonLocalReturn(_)) {
+                // to track nlret validity (and dispatch to escapedBlock: to)
+                self.capture_recv();
             }
 
             stmt.recurse_mut(self);
         }
 
         fn visit_field(&mut self, _field: &'a mut ast::Field) {
-            if self.frames.len() == 1 {
-                // `self` is a local (not an upvalue) -- nothing to do
-                return;
-            }
-
-            // otherwise field access implicitly captures `self` in the outer scope
-            self.capture_var("self", NonZeroUsize::new(self.frames.len() - 1).unwrap());
+            // field access implicitly captures `self`
+            self.capture_recv();
         }
 
         fn visit_upvalue(&mut self, upvalue: &'a mut ast::Upvalue) {
@@ -284,6 +293,10 @@ fn check_method_code(
         fn locals(&self) -> Vec<String> {
             self.locals_iter().map(|name| name.to_owned()).collect()
         }
+
+        fn is_recv_available(&self) -> bool {
+            self.frame_idx <= 1 || self.captured_upvalues.iter().any(|name| name == "self")
+        }
     }
 
     impl<'a> DefaultVisitor<'a> for Checker<'a> {
@@ -363,9 +376,7 @@ fn check_method_code(
                     self.push_diagnostic(diagnostic);
                 }
 
-                ast::Stmt::NonLocalReturn(_)
-                    if !self.captured_upvalues.iter().any(|name| name == "self") =>
-                {
+                ast::Stmt::NonLocalReturn(_) if !self.is_recv_available() => {
                     let mut diagnostic = diagnostic!(
                         help = format!("captured upvalues: {:?}", self.captured_upvalues),
                         "Stmt::NonLocalReturn in a block but `self` was not captured"
@@ -387,12 +398,29 @@ fn check_method_code(
         fn visit_expr(&mut self, expr: &'a ast::Expr) {
             match expr {
                 ast::Expr::Dummy => panic!("Expr::Dummy in AST"),
-                _ => expr.recurse(self),
+
+                ast::Expr::Global(expr) if !self.is_recv_available() => {
+                    let mut diagnostic = diagnostic!(
+                        help = format!("captured upvalues: {:?}", self.captured_upvalues),
+                        "`self` implicitly captured by a global but missing from the upvalue list"
+                    );
+
+                    if let Some(span) = expr.0.span() {
+                        diagnostic = diagnostic
+                            .and_label(LabeledSpan::at(span, "captured by this global access"));
+                    }
+
+                    self.push_diagnostic(diagnostic);
+                }
+
+                _ => {}
             }
+
+            expr.recurse(self);
         }
 
         fn visit_field(&mut self, field: &'a ast::Field) {
-            if self.frame_idx > 1 && !self.captured_upvalues.iter().any(|name| name == "self") {
+            if !self.is_recv_available() {
                 let mut diagnostic = diagnostic!(
                     help = format!("captured upvalues: {:?}", self.captured_upvalues),
                     "`self` implicitly captured by field access but missing from the upvalue list"
@@ -1125,6 +1153,7 @@ impl<'gc> Vm<'gc> {
         let result = match method.eval(self, None, args, vec![None]) {
             Effect::None(value) => Ok(value),
             Effect::Unwind(e) => Err(e),
+            Effect::Restart => panic!("method execution resulted in a restart"),
 
             Effect::Return(_) | Effect::NonLocalReturn { .. } => {
                 panic!("non-local return through top-level frame")

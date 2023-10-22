@@ -1,0 +1,24 @@
+"test:
+output:
+  verbatim: |
+    doesNotUnderstand: #foo:bar: arguments: #(#hello #world)
+    44
+"
+
+Test = (
+  doesNotUnderstand: sym arguments: args = (
+    'doesNotUnderstand: ' print.
+    sym print.
+    ' arguments: #(' print.
+    args doIndexes: [ :i |
+      i > 1 ifTrue: [ ' ' print ].
+      (args at: i) print].
+    ')' println.
+
+    ^42
+  )
+
+  run = (
+    ((self foo: #hello bar: #world) + 2) println.
+  )
+)
