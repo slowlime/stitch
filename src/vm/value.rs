@@ -38,6 +38,10 @@ impl<'gc> Value<'gc> {
         self
     }
 
+    pub fn ty(&self) -> Ty {
+        self.ensure_legal().0.as_ref().unwrap().ty()
+    }
+
     pub fn is<T: Tag>(&self) -> bool {
         match self.0 {
             Some(ref gc) => T::is_tag_of(gc),
@@ -63,9 +67,21 @@ impl<'gc> Value<'gc> {
             Err(VmError::IllegalTy {
                 span: span.into(),
                 expected: vec![T::TY].into(),
-                actual: self.0.as_ref().unwrap().ty(),
+                actual: self.ty(),
             })
         }
+    }
+
+    pub fn as_som_str(&self) -> Option<SomStr<'_>> {
+        self.ensure_legal().0.as_ref().unwrap().as_str()
+    }
+
+    pub fn as_som_str_or_err(&self, span: impl Into<Option<Span>>) -> Result<SomStr<'_>, VmError> {
+        self.as_som_str().ok_or_else(|| VmError::IllegalTy {
+            span: span.into(),
+            expected: vec![Ty::String, Ty::Symbol].into(),
+            actual: self.ty(),
+        })
     }
 
     pub fn get_class<'a>(&'a self, vm: &'a Vm<'gc>) -> &'a TypedValue<'gc, tag::Class> {
@@ -123,9 +139,9 @@ impl Hash for Value<'_> {
                     ValueKind::String(s) => s.hash(state),
 
                     ValueKind::Symbol(sym) => {
-                        mem::discriminant(sym).hash(state);
+                        mem::discriminant(&sym.value).hash(state);
 
-                        match sym {
+                        match &sym.value {
                             Symbol::String(s) => s.hash(state),
                             Symbol::Selector(selector) => selector.value.name().hash(state),
                         }
@@ -147,6 +163,152 @@ unsafe impl Collect for Value<'_> {
         }
     }
 }
+
+macro_rules! downcast {
+    ($value:expr, { $( $body:tt )* }) => {
+        {
+            let __downcast_value = $value;
+            downcast!(@parse __downcast_value: [] {} $($body)*)
+        }
+    };
+
+    // terminal: end of input
+    (@parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }) => {
+        $( $( $arms )+)else*
+    };
+
+    // non-terminal: _ => error!(span),
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        _ => error!($span:expr),
+    ) => {
+        downcast!(
+            @parse $binding: [ $( $ty, )* ] { $( { $( $arms )+}, )* }
+            _ => Err($crate::vm::error::VmError::IllegalTy {
+                span: $span,
+                expected: vec![$( $ty, )*].into(),
+                actual: $binding.ty(),
+            }),
+        )
+    };
+
+    // non-terminal: _ => { ... }
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        _ => $else:block $(,)?
+    ) => {
+        downcast!(
+            @parse $binding:
+            [ $( $ty, )* ]
+            {
+                $( { $( $arms )+}, )*
+                { $else },
+            }
+        )
+    };
+
+    // non-terminal: _ => <expr>,
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        _ => $else:expr,
+    ) => {
+        downcast!(
+            @parse $binding: [ $( $ty, )* ] { $( { $( $arms )+}, )* }
+            _ => { $else }
+        )
+    };
+
+    // non-terminal: <id> => { ... }
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        $id:ident => $else:block $(,)?
+    ) => {
+        downcast!(
+            @parse $binding:
+            [ $( $ty, )* ]
+            {
+                $( { $( $arms )+}, )*
+                {
+                    {
+                        let $id = $binding;
+                        $else
+                    }
+                },
+            }
+        )
+    };
+
+    // non-terminal: <id> => <expr>,
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        $id:ident => $else:expr,
+    ) => {
+        downcast!(
+            @parse $binding: [ $( $ty, )* ] { $( { $( $arms )+}, )* }
+            $id => { $else }
+        )
+    };
+
+    // non-terminal: Variant(_) => { ... }
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        $variant:ident (_) => $arm:block $(,)?
+        $( $rest:tt )*
+    ) => {
+        downcast!(@parse $binding:
+            [ $( $ty, )* $crate::vm::value::Ty::$variant, ]
+            {
+                $( { $( $arms )+}, )*
+                {
+                    if $binding.is::<$crate::vm::value::tag::$variant>() $arm
+                },
+            }
+            $( $rest )*
+        )
+    };
+
+    // non-terminal: Variant(_) => <expr>,
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        $variant:ident (_) => $arm:expr,
+        $( $rest:tt )*
+    ) => {
+        downcast!(@parse $binding: [ $( $ty, )* ] { $( { $( $arms )+}, )* } $variant (_) => { $arm } $( $rest )*)
+    };
+
+    // non-terminal: Variant(<id>) => { ... }
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        $variant:ident ($value:ident) => $arm:block $(,)?
+        $( $rest:tt )*
+    ) => {
+        downcast!(@parse $binding:
+            [ $( $ty, )* $crate::vm::value::Ty::$variant, ]
+            { $( { $( $arms )+}, )* {
+                if $binding.is::<$crate::vm::value::tag::$variant>() {
+                    let $value = unsafe { TypedValue::<$crate::vm::value::tag::$variant>::new($binding) };
+                    $arm
+                }
+            }, }
+            $( $rest )*
+        )
+    };
+
+    // non-terminal: Variant(<id>) => <expr>,
+    (
+        @parse $binding:ident: [ $( $ty:expr, )* ] { $( { $( $arms:tt )+ }, )* }
+        $variant:ident ($value:ident) => $arm:expr,
+        $( $rest:tt )*
+    ) => {
+        downcast!(
+            @parse $binding: [ $( $ty, )* ] { $( { $( $arms )+}, )* }
+            $variant ($value) => { $arm }
+            $( $rest )*
+        )
+    };
+}
+
+pub(crate) use downcast;
 
 pub trait IntoValue<'gc> {
     type Tag: Tag;
@@ -189,7 +351,7 @@ macro_rules! define_value_kind {
 
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub enum Ty {
-            NamedClass(Box<String>),
+            NamedClass(Box<str>),
 
             $( $name, )+
         }
@@ -262,7 +424,7 @@ define_value_kind! {
         Class("class", Class<'gc> => &'a Class<'gc>): ref cls => cls,
         Method("method", Method<'gc> => &'a Method<'gc>): ref method => method,
         // FIXME: Symbols are also strings: add Value::as_string() for casting and change the repr of symbols
-        Symbol("symbol", Symbol => &'a Symbol): ref sym => sym,
+        Symbol("symbol", SomSymbol => &'a SomSymbol): ref sym => sym,
         Object("object", Object<'gc> => &'a Object<'gc>): ref obj => obj,
         String("string", SomString => &'a SomString): ref s => s,
     }
@@ -299,6 +461,14 @@ impl<'gc> ValueKind<'gc> {
 
     pub fn size(&self) -> usize {
         mem::size_of_val(self)
+    }
+
+    pub fn as_str(&self) -> Option<SomStr<'_>> {
+        match self {
+            Self::Symbol(sym) => Some(sym.as_som_str()),
+            Self::String(s) => Some(s.as_som_str()),
+            _ => None,
+        }
     }
 }
 
@@ -615,6 +785,116 @@ pub enum SubstrError {
     EndOutOfBounds,
 }
 
+pub trait StringOps {
+    fn as_str(&self) -> &str;
+    fn char_count(&self) -> usize;
+    fn chars(&self) -> std::str::Chars<'_>;
+}
+
+pub trait ExtendedStringOps: StringOps {
+    fn as_som_str(&self) -> SomStr<'_> {
+        SomStr {
+            value: self.as_str(),
+            char_count: self.char_count(),
+        }
+    }
+
+    fn concat(&self, other: impl StringOps) -> SomString {
+        let mut result = String::with_capacity(self.as_str().len() + other.as_str().len());
+        result.push_str(self.as_str());
+        result.push_str(other.as_str());
+
+        SomString {
+            value: result.into_boxed_str(),
+            char_count: self.char_count() + other.char_count(),
+        }
+    }
+
+    fn substr(&self, range: impl RangeBounds<usize>) -> Result<SomString, SubstrError> {
+        use std::ops::Bound;
+
+        let start = match range.start_bound() {
+            Bound::Included(&pos) => pos,
+            Bound::Excluded(&pos) => pos + 1,
+            Bound::Unbounded => 0,
+        };
+
+        let end = match range.end_bound() {
+            Bound::Included(&pos) => pos + 1,
+            Bound::Excluded(&pos) => pos,
+            Bound::Unbounded => self.char_count(),
+        };
+
+        if start > end {
+            Err(SubstrError::StartGtEnd)
+        } else if start > self.char_count() {
+            Err(SubstrError::StartOutOfBounds)
+        } else if end > self.char_count() {
+            Err(SubstrError::EndOutOfBounds)
+        } else if start == end {
+            Ok(SomString {
+                value: String::new().into_boxed_str(),
+                char_count: 0,
+            })
+        } else {
+            let mut chars = self.as_str().char_indices().map(|(idx, _)| idx).skip(start);
+            let first_char_pos = chars.next().unwrap();
+            let end_char_pos = chars.nth(end - start - 1).unwrap_or(self.as_str().len());
+            let value = self.as_str()[first_char_pos..end_char_pos]
+                .to_owned()
+                .into_boxed_str();
+
+            Ok(SomString {
+                value,
+                char_count: end - start,
+            })
+        }
+    }
+}
+
+impl<T: StringOps + ?Sized> ExtendedStringOps for T {}
+
+#[derive(Debug, Clone)]
+pub struct SomStr<'a> {
+    value: &'a str,
+    char_count: usize,
+}
+
+impl StringOps for SomStr<'_> {
+    fn as_str(&self) -> &str {
+        &self.value
+    }
+
+    fn char_count(&self) -> usize {
+        self.char_count
+    }
+
+    fn chars(&self) -> std::str::Chars<'_> {
+        self.value.chars()
+    }
+}
+
+impl PartialEq for SomStr<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl Eq for SomStr<'_> {}
+
+impl Hash for SomStr<'_> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
+impl Display for SomStr<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+
 #[derive(Debug, Clone)]
 pub struct SomString {
     value: Box<str>,
@@ -627,69 +907,19 @@ impl SomString {
 
         Self { value, char_count }
     }
+}
 
-    pub fn as_str(&self) -> &str {
+impl StringOps for SomString {
+    fn as_str(&self) -> &str {
         &self.value
     }
 
-    pub fn char_count(&self) -> usize {
+    fn char_count(&self) -> usize {
         self.char_count
     }
 
-    pub fn chars(&self) -> std::str::Chars<'_> {
+    fn chars(&self) -> std::str::Chars<'_> {
         self.value.chars()
-    }
-
-    pub fn concat(&self, other: &Self) -> Self {
-        let mut result = String::with_capacity(self.value.len() + other.value.len());
-        result.push_str(&self.value);
-        result.push_str(&other.value);
-
-        Self {
-            value: result.into_boxed_str(),
-            char_count: self.char_count + other.char_count,
-        }
-    }
-
-    pub fn substr(&self, range: impl RangeBounds<usize>) -> Result<Self, SubstrError> {
-        use std::ops::Bound;
-
-        let start = match range.start_bound() {
-            Bound::Included(&pos) => pos,
-            Bound::Excluded(&pos) => pos + 1,
-            Bound::Unbounded => 0,
-        };
-
-        let end = match range.end_bound() {
-            Bound::Included(&pos) => pos + 1,
-            Bound::Excluded(&pos) => pos,
-            Bound::Unbounded => self.char_count,
-        };
-
-        if start > end {
-            Err(SubstrError::StartGtEnd)
-        } else if start > self.char_count {
-            Err(SubstrError::StartOutOfBounds)
-        } else if end > self.char_count {
-            Err(SubstrError::EndOutOfBounds)
-        } else if start == end {
-            Ok(Self {
-                value: String::new().into_boxed_str(),
-                char_count: 0,
-            })
-        } else {
-            let mut chars = self.value.char_indices().map(|(idx, _)| idx).skip(start);
-            let first_char_pos = chars.next().unwrap();
-            let end_char_pos = chars.nth(end - start - 1).unwrap_or(self.value.len());
-            let value = self.value[first_char_pos..end_char_pos]
-                .to_owned()
-                .into_boxed_str();
-
-            Ok(Self {
-                value,
-                char_count: end - start,
-            })
-        }
     }
 }
 
@@ -734,5 +964,59 @@ impl From<SomString> for Box<str> {
 impl From<SomString> for String {
     fn from(s: SomString) -> Self {
         s.value.into()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SomSymbol {
+    pub value: Symbol,
+    char_count: usize,
+}
+
+impl SomSymbol {
+    pub fn new(value: Symbol) -> Self {
+        let char_count = value.as_str().chars().count();
+
+        Self { value, char_count }
+    }
+}
+
+impl StringOps for SomSymbol {
+    fn as_str(&self) -> &str {
+        self.value.as_str()
+    }
+
+    fn char_count(&self) -> usize {
+        self.char_count
+    }
+
+    fn chars(&self) -> std::str::Chars<'_> {
+        self.value.as_str().chars()
+    }
+}
+
+impl PartialEq for SomSymbol {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for SomSymbol {}
+
+impl Hash for SomSymbol {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl Display for SomSymbol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
+impl From<Symbol> for SomSymbol {
+    fn from(sym: Symbol) -> SomSymbol {
+        SomSymbol::new(sym)
     }
 }

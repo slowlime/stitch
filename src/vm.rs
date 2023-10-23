@@ -32,7 +32,7 @@ use self::eval::Effect;
 use self::frame::{Callee, Frame, Upvalue};
 use self::gc::{GarbageCollector, Gc, GcOnceCell, GcRefCell};
 use self::method::{MethodDef, Primitive};
-use self::value::{tag, Class, IntoValue, Method, Object, SomString, TypedValue, Value};
+use self::value::{tag, Class, IntoValue, Method, Object, SomString, TypedValue, Value, SomSymbol};
 
 pub const RUN_METHOD_NAME: &str = "run";
 
@@ -1067,8 +1067,8 @@ impl<'gc> Vm<'gc> {
         GcRefCell::new(values).into_value(self.gc)
     }
 
-    fn make_symbol(&self, sym: ast::SymbolLit) -> TypedValue<'gc, tag::Symbol> {
-        sym.into_value(self.gc)
+    fn make_symbol(&self, sym: impl Into<SomSymbol>) -> TypedValue<'gc, tag::Symbol> {
+        Into::<SomSymbol>::into(sym).into_value(self.gc)
     }
 
     fn make_string(&self, s: impl Into<SomString>) -> TypedValue<'gc, tag::String> {

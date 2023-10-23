@@ -11,7 +11,7 @@ use self::visit::AstRecurse;
 
 pub type Name = Spanned<String>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Class {
     pub location: Location,
     pub name: Name,
@@ -44,7 +44,7 @@ impl AstRecurse for Class {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Method {
     pub location: Location,
     pub selector: SpannedSelector,
@@ -180,7 +180,7 @@ impl<'a> Iterator for KeywordIter<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SpannedSelector {
     pub location: Location,
     pub value: Selector,
@@ -301,7 +301,7 @@ impl SpannedSelector {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum MethodDef {
     Primitive { params: Vec<Name> },
 
@@ -324,7 +324,7 @@ impl AstRecurse for MethodDef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Block {
     pub params: Vec<Name>,
     pub locals: Vec<Name>,
@@ -354,7 +354,7 @@ impl AstRecurse for Block {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub enum Stmt {
     Return(Spanned<Expr>),
     NonLocalReturn(Spanned<Expr>),
@@ -397,7 +397,7 @@ impl AstRecurse for Stmt {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub enum Expr {
     Assign(Assign),
     Block(Spanned<Block>),
@@ -483,7 +483,7 @@ impl AstRecurse for Expr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum AssignVar {
     UnresolvedName(UnresolvedName),
     Local(Local),
@@ -526,7 +526,7 @@ impl AstRecurse for AssignVar {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Assign {
     pub location: Location,
     pub var: AssignVar,
@@ -545,7 +545,7 @@ impl AstRecurse for Assign {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ArrayLit(pub Spanned<Vec<Expr>>);
 
 impl AstRecurse for ArrayLit {
@@ -562,7 +562,7 @@ impl AstRecurse for ArrayLit {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum SymbolLit {
     String(Name),
     Selector(SpannedSelector),
@@ -597,16 +597,16 @@ impl SymbolLit {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct StringLit(pub Name);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct IntLit(pub Spanned<i64>);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FloatLit(pub Spanned<f64>);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Dispatch {
     pub location: Location,
     pub recv: Box<Expr>,
@@ -633,21 +633,21 @@ impl AstRecurse for Dispatch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Local(pub Name);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Upvalue {
     pub name: Name,
     pub up_frames: NonZeroUsize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Field(pub Name);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Global(pub Name);
 
 /// A name lookup pending resolution: either a global or a field defined in a superclass.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct UnresolvedName(pub Name);

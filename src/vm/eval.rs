@@ -5,11 +5,12 @@ use std::ptr;
 
 use crate::ast::{self, SymbolLit as Symbol};
 use crate::location::{Span, Spanned};
+use crate::vm::value::downcast;
 
 use super::error::VmError;
 use super::frame::{Callee, Frame, Local, Upvalue};
 use super::method::{MethodDef, Primitive};
-use super::value::{tag, SubstrError, Ty, TypedValue, Value};
+use super::value::{tag, ExtendedStringOps, StringOps, SubstrError, Ty, TypedValue, Value};
 use super::{check_arg_count, Vm};
 
 /// The result of a computation — either a plain value or a triggered effect.
@@ -620,11 +621,11 @@ impl Primitive {
                 Some(class) => {
                     return Effect::Unwind(VmError::IllegalTy {
                         span: recv_span,
-                        expected: vec![Ty::NamedClass(Box::new(class.get().name.value.clone()))]
+                        expected: vec![Ty::NamedClass(class.get().name.value.clone().into_boxed_str())]
                             .into(),
-                        actual: Ty::NamedClass(Box::new(
-                            recv.get_class(vm).get().name.value.clone(),
-                        )),
+                        actual: Ty::NamedClass(
+                            recv.get_class(vm).get().name.value.clone().into_boxed_str()
+                        ),
                     })
                 }
 
@@ -912,13 +913,13 @@ impl Primitive {
             Primitive::DoubleFromString => {
                 let [recv, s] = args.try_into().unwrap();
                 let _ = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0])).get();
-                let s = ok_or_unwind!(s.downcast_or_err::<tag::String>(arg_spans[1]));
+                let s = ok_or_unwind!(s.as_som_str_or_err(arg_spans[1]));
 
-                match s.get().as_str().parse::<f64>() {
+                match s.as_str().parse::<f64>() {
                     Ok(f) => Effect::None(vm.make_float(f).into_value()),
                     Err(_) => Effect::Unwind(VmError::DoubleFromInvalidString {
                         span: dispatch_span,
-                        value: s.get().to_string(),
+                        value: s.as_str().to_owned(),
                     }),
                 }
             }
@@ -1154,13 +1155,13 @@ impl Primitive {
             Primitive::IntegerFromString => {
                 let [recv, s] = args.try_into().unwrap();
                 let _ = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0])).get();
-                let s = ok_or_unwind!(s.downcast_or_err::<tag::String>(arg_spans[1]));
+                let s = ok_or_unwind!(s.as_som_str_or_err(arg_spans[1]));
 
-                match s.get().as_str().parse::<i64>() {
+                match s.as_str().parse::<i64>() {
                     Ok(i) => Effect::None(vm.make_int(i).into_value()),
                     Err(_) => Effect::Unwind(VmError::IntegerFromInvalidString {
                         span: dispatch_span,
-                        value: s.get().to_string(),
+                        value: s.as_str().to_owned(),
                     }),
                 }
             }
@@ -1345,15 +1346,19 @@ impl Primitive {
 
             Primitive::StringConcatenate => {
                 let [lhs, rhs] = args.try_into().unwrap();
-                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::String>(arg_spans[0]));
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::String>(arg_spans[1]));
+                let lhs = ok_or_unwind!(lhs.as_som_str_or_err(arg_spans[0]));
+                let rhs = ok_or_unwind!(rhs.as_som_str_or_err(arg_spans[1]));
 
-                Effect::None(vm.make_string(lhs.get().concat(rhs.get())).into_value())
+                Effect::None(vm.make_string(lhs.concat(rhs)).into_value())
             }
 
             Primitive::StringAsSymbol => {
                 let [recv] = args.try_into().unwrap();
-                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+                let recv = ok_or_unwind!(downcast!(recv, {
+                    Symbol(sym) => return Effect::None(sym.into_value()),
+                    String(s) => Ok(s),
+                    _ => error!(arg_spans[0]),
+                }));
 
                 Effect::None(
                     vm.make_symbol(Symbol::from_string(
@@ -1366,60 +1371,60 @@ impl Primitive {
 
             Primitive::StringLength => {
                 let [recv] = args.try_into().unwrap();
-                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+                let recv = ok_or_unwind!(recv.as_som_str_or_err(arg_spans[0]));
 
-                Effect::None(vm.make_int(recv.get().char_count() as i64).into_value())
+                Effect::None(vm.make_int(recv.char_count() as i64).into_value())
             }
 
             Primitive::StringIsWhitespace => {
                 let [recv] = args.try_into().unwrap();
-                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+                let recv = ok_or_unwind!(recv.as_som_str_or_err(arg_spans[0]));
 
                 Effect::None(
-                    vm.make_boolean(recv.get().chars().all(char::is_whitespace))
+                    vm.make_boolean(recv.chars().all(char::is_whitespace))
                         .into_value(),
                 )
             }
 
             Primitive::StringIsLetters => {
                 let [recv] = args.try_into().unwrap();
-                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+                let recv = ok_or_unwind!(recv.as_som_str_or_err(arg_spans[0]));
 
                 Effect::None(
-                    vm.make_boolean(recv.get().chars().all(char::is_alphabetic))
+                    vm.make_boolean(recv.chars().all(char::is_alphabetic))
                         .into_value(),
                 )
             }
 
             Primitive::StringIsDigits => {
                 let [recv] = args.try_into().unwrap();
-                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+                let recv = ok_or_unwind!(recv.as_som_str_or_err(arg_spans[0]));
 
                 Effect::None(
-                    vm.make_boolean(recv.get().chars().all(char::is_numeric))
+                    vm.make_boolean(recv.chars().all(char::is_numeric))
                         .into_value(),
                 )
             }
 
             Primitive::StringEq => {
                 let [lhs, rhs] = args.try_into().unwrap();
-                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::String>(arg_spans[0]));
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::String>(arg_spans[1]));
+                let lhs = ok_or_unwind!(lhs.as_som_str_or_err(arg_spans[0]));
+                let rhs = ok_or_unwind!(rhs.as_som_str_or_err(arg_spans[1]));
 
-                Effect::None(vm.make_boolean(lhs.get() == rhs.get()).into_value())
+                Effect::None(vm.make_boolean(lhs == rhs).into_value())
             }
 
             Primitive::StringPrimSubstringFromTo => {
                 let [recv, from, to] = args.try_into().unwrap();
-                let recv = ok_or_unwind!(recv.downcast_or_err::<tag::String>(arg_spans[0]));
+                let recv = ok_or_unwind!(recv.as_som_str_or_err(arg_spans[0]));
                 let from = ok_or_unwind!(from.downcast_or_err::<tag::Int>(arg_spans[1])).get();
                 let to = ok_or_unwind!(to.downcast_or_err::<tag::Int>(arg_spans[2])).get();
 
                 let from =
-                    ok_or_unwind!(check_arr_idx(arg_spans[1], recv.get().char_count(), from));
-                let to = ok_or_unwind!(check_arr_idx(arg_spans[2], recv.get().char_count(), to));
+                    ok_or_unwind!(check_arr_idx(arg_spans[1], recv.char_count(), from));
+                let to = ok_or_unwind!(check_arr_idx(arg_spans[2], recv.char_count(), to));
 
-                match recv.get().substr(from..=to) {
+                match recv.substr(from..=to) {
                     Ok(s) => Effect::None(vm.make_string(s).into_value()),
 
                     Err(SubstrError::StartGtEnd) => Effect::Unwind(VmError::StartGtEnd {
@@ -1482,13 +1487,7 @@ impl Primitive {
 
             Primitive::SystemPrintString => {
                 let [recv, msg] = args.try_into().unwrap();
-
-                match msg.downcast::<tag::Symbol>() {
-                    Ok(sym) => vm.print(sym.get().as_str()),
-                    Err(msg) => vm.print(
-                        ok_or_unwind!(msg.downcast_or_err::<tag::String>(arg_spans[1])).get(),
-                    ),
-                }
+                vm.print(ok_or_unwind!(msg.as_som_str_or_err(arg_spans[1])).as_str());
 
                 Effect::None(recv)
             }
@@ -1502,18 +1501,18 @@ impl Primitive {
 
             Primitive::SystemErrorPrintln => {
                 let [recv, msg] = args.try_into().unwrap();
-                let msg = ok_or_unwind!(msg.downcast_or_err::<tag::String>(arg_spans[1]));
+                let msg = ok_or_unwind!(msg.as_som_str_or_err(arg_spans[1]));
 
-                vm.eprint(format_args!("{}\n", msg.get()));
+                vm.eprint(format_args!("{}\n", msg));
 
                 Effect::None(recv)
             }
 
             Primitive::SystemErrorPrint => {
                 let [recv, msg] = args.try_into().unwrap();
-                let msg = ok_or_unwind!(msg.downcast_or_err::<tag::String>(arg_spans[1]));
+                let msg = ok_or_unwind!(msg.as_som_str_or_err(arg_spans[1]));
 
-                vm.eprint(msg.get());
+                vm.eprint(msg);
 
                 Effect::None(recv)
             }
