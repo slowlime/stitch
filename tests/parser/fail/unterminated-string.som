@@ -1,5 +1,5 @@
 "test:
-failMessage:
+fail-message:
   regex: string .+ not terminated
 "
 

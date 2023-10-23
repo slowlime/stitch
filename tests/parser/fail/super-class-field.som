@@ -1,5 +1,5 @@
 "test:
-failMessage:
+fail-message:
   - contains: define
   - contains: super
 "

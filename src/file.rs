@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::{fs, io};
 
 use thiserror::Error;
@@ -11,6 +11,7 @@ pub trait FileLoader {
     fn get_source(&self) -> &SourceMap;
     fn load_builtin_class(&mut self, class_name: &str) -> Result<&SourceFile, Box<dyn Error + Send + Sync>>;
     fn load_user_class(&mut self, class_name: &str) -> Result<&SourceFile, Box<dyn Error + Send + Sync>>;
+    fn load_file(&mut self, path: &Path) -> Result<String, Box<dyn Error + Send + Sync>>;
 }
 
 #[derive(Error, Debug)]
@@ -20,6 +21,9 @@ pub enum PathFileLoaderError {
 
     #[error("could not load file {}", path.display())]
     LoadFailed { path: PathBuf, source: io::Error },
+
+    #[error("file {} not found", .0.display())]
+    FileNotFound(PathBuf),
 
     #[error("class not found: {0}")]
     ClassNotFound(String),
@@ -87,5 +91,22 @@ impl FileLoader for PathFileLoader {
 
     fn load_user_class(&mut self, class_name: &str) -> Result<&SourceFile, Box<dyn Error + Send + Sync>> {
         self.load_class(class_name).map_err(Into::into)
+    }
+
+    fn load_file(&mut self, file_path: &Path) -> Result<String, Box<dyn Error + Send + Sync>> {
+        use PathFileLoaderError::*;
+
+        for search_path in &self.search_paths {
+            let mut path = search_path.clone();
+            path.push(file_path);
+
+            match fs::read_to_string(&path) {
+                Ok(contents) => return Ok(contents),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(LoadFailed { path, source: e }.into()),
+            }
+        }
+
+        Err(FileNotFound(file_path.to_path_buf()).into())
     }
 }

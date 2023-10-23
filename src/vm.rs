@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Write};
 use std::mem;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::pin::Pin;
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -778,6 +779,15 @@ impl<'gc> Vm<'gc> {
         let ast = parse(file, Default::default())?;
 
         self.load_class(ast, Default::default())
+    }
+
+    pub fn load_file_as_string(&mut self, path: &Path) -> Result<TypedValue<'gc, tag::String>, VmError> {
+        let contents = self
+            .file_loader
+            .load_file(path)
+            .map_err(VmError::FileLoadError)?;
+
+        Ok(self.make_string(contents))
     }
 
     pub fn parse_and_load_class(

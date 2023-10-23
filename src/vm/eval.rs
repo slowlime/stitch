@@ -1445,11 +1445,7 @@ impl Primitive {
 
                 match vm.get_global(name.get().as_str()) {
                     Some(value) => Effect::None(value.clone()),
-
-                    None => Effect::Unwind(VmError::UndefinedName {
-                        span: arg_spans[1],
-                        name: name.get().as_str().to_owned(),
-                    }),
+                    None => Effect::None(vm.builtins.nil_object.clone().into_value()),
                 }
             }
 
@@ -1472,8 +1468,25 @@ impl Primitive {
                 )
             }
 
-            Primitive::SystemLoadFile => todo!(),
-            Primitive::SystemLoad => todo!(),
+            Primitive::SystemLoadFile => {
+                let [_, file_name] = args.try_into().unwrap();
+                let file_name = ok_or_unwind!(file_name.downcast_or_err::<tag::String>(arg_spans[1]));
+
+                match vm.load_file_as_string(file_name.get().as_str().as_ref()) {
+                    Ok(class) => Effect::None(class.into_value()),
+                    Err(_) => Effect::None(vm.builtins.nil_object.clone().into_value()),
+                }
+            }
+
+            Primitive::SystemLoad => {
+                let [_, class_name] = args.try_into().unwrap();
+                let class_name = ok_or_unwind!(class_name.as_som_str_or_err(arg_spans[1]));
+
+                match vm.parse_and_load_user_class(class_name.as_str()) {
+                    Ok(class) => Effect::None(class.into_value()),
+                    Err(_) => Effect::None(vm.builtins.nil_object.clone().into_value()),
+                }
+            }
 
             Primitive::SystemExit => {
                 let [_, code] = args.try_into().unwrap();

@@ -12,7 +12,7 @@ use common::Matchers;
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 struct ParserTest {
     #[serde(default)]
     fail: bool,

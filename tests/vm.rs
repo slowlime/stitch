@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Write};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use common::Matchers;
@@ -36,13 +36,22 @@ impl Write for VmOutput {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "kebab-case")]
 struct VmTest {
     #[serde(default)]
     fail: bool,
 
     #[serde(default)]
     output: Matchers,
+
+    #[serde(default = "VmTest::preload_classes_default")]
+    preload_classes: bool,
+}
+
+impl VmTest {
+    fn preload_classes_default() -> bool {
+        true
+    }
 }
 
 struct TestFileLoader {
@@ -102,12 +111,19 @@ impl FileLoader for TestFileLoader {
         let path = self.base_path.join(format!("{class_name}.som"));
         let contents = fs::read_to_string(&path)
             .map_err(|e| format!("read_to_string({}) failed: {e}", path.display()))?;
-        let source_name = path.into_os_string().to_string_lossy().into_owned();
+        let source_name = path.to_string_lossy().into_owned();
         let source = self.source_map.add_source(source_name.clone(), contents);
         self.loaded_user_classes
             .insert(class_name.to_owned(), source_name);
 
         Ok(source)
+    }
+
+    fn load_file(&mut self, path: &Path) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let contents = fs::read_to_string(&path)
+            .map_err(|e| format!("read_to_string({}) failed: {e}", path.display()))?;
+
+        Ok(contents)
     }
 }
 
@@ -128,34 +144,37 @@ fn run_test_class(test_class_path: PathBuf) {
 
     let mut vm = Vm::new(&gc, Box::new(file_loader), stdout, stderr);
 
-    let mut entries = fs::read_dir(&base_path)
-        .expect("could not open the test directory")
-        .map(|entry| entry.map(|entry| entry.path()))
-        .filter(|path| match path {
-            Ok(path) => {
-                path.extension().is_some_and(|ext| ext == "som")
-                    && path.file_stem().is_some_and(|name| name != class_name)
-                    && fs::metadata(&path)
-                        .expect("could not read metadata")
-                        .is_file()
-            }
+    if test.preload_classes {
+        let mut entries = fs::read_dir(&base_path)
+            .expect("could not open the test directory")
+            .map(|entry| entry.map(|entry| entry.path()))
+            .filter(|path| match path {
+                Ok(path) => {
+                    path.extension().is_some_and(|ext| ext == "som")
+                        && path.file_stem().is_some_and(|name| name != class_name)
+                        && fs::metadata(&path)
+                            .expect("could not read metadata")
+                            .is_file()
+                }
 
-            Err(_) => true,
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    entries
-        .sort_unstable_by_key(|path| path.file_stem().map(|class_name| class_name.to_os_string()));
-
-    for path in entries {
-        vm.parse_and_load_user_class(&path.file_stem().unwrap().to_string_lossy())
-            .map_err(|e| {
-                miette::Report::new(e)
-                    .wrap_err(format!("could not load {}", path.display()))
-                    .with_source_code(vm.file_loader.get_source().clone())
+                Err(_) => true,
             })
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
+
+        entries.sort_unstable_by_key(|path| {
+            path.file_stem().map(|class_name| class_name.to_os_string())
+        });
+
+        for path in entries {
+            vm.parse_and_load_user_class(&path.file_stem().unwrap().to_string_lossy())
+                .map_err(|e| {
+                    miette::Report::new(e)
+                        .wrap_err(format!("could not load {}", path.display()))
+                        .with_source_code(vm.file_loader.get_source().clone())
+                })
+                .unwrap();
+        }
     }
 
     let test_class = vm

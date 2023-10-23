@@ -1,4 +1,5 @@
 "test:
+preload-classes: false
 output:
   verbatim: |
     0
