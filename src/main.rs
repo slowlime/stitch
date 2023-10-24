@@ -1,6 +1,5 @@
 mod args;
 
-use std::fmt;
 use std::io;
 use std::iter;
 use std::process::ExitCode;
@@ -9,28 +8,13 @@ use clap::Parser;
 
 use stitch::file::PathFileLoader;
 use stitch::parse::ParserOptions;
+use stitch::util::FormattedWriter;
 use stitch::vm::error::VmError;
 use stitch::vm::gc::GarbageCollector;
 use stitch::vm::Vm;
 use stitch::vm::VmOptions;
 
 use crate::args::Args;
-
-struct FormattedWriter<W>(W);
-
-impl<W: io::Write> fmt::Write for FormattedWriter<W> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        write!(&mut self.0, "{}", s).map_err(|_| fmt::Error)
-    }
-
-    fn write_char(&mut self, c: char) -> fmt::Result {
-        write!(&mut self.0, "{}", c).map_err(|_| fmt::Error)
-    }
-
-    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
-        write!(&mut self.0, "{}", args).map_err(|_| fmt::Error)
-    }
-}
 
 fn main() -> ExitCode {
     let args = Args::parse();

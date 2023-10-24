@@ -765,19 +765,18 @@ impl Primitive {
 
             Primitive::ClassFields => {
                 let [recv] = args.try_into().unwrap();
-                let obj = match recv.get_obj() {
-                    Some(obj) => obj,
-                    None => return Effect::None(vm.make_array(vec![]).into_value()),
-                };
-
-                let fields = obj.fields.borrow().clone();
+                let cls = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
+                let fields = cls.get().instance_fields
+                    .iter()
+                    .map(|name| vm.make_symbol(ast::SymbolLit::String(name.clone())).into_value())
+                    .collect();
 
                 Effect::None(vm.make_array(fields).into_value())
             }
 
             Primitive::ClassMethods => {
                 let [recv] = args.try_into().unwrap();
-                let cls = recv.get_class(vm);
+                let cls = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
 
                 Effect::None(
                     vm.make_array(

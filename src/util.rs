@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::{io, fmt};
 
 macro_rules! try_match {
     ($scrutinee:expr, $pattern:pat => $map:expr) => {
@@ -150,5 +151,21 @@ where
 {
     fn clone_static(&self) -> Vec<U> {
         self.iter().map(T::clone_static).collect()
+    }
+}
+
+pub struct FormattedWriter<W>(pub W);
+
+impl<W: io::Write> fmt::Write for FormattedWriter<W> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        write!(&mut self.0, "{}", s).map_err(|_| fmt::Error)
+    }
+
+    fn write_char(&mut self, c: char) -> fmt::Result {
+        write!(&mut self.0, "{}", c).map_err(|_| fmt::Error)
+    }
+
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+        write!(&mut self.0, "{}", args).map_err(|_| fmt::Error)
     }
 }
