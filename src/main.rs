@@ -9,7 +9,7 @@ use clap::Parser;
 use stitch::file::PathFileLoader;
 use stitch::parse::ParserOptions;
 use stitch::util::FormattedWriter;
-use stitch::vm::error::VmError;
+use stitch::vm::error::VmErrorKind;
 use stitch::vm::gc::GarbageCollector;
 use stitch::vm::Vm;
 use stitch::vm::VmOptions;
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
     let mut vm = Vm::new(&gc, Box::new(file_loader), stdout, stderr, vm_options);
 
     let run_args = iter::once(args.main_class_name.clone())
-        .chain(args.args.into_iter())
+        .chain(args.args)
         .map(|arg| vm.make_string(arg).into_value())
         .collect();
     let result = vm
@@ -43,21 +43,25 @@ fn main() -> ExitCode {
         .and_then(|class| vm.run(class, run_args));
 
     match result {
-        Ok(_) | Err(VmError::Exited { code: 0, .. }) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::SUCCESS,
 
-        Err(e) => {
-            let code = if let VmError::Exited { code, .. } = e {
-                code
-            } else {
-                1
-            };
+        Err(e) => match *e {
+            VmErrorKind::Exited { code: 0, .. } => ExitCode::SUCCESS,
 
-            let e = miette::Report::new(e)
-                .wrap_err("VM has terminated with an error")
-                .with_source_code(vm.file_loader.get_source().clone());
-            eprintln!("{:?}", e);
+            e => {
+                let code = if let VmErrorKind::Exited { code, .. } = e {
+                    code
+                } else {
+                    1
+                };
 
-            ExitCode::from(code as u8)
+                let e = miette::Report::new(e)
+                    .wrap_err("VM has terminated with an error")
+                    .with_source_code(vm.file_loader.get_source().clone());
+                eprintln!("{:?}", e);
+
+                ExitCode::from(code as u8)
+            }
         }
     }
 }

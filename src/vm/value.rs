@@ -12,7 +12,7 @@ use crate::ast::{self, SymbolLit as Symbol};
 use crate::impl_collect;
 use crate::location::{Location, Span, Spanned};
 
-use super::error::VmError;
+use super::error::{VmError, VmErrorKind};
 use super::frame::Upvalue;
 use super::gc::{Collect, Gc};
 use super::gc::{Finalize, GarbageCollector};
@@ -64,11 +64,11 @@ impl<'gc> Value<'gc> {
         if self.is::<T>() {
             Ok(unsafe { TypedValue::new(self) })
         } else {
-            Err(VmError::IllegalTy {
+            Err(VmErrorKind::IllegalTy {
                 span: span.into(),
                 expected: vec![T::TY].into(),
                 actual: self.ty(),
-            })
+            }.into())
         }
     }
 
@@ -77,11 +77,11 @@ impl<'gc> Value<'gc> {
     }
 
     pub fn as_som_str_or_err(&self, span: impl Into<Option<Span>>) -> Result<SomStr<'_>, VmError> {
-        self.as_som_str().ok_or_else(|| VmError::IllegalTy {
+        self.as_som_str().ok_or_else(|| VmErrorKind::IllegalTy {
             span: span.into(),
             expected: vec![Ty::String, Ty::Symbol].into(),
             actual: self.ty(),
-        })
+        }.into())
     }
 
     pub fn get_class<'a>(&'a self, vm: &'a Vm<'gc>) -> &'a TypedValue<'gc, tag::Class> {
@@ -184,11 +184,11 @@ macro_rules! downcast {
     ) => {
         downcast!(
             @parse $binding: [ $( $ty, )* ] { $( { $( $arms )+}, )* }
-            _ => Err($crate::vm::error::VmError::IllegalTy {
+            _ => Err($crate::vm::error::VmError::from($crate::vm::error::VmErrorKind::IllegalTy {
                 span: $span,
                 expected: vec![$( $ty, )*].into(),
                 actual: $binding.ty(),
-            }),
+            })),
         )
     };
 

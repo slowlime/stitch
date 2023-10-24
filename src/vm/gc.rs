@@ -292,6 +292,7 @@ impl Header {
     fn set_marked(&self, marked: Marked) -> Marked {
         let (ref_count, old_marked) = self.ref_mark();
         self.set_ref_mark(ref_count, marked);
+        self.ref_mark();
 
         old_marked
     }

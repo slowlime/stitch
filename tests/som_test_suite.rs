@@ -29,9 +29,12 @@ fn run_som_test_suite() {
     });
 
     let test_harness = vm.parse_and_load_user_class("TestHarness")
-        .map_err(|e| miette::Report::new(e).with_source_code(vm.file_loader.get_source().clone()))
+        .map_err(|e| miette::Report::new(*e).with_source_code(vm.file_loader.get_source().clone()))
         .unwrap();
-    vm.run(test_harness, vec![vm.make_string("TestHarness".to_owned()).into_value()])
-        .map_err(|e| miette::Report::new(e).with_source_code(vm.file_loader.get_source().clone()))
-        .unwrap();
+
+    if let Err(e) = vm.run(test_harness, vec![vm.make_string("TestHarness".to_owned()).into_value()]) {
+        let e = miette::Report::new(*e).with_source_code(vm.file_loader.get_source().clone())
+            .wrap_err("VM terminated abnormally");
+        panic!("{e:?}");
+    };
 }

@@ -10,8 +10,10 @@ use crate::util::format_list;
 
 use super::value::Ty;
 
+pub type VmError = Box<VmErrorKind>;
+
 #[derive(Diagnostic, Error, Debug)]
-pub enum VmError {
+pub enum VmErrorKind {
     #[error("name not defined: `{name}`")]
     UndefinedName {
         #[label]
@@ -208,7 +210,7 @@ pub enum VmError {
         class_name: String,
         superclass_name: String,
 
-        source: Box<VmError>,
+        source: VmError,
     },
 
     #[error("parsing failed")]
@@ -217,4 +219,10 @@ pub enum VmError {
 
     #[error("file loading failed")]
     FileLoadError(#[source] Box<dyn Error + Send + Sync>),
+}
+
+impl From<ParserError> for VmError {
+    fn from(value: ParserError) -> Self {
+        VmErrorKind::from(value).into()
+    }
 }

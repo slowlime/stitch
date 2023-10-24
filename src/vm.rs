@@ -5,7 +5,7 @@ pub mod gc;
 mod method;
 mod value;
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Write};
@@ -25,15 +25,13 @@ use crate::file::FileLoader;
 use crate::location::{Location, Span, Spanned};
 use crate::parse::{parse, ParserOptions};
 use crate::sourcemap::{SourceFile, SourceMap};
-use crate::vm::frame::Local;
-use crate::vm::value::Block;
 
-use self::error::VmError;
+use self::error::{VmError, VmErrorKind};
 use self::eval::Effect;
-use self::frame::{Callee, Frame, Upvalue};
+use self::frame::{Callee, Frame, Local, Upvalue};
 use self::gc::{GarbageCollector, Gc, GcOnceCell, GcRefCell};
 use self::method::{MethodDef, Primitive};
-use self::value::{tag, Class, IntoValue, Method, Object, SomString, SomSymbol, TypedValue, Value};
+use self::value::{tag, Block, Class, IntoValue, Method, Object, SomString, SomSymbol, TypedValue, Value};
 
 pub const RUN_METHOD_NAME: &str = "run";
 pub const RUN_ARGS_METHOD_NAME: &str = "run:";
@@ -47,22 +45,22 @@ fn check_arg_count<'gc>(
     callee_name: String,
 ) -> Result<(), VmError> {
     match args.len().cmp(&params.len()) {
-        Ordering::Less => Err(VmError::NotEnoughArguments {
+        Ordering::Less => Err(VmErrorKind::NotEnoughArguments {
             dispatch_span,
             callee_span,
             callee_name,
             expected_count: params.len(),
             provided_count: args.len(),
             missing_params: params[args.len()..].to_vec(),
-        }),
+        }.into()),
 
-        Ordering::Greater => Err(VmError::TooManyArguments {
+        Ordering::Greater => Err(VmErrorKind::TooManyArguments {
             dispatch_span,
             callee_span,
             callee_name,
             expected_count: params.len(),
             provided_count: args.len(),
-        }),
+        }.into()),
 
         Ordering::Equal => Ok(()),
     }
@@ -79,12 +77,12 @@ fn check_method_name_collisions(
             method.selector.value.to_string(),
             method.selector.location.span(),
         ) {
-            return Err(VmError::MethodCollision {
+            return Err(VmErrorKind::MethodCollision {
                 span: method.selector.location.span(),
                 prev_span,
                 name: method.selector.value.to_string(),
                 class_method,
-            });
+            }.into());
         }
     }
 
@@ -576,7 +574,7 @@ pub struct Vm<'gc> {
     globals: HashMap<String, Value<'gc>>,
     frames: Vec<Frame<'gc>>,
     builtins: Builtins<'gc>,
-    upvalues: RefCell<Option<Gc<'gc, Upvalue<'gc>>>>,
+    upvalues: GcRefCell<Option<Gc<'gc, Upvalue<'gc>>>>,
     start_time: Cell<Instant>,
     stdout: Box<dyn Write>,
     stderr: Box<dyn Write>,
@@ -598,7 +596,7 @@ impl<'gc> Vm<'gc> {
             globals: Default::default(),
             frames: vec![],
             builtins: Default::default(),
-            upvalues: RefCell::new(None),
+            upvalues: GcRefCell::new(None),
             start_time: Cell::new(Instant::now()),
             stdout,
             stderr,
@@ -792,7 +790,7 @@ impl<'gc> Vm<'gc> {
         let file = self
             .file_loader
             .load_builtin_class(class_name)
-            .map_err(VmError::FileLoadError)?;
+            .map_err(VmErrorKind::FileLoadError)?;
         let ast = parse(file, Default::default())?;
 
         self.load_class(ast, options)
@@ -809,7 +807,7 @@ impl<'gc> Vm<'gc> {
         let file = self
             .file_loader
             .load_user_class(class_name)
-            .map_err(VmError::FileLoadError)?;
+            .map_err(VmErrorKind::FileLoadError)?;
         let ast = parse(file, self.options.parser_options.clone())?;
 
         self.load_class(ast, self.options.load_class_options.clone())
@@ -822,7 +820,7 @@ impl<'gc> Vm<'gc> {
         let contents = self
             .file_loader
             .load_file(path)
-            .map_err(VmError::FileLoadError)?;
+            .map_err(VmErrorKind::FileLoadError)?;
 
         Ok(self.make_string(contents))
     }
@@ -845,10 +843,10 @@ impl<'gc> Vm<'gc> {
         }
 
         if !self.load_in_progress.insert(class.name.value.clone()) {
-            return Err(VmError::ClassLoadCycle {
+            return Err(VmErrorKind::ClassLoadCycle {
                 span: class.name.span(),
                 class_name: class.name.value.clone(),
-            });
+            }.into());
         }
 
         let superclass = match class.superclass {
@@ -857,19 +855,19 @@ impl<'gc> Vm<'gc> {
                     value.clone().downcast_or_err::<tag::Class>(name.span())?
                 } else if options.resolve_superclass {
                     self.parse_and_load_user_class(&name.value)
-                        .map_err(|e| VmError::RecursiveLoadError {
+                        .map_err(|e| VmErrorKind::RecursiveLoadError {
                             span: class.name.span(),
                             class_name: class.name.value.clone(),
                             superclass_name: name.value,
-                            source: Box::new(e),
+                            source: e,
                         })?
                 } else if options.allow_nil_superclass {
                     break 'superclass None
                 } else {
-                    return Err(VmError::UndefinedName {
+                    return Err(VmErrorKind::UndefinedName {
                         span: name.span(),
                         name: name.value,
-                    })
+                    }.into())
                 };
 
                 Some(value)
@@ -1017,11 +1015,11 @@ impl<'gc> Vm<'gc> {
         selector: &ast::SpannedSelector,
     ) -> Result<Primitive, VmError> {
         Primitive::from_selector(class_name, &selector.value).ok_or_else(|| {
-            VmError::UnknownPrimitive {
+            VmErrorKind::UnknownPrimitive {
                 span: selector.location.span(),
                 name: selector.value.to_string(),
                 class_name: class_name.to_owned(),
-            }
+            }.into()
         })
     }
 
@@ -1218,10 +1216,10 @@ impl<'gc> Vm<'gc> {
         } else if let Some(method) = class.get().get_method_by_name(RUN_METHOD_NAME) {
             method
         } else {
-            return Err(VmError::NoRunMethod {
+            return Err(VmErrorKind::NoRunMethod {
                 class_span: class.get().name.span(),
                 class_name: class.get().name.value.clone(),
-            });
+            }.into());
         };
 
         self.execute_method(method.clone(), args)
@@ -1305,6 +1303,7 @@ impl<'gc> Vm<'gc> {
         let local_addresses: HashSet<_> =
             frame.locals.iter().map(|local| local as *const _).collect();
 
+        /*
         let mut maybe_upvalue = self.upvalues.borrow().clone();
 
         while let Some(upvalue) = maybe_upvalue {
@@ -1313,6 +1312,27 @@ impl<'gc> Vm<'gc> {
             }
 
             maybe_upvalue = upvalue.next.borrow().clone();
+        }
+        */
+
+        let mut cell = &self.upvalues;
+        let mut upvalue_gc: Gc<'gc, Upvalue<'gc>>;
+
+        loop {
+            let inner = cell.borrow();
+            let Some(upvalue) = &*inner else { break };
+
+            if local_addresses.contains(&(upvalue.get_local() as *const _)) {
+                upvalue.close();
+                let next = upvalue.next.borrow_mut().take();
+                drop(inner);
+                *cell.borrow_mut() = next;
+            } else {
+                let upvalue_clone = Gc::clone(upvalue);
+                drop(inner);
+                upvalue_gc = upvalue_clone;
+                cell = &upvalue_gc.next;
+            }
         }
     }
 

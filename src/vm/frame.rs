@@ -135,6 +135,7 @@ impl Finalize for Upvalue<'_> {}
 unsafe impl Collect for Upvalue<'_> {
     impl_collect! {
         fn visit(&self) {
+            // FIXME: recursion for traversing a singly-linked list? really?
             visit(&self.next);
             // skip self.local
             visit(&self.closed_var);

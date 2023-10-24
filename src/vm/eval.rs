@@ -7,7 +7,7 @@ use crate::ast::{self, SymbolLit as Symbol};
 use crate::location::{Span, Spanned};
 use crate::vm::value::downcast;
 
-use super::error::VmError;
+use super::error::{VmError, VmErrorKind};
 use super::frame::{Callee, Frame, Local, Upvalue};
 use super::method::{MethodDef, Primitive};
 use super::value::{tag, ExtendedStringOps, StringOps, SubstrError, Ty, TypedValue, Value};
@@ -42,12 +42,16 @@ macro_rules! ok_or_unwind {
     ($e:expr) => {
         match $e {
             Ok(value) => value,
-            Err(e) => return Effect::Unwind(e),
+            Err(e) => return Effect::unwind(e),
         }
     };
 }
 
 impl<'gc> Effect<'gc> {
+    pub fn unwind(error: impl Into<VmError>) -> Self {
+        Self::Unwind(error.into())
+    }
+
     pub fn then_pure(self) -> Self {
         self
     }
@@ -157,7 +161,7 @@ impl ast::Stmt {
 
                                     method.eval(vm, expr.span(), args, arg_spans).then_return()
                                 } else {
-                                    Effect::Unwind(VmError::NlRetFromEscapedBlock {
+                                    Effect::unwind(VmErrorKind::NlRetFromEscapedBlock {
                                         ret_span: expr.span(),
                                     })
                                 };
@@ -251,7 +255,7 @@ impl ast::Assign {
 
                     Effect::None(value)
                 } else {
-                    Effect::Unwind(VmError::UndefinedName {
+                    Effect::unwind(VmErrorKind::UndefinedName {
                         span: name.0.span(),
                         name: name.0.value.clone(),
                     })
@@ -376,7 +380,7 @@ impl ast::Dispatch {
 
                     method.eval(vm, self.location.span(), args, arg_spans)
                 } else {
-                    Effect::Unwind(VmError::NoSuchMethod {
+                    Effect::unwind(VmErrorKind::NoSuchMethod {
                         span: self.location.span(),
                         class_span: class.name.span(),
                         class_name: class.name.value.clone(),
@@ -462,7 +466,7 @@ impl ast::Global {
 
                     method.eval(vm, self.0.span(), args, arg_spans)
                 } else {
-                    Effect::Unwind(VmError::UndefinedName {
+                    Effect::unwind(VmErrorKind::UndefinedName {
                         span: self.0.span(),
                         name: self.0.value.clone(),
                     })
@@ -490,7 +494,7 @@ impl<'gc> TypedValue<'gc, tag::Method> {
                     },
                     args,
                 ) {
-                    Effect::Unwind(e)
+                    Effect::unwind(e)
                 } else {
                     block.eval_and_pop_frame(vm)
                 }
@@ -564,11 +568,12 @@ impl Primitive {
         ) -> Result<usize, VmError> {
             match usize::try_from(idx).ok().and_then(|idx| idx.checked_sub(1)) {
                 Some(idx) if idx < contents_len => Ok(idx),
-                _ => Err(VmError::IndexOutOfBounds {
+
+                _ => Err(Box::new(VmErrorKind::IndexOutOfBounds {
                     span,
                     idx,
                     size: contents_len,
-                }),
+                })),
             }
         }
 
@@ -628,7 +633,7 @@ impl Primitive {
                 Some(class) if recv.get_class(vm).get().is_subclass_of(class.get()) => class,
 
                 Some(class) => {
-                    return Effect::Unwind(VmError::IllegalTy {
+                    return Effect::unwind(VmErrorKind::IllegalTy {
                         span: recv_span,
                         expected: vec![Ty::NamedClass(
                             class.get().name.value.clone().into_boxed_str(),
@@ -647,7 +652,7 @@ impl Primitive {
                 Some(method) => method,
 
                 None => {
-                    return Effect::Unwind(VmError::NoSuchMethod {
+                    return Effect::unwind(VmErrorKind::NoSuchMethod {
                         span: sym_span,
                         class_span: class.get().name.span(),
                         class_name: class.get().name.value.clone(),
@@ -699,7 +704,7 @@ impl Primitive {
                 let _ = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
                 let len = ok_or_unwind!(len.downcast_or_err::<tag::Int>(arg_spans[1])).get();
                 let len = if len < 0 {
-                    return Effect::Unwind(VmError::ArraySizeNegative {
+                    return Effect::unwind(VmErrorKind::ArraySizeNegative {
                         span: dispatch_span,
                         size: len,
                     });
@@ -708,7 +713,7 @@ impl Primitive {
                         Ok(len) if len < isize::MAX as _ => len,
 
                         _ => {
-                            return Effect::Unwind(VmError::ArrayTooLarge {
+                            return Effect::unwind(VmErrorKind::ArrayTooLarge {
                                 span: dispatch_span,
                                 size: len,
                             })
@@ -854,12 +859,12 @@ impl Primitive {
                 let f = ok_or_unwind!(recv.downcast_or_err::<tag::Float>(arg_spans[0])).get();
 
                 match f as i64 {
-                    _ if f.is_nan() => Effect::Unwind(VmError::NanFloatToInt {
+                    _ if f.is_nan() => Effect::unwind(VmErrorKind::NanFloatToInt {
                         span: dispatch_span,
                     }),
 
                     _ if f > i64::MAX as f64 || f < i64::MIN as f64 => {
-                        Effect::Unwind(VmError::FloatTooLargeForInt {
+                        Effect::unwind(VmErrorKind::FloatTooLargeForInt {
                             span: dispatch_span,
                             value: f,
                         })
@@ -927,7 +932,7 @@ impl Primitive {
 
                 match s.as_str().parse::<f64>() {
                     Ok(f) => Effect::None(vm.make_float(f).into_value()),
-                    Err(_) => Effect::Unwind(VmError::DoubleFromInvalidString {
+                    Err(_) => Effect::unwind(VmErrorKind::DoubleFromInvalidString {
                         span: dispatch_span,
                         value: s.as_str().to_owned(),
                     }),
@@ -1169,7 +1174,7 @@ impl Primitive {
 
                 match s.as_str().parse::<i64>() {
                     Ok(i) => Effect::None(vm.make_int(i).into_value()),
-                    Err(_) => Effect::Unwind(VmError::IntegerFromInvalidString {
+                    Err(_) => Effect::unwind(VmErrorKind::IntegerFromInvalidString {
                         span: dispatch_span,
                         value: s.as_str().to_owned(),
                     }),
@@ -1344,7 +1349,7 @@ impl Primitive {
                     None => {
                         let class = recv.get_class(vm).get();
 
-                        return Effect::Unwind(VmError::NoSuchField {
+                        return Effect::unwind(VmErrorKind::NoSuchField {
                             span: dispatch_span,
                             class_span: class.name.span(),
                             class_name: class.name.value.clone(),
@@ -1418,10 +1423,11 @@ impl Primitive {
 
             Primitive::StringEq => {
                 let [lhs, rhs] = args.try_into().unwrap();
-                let lhs = ok_or_unwind!(lhs.as_som_str_or_err(arg_spans[0]));
-                let rhs = ok_or_unwind!(rhs.as_som_str_or_err(arg_spans[1]));
 
-                Effect::None(vm.make_boolean(lhs == rhs).into_value())
+                let lhs = ok_or_unwind!(lhs.as_som_str_or_err(arg_spans[0]));
+                let rhs = rhs.as_som_str();
+
+                Effect::None(vm.make_boolean(rhs.is_some_and(|rhs| lhs == rhs)).into_value())
             }
 
             Primitive::StringPrimSubstringFromTo => {
@@ -1436,7 +1442,7 @@ impl Primitive {
                 match recv.substr(from..=to) {
                     Ok(s) => Effect::None(vm.make_string(s).into_value()),
 
-                    Err(SubstrError::StartGtEnd) => Effect::Unwind(VmError::StartGtEnd {
+                    Err(SubstrError::StartGtEnd) => Effect::unwind(VmErrorKind::StartGtEnd {
                         span: dispatch_span,
                         start: from,
                         end: to,
@@ -1487,7 +1493,7 @@ impl Primitive {
 
                     Err(e) => {
                         if vm.options.print_warnings {
-                            let e = miette::Report::new(e)
+                            let e = miette::Report::new(*e)
                                 .with_source_code(vm.file_loader.get_source().clone());
 
                             vm.eprint(format_args!("{e:?}\n"));
@@ -1507,7 +1513,7 @@ impl Primitive {
 
                     Err(e) => {
                         if vm.options.print_warnings {
-                            let e = miette::Report::new(e)
+                            let e = miette::Report::new(*e)
                                 .with_source_code(vm.file_loader.get_source().clone());
 
                             vm.eprint(format_args!("{e:?}\n"));
@@ -1522,7 +1528,7 @@ impl Primitive {
                 let [_, code] = args.try_into().unwrap();
                 let code = ok_or_unwind!(code.downcast_or_err::<tag::Int>(arg_spans[1])).get();
 
-                Effect::Unwind(VmError::Exited {
+                Effect::unwind(VmErrorKind::Exited {
                     span: dispatch_span,
                     code,
                 })

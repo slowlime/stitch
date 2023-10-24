@@ -161,7 +161,7 @@ fn run_test_class(test_class_path: PathBuf) {
         for path in entries {
             vm.parse_and_load_user_class(&path.file_stem().unwrap().to_string_lossy())
                 .map_err(|e| {
-                    miette::Report::new(e)
+                    miette::Report::new(*e)
                         .wrap_err(format!("could not load {}", path.display()))
                         .with_source_code(vm.file_loader.get_source().clone())
                 })
@@ -172,7 +172,7 @@ fn run_test_class(test_class_path: PathBuf) {
     let test_class = vm
         .parse_and_load_user_class(class_name)
         .map_err(|e| {
-            miette::Report::new(e)
+            miette::Report::new(*e)
                 .wrap_err(format!("loading class `{class_name}` failed"))
                 .with_source_code(vm.file_loader.get_source().clone())
         })
@@ -186,7 +186,7 @@ fn run_test_class(test_class_path: PathBuf) {
 
     let result = vm
         .run(test_class, args)
-        .map_err(|e| miette::Report::new(e).with_source_code(vm.file_loader.get_source().clone()));
+        .map_err(|e| miette::Report::new(*e).with_source_code(vm.file_loader.get_source().clone()));
 
     let mut output = output.inner().take();
 
