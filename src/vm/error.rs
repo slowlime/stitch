@@ -191,6 +191,26 @@ pub enum VmError {
         end: usize,
     },
 
+    #[error("cycle detected while loading class `{class_name}`")]
+    ClassLoadCycle {
+        #[label = "class defined here"]
+        span: Option<Span>,
+
+        class_name: String,
+    },
+
+    #[error("could not load the superclass `{superclass_name}` of class `{class_name}`")]
+    #[diagnostic_source]
+    RecursiveLoadError {
+        #[label = "class `{class_name}` defined here"]
+        span: Option<Span>,
+
+        class_name: String,
+        superclass_name: String,
+
+        source: Box<VmError>,
+    },
+
     #[error("parsing failed")]
     #[diagnostic_source]
     ParserError(#[from] ParserError),

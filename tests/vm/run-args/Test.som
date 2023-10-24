@@ -1,0 +1,19 @@
+"test:
+args:
+  - hello
+  - world!
+output:
+  verbatim: |
+    hello
+    world!
+"
+
+Test = (
+  run: args = (
+    args do: [ :arg | arg println ].
+  )
+
+  run = (
+    'should not happen' println.
+  )
+)

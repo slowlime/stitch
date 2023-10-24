@@ -33,9 +33,10 @@ use self::eval::Effect;
 use self::frame::{Callee, Frame, Upvalue};
 use self::gc::{GarbageCollector, Gc, GcOnceCell, GcRefCell};
 use self::method::{MethodDef, Primitive};
-use self::value::{tag, Class, IntoValue, Method, Object, SomString, TypedValue, Value, SomSymbol};
+use self::value::{tag, Class, IntoValue, Method, Object, SomString, SomSymbol, TypedValue, Value};
 
 pub const RUN_METHOD_NAME: &str = "run";
+pub const RUN_ARGS_METHOD_NAME: &str = "run:";
 
 #[inline(always)]
 fn check_arg_count<'gc>(
@@ -524,9 +525,27 @@ fn check_method_code(
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone)]
 pub struct LoadClassOptions {
     pub allow_nil_superclass: bool,
+    pub resolve_superclass: bool,
+}
+
+impl Default for LoadClassOptions {
+    fn default() -> Self {
+        Self {
+            allow_nil_superclass: false,
+            resolve_superclass: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VmOptions {
+    pub print_warnings: bool,
+    pub debug: bool,
+    pub load_class_options: LoadClassOptions,
+    pub parser_options: ParserOptions,
 }
 
 #[derive(Default)]
@@ -561,6 +580,8 @@ pub struct Vm<'gc> {
     start_time: Cell<Instant>,
     stdout: Box<dyn Write>,
     stderr: Box<dyn Write>,
+    options: VmOptions,
+    load_in_progress: HashSet<String>,
     pub file_loader: Box<dyn FileLoader>,
 }
 
@@ -570,6 +591,7 @@ impl<'gc> Vm<'gc> {
         file_loader: Box<dyn FileLoader>,
         stdout: Box<dyn Write>,
         stderr: Box<dyn Write>,
+        options: VmOptions,
     ) -> Self {
         let mut result = Self {
             gc,
@@ -580,6 +602,8 @@ impl<'gc> Vm<'gc> {
             start_time: Cell::new(Instant::now()),
             stdout,
             stderr,
+            options,
+            load_in_progress: Default::default(),
             file_loader,
         };
 
@@ -600,10 +624,16 @@ impl<'gc> Vm<'gc> {
                 "Object",
                 LoadClassOptions {
                     allow_nil_superclass: true,
+                    resolve_superclass: false,
                 },
             )
             .unwrap();
         self.builtins.object_class = self.builtins.object.get().get_metaclass().clone();
+
+        let load_options = LoadClassOptions {
+            allow_nil_superclass: false,
+            resolve_superclass: false,
+        };
 
         // Class:
         // - superclass: Object
@@ -612,7 +642,7 @@ impl<'gc> Vm<'gc> {
         // - superclass: Object class
         // - metaclass: <uninit>
         self.builtins.class = self
-            .parse_and_load_builtin("Class", Default::default())
+            .parse_and_load_builtin("Class", load_options.clone())
             .unwrap();
 
         // Metaclass:
@@ -622,7 +652,7 @@ impl<'gc> Vm<'gc> {
         // - superclass: Object class
         // - metaclass: <uninit>
         self.builtins.metaclass = self
-            .parse_and_load_builtin("Metaclass", Default::default())
+            .parse_and_load_builtin("Metaclass", load_options.clone())
             .unwrap();
         self.builtins.metaclass_class = self.builtins.metaclass.get().get_metaclass().clone();
 
@@ -660,7 +690,7 @@ impl<'gc> Vm<'gc> {
             .unwrap();
 
         self.builtins.method = self
-            .parse_and_load_builtin("Method", Default::default())
+            .parse_and_load_builtin("Method", load_options.clone())
             .unwrap();
 
         let uninit_method_classes = [
@@ -693,49 +723,49 @@ impl<'gc> Vm<'gc> {
         // at this point all object references in the classes created so far should be initialized.
 
         let nil = self
-            .parse_and_load_builtin("Nil", Default::default())
+            .parse_and_load_builtin("Nil", load_options.clone())
             .unwrap();
         self.builtins.nil_object = self.make_object(nil);
         self.set_global("nil".into(), self.builtins.nil_object.clone().into_value());
 
         self.builtins.array = self
-            .parse_and_load_builtin("Array", Default::default())
+            .parse_and_load_builtin("Array", load_options.clone())
             .unwrap();
         self.builtins.block = self
-            .parse_and_load_builtin("Block", Default::default())
+            .parse_and_load_builtin("Block", load_options.clone())
             .unwrap();
         self.builtins.block1 = self
-            .parse_and_load_builtin("Block1", Default::default())
+            .parse_and_load_builtin("Block1", load_options.clone())
             .unwrap();
         self.builtins.block2 = self
-            .parse_and_load_builtin("Block2", Default::default())
+            .parse_and_load_builtin("Block2", load_options.clone())
             .unwrap();
         self.builtins.block3 = self
-            .parse_and_load_builtin("Block3", Default::default())
+            .parse_and_load_builtin("Block3", load_options.clone())
             .unwrap();
         self.builtins.integer = self
-            .parse_and_load_builtin("Integer", Default::default())
+            .parse_and_load_builtin("Integer", load_options.clone())
             .unwrap();
         self.builtins.double = self
-            .parse_and_load_builtin("Double", Default::default())
+            .parse_and_load_builtin("Double", load_options.clone())
             .unwrap();
         self.builtins.string = self
-            .parse_and_load_builtin("String", Default::default())
+            .parse_and_load_builtin("String", load_options.clone())
             .unwrap();
         self.builtins.symbol = self
-            .parse_and_load_builtin("Symbol", Default::default())
+            .parse_and_load_builtin("Symbol", load_options.clone())
             .unwrap();
         self.builtins.primitive = self
-            .parse_and_load_builtin("Primitive", Default::default())
+            .parse_and_load_builtin("Primitive", load_options.clone())
             .unwrap();
 
-        self.parse_and_load_builtin("Boolean", Default::default())
+        self.parse_and_load_builtin("Boolean", load_options.clone())
             .unwrap();
         let r#true = self
-            .parse_and_load_builtin("True", Default::default())
+            .parse_and_load_builtin("True", load_options.clone())
             .unwrap();
         let r#false = self
-            .parse_and_load_builtin("False", Default::default())
+            .parse_and_load_builtin("False", load_options.clone())
             .unwrap();
         self.builtins.true_object = self.make_object(r#true);
         self.builtins.false_object = self.make_object(r#false);
@@ -749,7 +779,7 @@ impl<'gc> Vm<'gc> {
         );
 
         let system = self
-            .parse_and_load_builtin("System", Default::default())
+            .parse_and_load_builtin("System", load_options.clone())
             .unwrap();
         self.set_global("system".into(), self.make_object(system).into_value());
     }
@@ -768,6 +798,10 @@ impl<'gc> Vm<'gc> {
         self.load_class(ast, options)
     }
 
+    pub fn options(&self) -> &VmOptions {
+        &self.options
+    }
+
     pub fn parse_and_load_user_class(
         &mut self,
         class_name: &str,
@@ -776,12 +810,15 @@ impl<'gc> Vm<'gc> {
             .file_loader
             .load_user_class(class_name)
             .map_err(VmError::FileLoadError)?;
-        let ast = parse(file, Default::default())?;
+        let ast = parse(file, self.options.parser_options.clone())?;
 
-        self.load_class(ast, Default::default())
+        self.load_class(ast, self.options.load_class_options.clone())
     }
 
-    pub fn load_file_as_string(&mut self, path: &Path) -> Result<TypedValue<'gc, tag::String>, VmError> {
+    pub fn load_file_as_string(
+        &mut self,
+        path: &Path,
+    ) -> Result<TypedValue<'gc, tag::String>, VmError> {
         let contents = self
             .file_loader
             .load_file(path)
@@ -803,21 +840,39 @@ impl<'gc> Vm<'gc> {
         class: ast::Class,
         options: LoadClassOptions,
     ) -> Result<TypedValue<'gc, tag::Class>, VmError> {
+        if self.options.debug {
+            self.eprint(format_args!("load_class({:?}, {:?})\n", class.name.value, options));
+        }
+
+        if !self.load_in_progress.insert(class.name.value.clone()) {
+            return Err(VmError::ClassLoadCycle {
+                span: class.name.span(),
+                class_name: class.name.value.clone(),
+            });
+        }
+
         let superclass = match class.superclass {
             Some(name) => 'superclass: {
-                let value = match self.globals.get(&name.value) {
-                    Some(value) => value.clone(),
-                    None if options.allow_nil_superclass => break 'superclass None,
-
-                    None => {
-                        return Err(VmError::UndefinedName {
-                            span: name.span(),
-                            name: name.value,
-                        })
-                    }
+                let value = if let Some(value) = self.globals.get(&name.value) {
+                    value.clone().downcast_or_err::<tag::Class>(name.span())?
+                } else if options.resolve_superclass {
+                    self.parse_and_load_user_class(&name.value)
+                        .map_err(|e| VmError::RecursiveLoadError {
+                            span: class.name.span(),
+                            class_name: class.name.value.clone(),
+                            superclass_name: name.value,
+                            source: Box::new(e),
+                        })?
+                } else if options.allow_nil_superclass {
+                    break 'superclass None
+                } else {
+                    return Err(VmError::UndefinedName {
+                        span: name.span(),
+                        name: name.value,
+                    })
                 };
 
-                Some(value.downcast_or_err::<tag::Class>(name.span())?)
+                Some(value)
             }
 
             None => Some(self.builtins.object.clone()),
@@ -826,13 +881,20 @@ impl<'gc> Vm<'gc> {
         check_method_name_collisions(false, &class.object_methods)?;
         check_method_name_collisions(true, &class.class_methods)?;
 
-        let class_fields = class.class_fields;
-        let mut object_fields = superclass
+        let superclass_metaclass = superclass
             .as_ref()
             .and_then(|superclass| superclass.checked_get())
-            .map(|superclass| superclass.instance_fields.clone())
+            .and_then(|superclass| superclass.obj.get())
+            .and_then(|superclass_obj| superclass_obj.checked_get())
+            .and_then(|superclass_obj| superclass_obj.class.get())
+            .cloned();
+
+         let mut class_fields = superclass_metaclass
+            .as_ref()
+            .and_then(|superclass_metaclass| superclass_metaclass.checked_get())
+            .map(|superclass_metaclass| superclass_metaclass.instance_fields.clone())
             .unwrap_or_default();
-        object_fields.extend(class.object_fields);
+        class_fields.extend(class.class_fields);
 
         let class_field_set = class_fields
             .iter()
@@ -843,6 +905,13 @@ impl<'gc> Vm<'gc> {
             .into_iter()
             .map(|method| self.load_method(method, &class.name.value, &class_field_set))
             .collect::<Result<Vec<_>, _>>()?;
+
+        let mut object_fields = superclass
+            .as_ref()
+            .and_then(|superclass| superclass.checked_get())
+            .map(|superclass| superclass.instance_fields.clone())
+            .unwrap_or_default();
+        object_fields.extend(class.object_fields);
 
         let object_field_set = object_fields
             .iter()
@@ -857,7 +926,7 @@ impl<'gc> Vm<'gc> {
         let metaclass = self.make_class(
             Spanned::new(format!("{} class", class.name.value), class.name.location),
             self.builtins.metaclass.clone(),
-            Some(self.builtins.object_class.clone()),
+            Some(superclass_metaclass.unwrap_or_default()),
             class_methods,
             class_fields,
         );
@@ -879,6 +948,8 @@ impl<'gc> Vm<'gc> {
         }
 
         self.set_global(cls.get().name.value.clone(), cls.clone().into_value());
+
+        assert!(self.load_in_progress.remove(&cls.get().name.value));
 
         Ok(cls)
     }
@@ -1073,27 +1144,27 @@ impl<'gc> Vm<'gc> {
         block
     }
 
-    fn make_array(&self, values: Vec<Value<'gc>>) -> TypedValue<'gc, tag::Array> {
+    pub fn make_array(&self, values: Vec<Value<'gc>>) -> TypedValue<'gc, tag::Array> {
         GcRefCell::new(values).into_value(self.gc)
     }
 
-    fn make_symbol(&self, sym: impl Into<SomSymbol>) -> TypedValue<'gc, tag::Symbol> {
+    pub fn make_symbol(&self, sym: impl Into<SomSymbol>) -> TypedValue<'gc, tag::Symbol> {
         Into::<SomSymbol>::into(sym).into_value(self.gc)
     }
 
-    fn make_string(&self, s: impl Into<SomString>) -> TypedValue<'gc, tag::String> {
+    pub fn make_string(&self, s: impl Into<SomString>) -> TypedValue<'gc, tag::String> {
         Into::<SomString>::into(s).into_value(self.gc)
     }
 
-    fn make_int(&self, int: i64) -> TypedValue<'gc, tag::Int> {
+    pub fn make_int(&self, int: i64) -> TypedValue<'gc, tag::Int> {
         int.into_value(self.gc)
     }
 
-    fn make_float(&self, float: f64) -> TypedValue<'gc, tag::Float> {
+    pub fn make_float(&self, float: f64) -> TypedValue<'gc, tag::Float> {
         float.into_value(self.gc)
     }
 
-    fn make_boolean(&self, value: bool) -> TypedValue<'gc, tag::Object> {
+    pub fn make_boolean(&self, value: bool) -> TypedValue<'gc, tag::Object> {
         if value {
             self.builtins.true_object.clone()
         } else {
@@ -1101,7 +1172,7 @@ impl<'gc> Vm<'gc> {
         }
     }
 
-    fn make_object(&self, class: TypedValue<'gc, tag::Class>) -> TypedValue<'gc, tag::Object> {
+    pub fn make_object(&self, class: TypedValue<'gc, tag::Class>) -> TypedValue<'gc, tag::Object> {
         let field_count = class
             .checked_get()
             .map(|class| class.instance_fields.len())
@@ -1132,20 +1203,28 @@ impl<'gc> Vm<'gc> {
         self.globals.get(name)
     }
 
-    pub fn run(&mut self, class: TypedValue<'gc, tag::Class>) -> Result<Value<'gc>, VmError> {
-        let method = match class.get().get_method_by_name(RUN_METHOD_NAME) {
-            Some(method) => method.clone(),
+    pub fn run(
+        &mut self,
+        class: TypedValue<'gc, tag::Class>,
+        run_args: Vec<Value<'gc>>,
+    ) -> Result<Value<'gc>, VmError> {
+        let recv = self.make_object(class.clone());
+        let mut args = vec![recv.into_value()];
 
-            None => {
-                return Err(VmError::NoRunMethod {
-                    class_span: class.get().name.span(),
-                    class_name: class.get().name.value.clone(),
-                })
-            }
+        let method = if let Some(method) = class.get().get_method_by_name(RUN_ARGS_METHOD_NAME) {
+            args.push(self.make_array(run_args).into_value());
+
+            method
+        } else if let Some(method) = class.get().get_method_by_name(RUN_METHOD_NAME) {
+            method
+        } else {
+            return Err(VmError::NoRunMethod {
+                class_span: class.get().name.span(),
+                class_name: class.get().name.value.clone(),
+            });
         };
 
-        let recv = self.make_object(class.clone());
-        self.execute_method(method, vec![recv.into_value()])
+        self.execute_method(method.clone(), args)
     }
 
     pub fn execute_method(

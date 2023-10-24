@@ -1,38 +1,21 @@
 mod common;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt::{self, Write};
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
-use common::Matchers;
+use common::SharedStringBuf;
 use serde::Deserialize;
+use test_generator::test_resources;
 
 use stitch::file::FileLoader;
 use stitch::sourcemap::{SourceFile, SourceMap};
 use stitch::vm::gc::GarbageCollector;
 use stitch::vm::Vm;
-use test_generator::test_resources;
 
-#[derive(Default)]
-struct VmOutput(Rc<RefCell<String>>);
-
-impl Write for VmOutput {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0.borrow_mut().write_str(s)
-    }
-
-    fn write_char(&mut self, c: char) -> fmt::Result {
-        self.0.borrow_mut().write_char(c)
-    }
-
-    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
-        self.0.borrow_mut().write_fmt(args)
-    }
-}
+use self::common::Matchers;
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +29,9 @@ struct VmTest {
 
     #[serde(default = "VmTest::preload_classes_default")]
     preload_classes: bool,
+
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 impl VmTest {
@@ -138,11 +124,17 @@ fn run_test_class(test_class_path: PathBuf) {
     let test: VmTest =
         common::parse_comment_header(file_loader.load_user_class(class_name).unwrap());
 
-    let output = Rc::new(RefCell::default());
-    let stdout = Box::new(VmOutput(output.clone()));
-    let stderr = Box::new(VmOutput(output.clone()));
+    let output = SharedStringBuf::default();
+    let stdout = Box::new(output.clone());
+    let stderr = Box::new(output.clone());
 
-    let mut vm = Vm::new(&gc, Box::new(file_loader), stdout, stderr);
+    let mut vm = Vm::new(
+        &gc,
+        Box::new(file_loader),
+        stdout,
+        stderr,
+        Default::default(),
+    );
 
     if test.preload_classes {
         let mut entries = fs::read_dir(&base_path)
@@ -186,10 +178,17 @@ fn run_test_class(test_class_path: PathBuf) {
         })
         .unwrap();
 
+    let args = test
+        .args
+        .into_iter()
+        .map(|arg| vm.make_string(arg).into_value())
+        .collect();
+
     let result = vm
-        .run(test_class)
+        .run(test_class, args)
         .map_err(|e| miette::Report::new(e).with_source_code(vm.file_loader.get_source().clone()));
-    let mut output = output.take();
+
+    let mut output = output.inner().take();
 
     match result {
         Ok(_) if test.fail => panic!("Expected a VM error but completed successfully"),

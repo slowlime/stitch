@@ -15,6 +15,7 @@ output:
 
     Object
     Object class
+    Boolean class
     Object class
 
     Object
@@ -43,6 +44,7 @@ Test = (
     true class superclass superclass println.
     true class superclass superclass class println.
     true class class superclass println.
+    true class class superclass superclass println.
     system printNewline.
 
     Object println.

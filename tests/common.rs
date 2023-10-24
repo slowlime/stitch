@@ -1,3 +1,9 @@
+#![allow(dead_code)]
+
+use std::cell::RefCell;
+use std::fmt;
+use std::rc::Rc;
+
 use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
@@ -98,5 +104,32 @@ impl Matchers {
 impl Default for Matchers {
     fn default() -> Self {
         Self::Many(vec![])
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SharedStringBuf(Rc<RefCell<String>>);
+
+impl SharedStringBuf {
+    pub fn new(s: String) -> Self {
+        Self(Rc::new(RefCell::new(s)))
+    }
+
+    pub fn inner(&self) -> &RefCell<String> {
+        &self.0
+    }
+}
+
+impl fmt::Write for SharedStringBuf {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0.borrow_mut().write_str(s)
+    }
+
+    fn write_char(&mut self, c: char) -> fmt::Result {
+        self.0.borrow_mut().write_char(c)
+    }
+
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+        self.0.borrow_mut().write_fmt(args)
     }
 }

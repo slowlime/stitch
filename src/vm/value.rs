@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fmt::{self, Display};
+use std::fmt::{self, Debug, Display};
 use std::hash::{self, Hash};
 use std::marker::PhantomData;
 use std::mem;
@@ -359,9 +359,9 @@ macro_rules! define_value_kind {
         impl Display for Ty {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 match self {
-                    Self::NamedClass(name) => name.fmt(f),
+                    Self::NamedClass(name) => write!(f, "{}", name),
 
-                    $( Self::$name => $display.fmt(f), )+
+                    $( Self::$name => write!(f, "{}", $display), )+
                 }
             }
         }
@@ -556,7 +556,7 @@ unsafe impl<T: Tag> Collect for TypedValue<'_, T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Block<'gc> {
     pub location: Location,
     pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
@@ -572,6 +572,16 @@ impl<'gc> Block<'gc> {
     }
 }
 
+impl Debug for Block<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Block")
+            .field("location", &self.location)
+            .field("obj", &self.obj)
+            .field("defining_method", &self.defining_method)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Finalize for Block<'_> {}
 
 unsafe impl Collect for Block<'_> {
@@ -583,7 +593,7 @@ unsafe impl Collect for Block<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Class<'gc> {
     pub name: Spanned<String>,
     pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
@@ -656,6 +666,21 @@ impl<'gc> Class<'gc> {
     }
 }
 
+impl Debug for Class<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut result = f.debug_struct("Class");
+        result.field("name", &self.name).field("obj", &self.obj);
+
+        if let Some(Some(superclass)) = self.superclass.get() {
+            result.field("superclass", &superclass.get().name.value);
+        } else {
+            result.field("superclass", &self.superclass);
+        }
+
+        result.finish_non_exhaustive()
+    }
+}
+
 impl Finalize for Class<'_> {}
 
 unsafe impl Collect for Class<'_> {
@@ -668,13 +693,31 @@ unsafe impl Collect for Class<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Method<'gc> {
     pub selector: ast::SpannedSelector,
     pub location: Location,
     pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
     pub holder: GcOnceCell<TypedValue<'gc, tag::Class>>,
     pub def: Spanned<MethodDef>,
+}
+
+impl Debug for Method<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut result = f.debug_struct("Method");
+        result
+            .field("selector", &self.selector)
+            .field("location", &self.location)
+            .field("obj", &self.obj);
+
+        if let Some(holder) = self.holder.get() {
+            result.field("holder", &holder.get().name.value);
+        } else {
+            result.field("holder", &self.holder);
+        }
+
+        result.finish_non_exhaustive()
+    }
 }
 
 impl Finalize for Method<'_> {}
@@ -688,10 +731,24 @@ unsafe impl Collect for Method<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Object<'gc> {
     pub class: GcOnceCell<TypedValue<'gc, tag::Class>>,
     pub fields: GcRefCell<Vec<Value<'gc>>>,
+}
+
+impl Debug for Object<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut result = f.debug_struct("Object");
+
+        if let Some(class) = self.class.get() {
+            result.field("class", &class.get().name.value);
+        } else {
+            result.field("class", &self.class);
+        }
+
+        result.finish_non_exhaustive()
+    }
 }
 
 pub struct FieldProj<'a, 'gc> {
@@ -890,10 +947,9 @@ impl Hash for SomStr<'_> {
 
 impl Display for SomStr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.as_str().fmt(f)
+        write!(f, "{}", self.as_str())
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct SomString {
@@ -939,7 +995,7 @@ impl Hash for SomString {
 
 impl Display for SomString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.value.fmt(f)
+        write!(f, "{}", self.value)
     }
 }
 
@@ -1011,7 +1067,7 @@ impl Hash for SomSymbol {
 
 impl Display for SomSymbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.as_str().fmt(f)
+        write!(f, "{}", self.as_str())
     }
 }
 

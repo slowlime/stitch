@@ -93,9 +93,9 @@ impl ast::Block {
                 match stmt.eval(vm) {
                     Effect::None(_) => {}
                     Effect::Restart => continue 'restart,
-                    eff @ (Effect::Return(_) | Effect::Unwind(_) | Effect::NonLocalReturn { .. }) => {
-                        return eff
-                    }
+                    eff @ (Effect::Return(_)
+                    | Effect::Unwind(_)
+                    | Effect::NonLocalReturn { .. }) => return eff,
                 }
             }
 
@@ -354,7 +354,16 @@ impl ast::Dispatch {
 
             None => {
                 let recv = args.remove(0);
-                let class = recv.get_class(vm).get();
+                let mut class = recv.get_class(vm).get();
+
+                if vm.options.debug {
+                    vm.eprint(format!(
+                        "method not found: {}#{}\n",
+                        class.name.value,
+                        self.selector.value.name()
+                    ));
+                    class = recv.get_class(vm).get();
+                }
 
                 if let Some(method) = class
                     .get_method_by_name("doesNotUnderstand:arguments:")
@@ -621,10 +630,12 @@ impl Primitive {
                 Some(class) => {
                     return Effect::Unwind(VmError::IllegalTy {
                         span: recv_span,
-                        expected: vec![Ty::NamedClass(class.get().name.value.clone().into_boxed_str())]
-                            .into(),
+                        expected: vec![Ty::NamedClass(
+                            class.get().name.value.clone().into_boxed_str(),
+                        )]
+                        .into(),
                         actual: Ty::NamedClass(
-                            recv.get_class(vm).get().name.value.clone().into_boxed_str()
+                            recv.get_class(vm).get().name.value.clone().into_boxed_str(),
                         ),
                     })
                 }
@@ -1420,8 +1431,7 @@ impl Primitive {
                 let from = ok_or_unwind!(from.downcast_or_err::<tag::Int>(arg_spans[1])).get();
                 let to = ok_or_unwind!(to.downcast_or_err::<tag::Int>(arg_spans[2])).get();
 
-                let from =
-                    ok_or_unwind!(check_arr_idx(arg_spans[1], recv.char_count(), from));
+                let from = ok_or_unwind!(check_arr_idx(arg_spans[1], recv.char_count(), from));
                 let to = ok_or_unwind!(check_arr_idx(arg_spans[2], recv.char_count(), to));
 
                 match recv.substr(from..=to) {
@@ -1470,11 +1480,22 @@ impl Primitive {
 
             Primitive::SystemLoadFile => {
                 let [_, file_name] = args.try_into().unwrap();
-                let file_name = ok_or_unwind!(file_name.downcast_or_err::<tag::String>(arg_spans[1]));
+                let file_name =
+                    ok_or_unwind!(file_name.downcast_or_err::<tag::String>(arg_spans[1]));
 
                 match vm.load_file_as_string(file_name.get().as_str().as_ref()) {
                     Ok(class) => Effect::None(class.into_value()),
-                    Err(_) => Effect::None(vm.builtins.nil_object.clone().into_value()),
+
+                    Err(e) => {
+                        if vm.options.print_warnings {
+                            let e = miette::Report::new(e)
+                                .with_source_code(vm.file_loader.get_source().clone());
+
+                            vm.eprint(format_args!("{e:?}\n"));
+                        }
+
+                        Effect::None(vm.builtins.nil_object.clone().into_value())
+                    }
                 }
             }
 
@@ -1484,7 +1505,17 @@ impl Primitive {
 
                 match vm.parse_and_load_user_class(class_name.as_str()) {
                     Ok(class) => Effect::None(class.into_value()),
-                    Err(_) => Effect::None(vm.builtins.nil_object.clone().into_value()),
+
+                    Err(e) => {
+                        if vm.options.print_warnings {
+                            let e = miette::Report::new(e)
+                                .with_source_code(vm.file_loader.get_source().clone());
+
+                            vm.eprint(format_args!("{e:?}\n"));
+                        }
+
+                        Effect::None(vm.builtins.nil_object.clone().into_value())
+                    }
                 }
             }
 
