@@ -24,6 +24,16 @@ output:
     1. false
     2. true
     3. true
+    4. true
+    5. false
+    6. true
+    7. false
+    8. true
+
+    # Bitwise operators
+    1. 4294967296
+    2. -9223372036854775808
+    3. 0
 "
 
 Test = (
@@ -76,5 +86,16 @@ Test = (
     self test: 2 = 0.
     self test: 2 = 2.
     self test: (4 + 8) = (3 + 9).
+    self test: 0 < 1.
+    self test: 1 < 0.
+    self test: -10 < 10.
+    self test: 10 < -10.
+    self test: 1 << 32 > 0.
+
+    self category: 'Bitwise operators'.
+
+    self test: 1 << 32.
+    self test: 1 << 63.
+    self test: 1 << 64.
   )
 )

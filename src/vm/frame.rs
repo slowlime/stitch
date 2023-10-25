@@ -60,13 +60,13 @@ pub struct Frame<'gc> {
 }
 
 impl<'gc> Frame<'gc> {
-    pub fn get_local_by_name(&self, name: &str) -> Option<&Local<'gc>> {
-        self.local_map.get(name).map(|&idx| &self.locals[idx])
+    pub fn get_local_by_name(&self, name: &str) -> Option<Pin<&Local<'gc>>> {
+        self.local_map.get(name).map(|&idx| Pin::new(&self.locals[idx]))
     }
 
     pub fn get_recv(&self) -> Option<&GcRefCell<Value<'gc>>> {
         match &self.callee {
-            Callee::Method { .. } => Some(&self.get_local_by_name("self").unwrap().value),
+            Callee::Method { .. } => Some(&self.get_local_by_name("self").unwrap().get_ref().value),
             Callee::Block { block } => block
                 .get()
                 .get_upvalue_by_name("self")
@@ -106,10 +106,10 @@ pub struct Upvalue<'gc> {
 }
 
 impl<'gc> Upvalue<'gc> {
-    pub unsafe fn new(local: &Local<'gc>) -> Self {
+    pub fn new(local: Pin<&Local<'gc>>) -> Self {
         Self {
             next: GcRefCell::new(None),
-            local: Cell::new(local),
+            local: Cell::new(local.get_ref()),
             closed_var: GcOnceCell::new(),
         }
     }

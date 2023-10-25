@@ -1,0 +1,33 @@
+"test:
+output:
+  verbatim: |
+    true
+    true
+
+    true
+    false
+    true
+    false
+    true
+
+    true
+    true
+"
+
+Test = (
+  run = (
+    (3 == (2 + 1)) println.
+    (3.0 asInteger == 3) println.
+    system printNewline.
+
+    (3 class == 2.0 asInteger class) println.
+    (3 class == 2 class class) println.
+    (3 class class == 2 class class) println.
+    (42 class == false class) println.
+    (42 class class superclass == false class class superclass superclass) println.
+    system printNewline.
+
+    (#'Integer' == Integer name) println.
+    (#'Integer class' == Integer class name) println.
+  )
+)

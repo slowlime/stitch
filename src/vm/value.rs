@@ -626,8 +626,8 @@ pub struct Block<'gc> {
 }
 
 impl<'gc> Block<'gc> {
-    pub fn get_upvalue_by_name(&self, name: &str) -> Option<&Upvalue<'gc>> {
-        self.upvalue_map.get(name).map(|&idx| &*self.upvalues[idx])
+    pub fn get_upvalue_by_name(&self, name: &str) -> Option<&Gc<'gc, Upvalue<'gc>>> {
+        self.upvalue_map.get(name).map(|&idx| &self.upvalues[idx])
     }
 }
 

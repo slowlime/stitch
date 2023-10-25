@@ -1,5 +1,5 @@
 use std::mem;
-use std::num::{NonZeroUsize, IntErrorKind};
+use std::num::{IntErrorKind, NonZeroUsize};
 use std::pin::Pin;
 use std::ptr;
 use std::rc::Rc;
@@ -213,7 +213,7 @@ impl ast::Stmt {
                         .find(|(_, frame)| {
                             frame
                                 .get_local_by_name("self")
-                                .is_some_and(|local| ptr::eq(local, self_local))
+                                .is_some_and(|local| ptr::eq(local.get_ref(), self_local))
                         })
                         .and_then(|(idx, _)| NonZeroUsize::new(idx))
                         .expect("non-local return flag valid but no target frame was found");
@@ -437,7 +437,7 @@ impl ast::Local {
             panic!("unknown local `{}`", self.0.value);
         };
 
-        local
+        local.get_ref()
     }
 }
 
@@ -534,7 +534,13 @@ impl<'gc> TypedValue<'gc, tag::Method> {
                 ref params,
             } => {
                 if vm.options.debug {
-                    vm.debug_call(dispatch_span, &Callee::Method { method: self.clone() }, &args);
+                    vm.debug_call(
+                        dispatch_span,
+                        &Callee::Method {
+                            method: self.clone(),
+                        },
+                        &args,
+                    );
                 }
 
                 ok_or_unwind!(check_arg_count(
@@ -646,7 +652,7 @@ impl Primitive {
             } else if rhs < 0 {
                 shl(lhs, -rhs)
             } else {
-                lhs.checked_shr(rhs as u32).unwrap_or(0)
+                (lhs as u64).checked_shr(rhs as u32).unwrap_or(0) as i64
             }
         }
 
@@ -806,7 +812,10 @@ impl Primitive {
                 let [recv] = args.try_into().unwrap();
                 let cls = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
 
-                Effect::None(vm.make_string(cls.get().name.value.clone()).into_value())
+                Effect::None(
+                    vm.make_symbol(ast::SymbolLit::String(cls.get().name.clone()))
+                        .into_value(),
+                )
             }
 
             Primitive::ClassNew => {
@@ -1105,8 +1114,7 @@ impl Primitive {
                 arg_spans,
                 |lhs, rhs| match lhs.checked_rem(rhs).unwrap_or(0) {
                     rem if !(rem < 0) ^ (rhs < 0) => rem,
-                    rem if rem < 0 => rem + rhs,
-                    rem => rem - rhs,
+                    rem => rem + rhs,
                 },
                 |lhs, rhs| lhs % rhs,
             ),
@@ -1281,6 +1289,11 @@ impl Primitive {
                             Float(rhs) => lhs.get() == rhs.get(),
                             Int(rhs) => i64_f64_eq(rhs.get(), lhs.get()),
                             _ => false,
+                        }),
+
+                        Symbol(lhs) => downcast!(rhs, {
+                            Symbol(rhs) => lhs.get().as_str() == rhs.get().as_str(),
+                            rhs => lhs.into_value().ptr_eq(&rhs),
                         }),
 
                         lhs => lhs.ptr_eq(&rhs),
@@ -1483,8 +1496,10 @@ impl Primitive {
                 let recv = ok_or_unwind!(recv.as_som_str_or_err(arg_spans[0]));
 
                 Effect::None(
-                    vm.make_boolean(recv.chars().all(char::is_whitespace))
-                        .into_value(),
+                    vm.make_boolean(
+                        !recv.as_str().is_empty() && recv.chars().all(char::is_whitespace),
+                    )
+                    .into_value(),
                 )
             }
 
@@ -1493,8 +1508,10 @@ impl Primitive {
                 let recv = ok_or_unwind!(recv.as_som_str_or_err(arg_spans[0]));
 
                 Effect::None(
-                    vm.make_boolean(recv.chars().all(char::is_alphabetic))
-                        .into_value(),
+                    vm.make_boolean(
+                        !recv.as_str().is_empty() && recv.chars().all(char::is_alphabetic),
+                    )
+                    .into_value(),
                 )
             }
 
@@ -1503,8 +1520,10 @@ impl Primitive {
                 let recv = ok_or_unwind!(recv.as_som_str_or_err(arg_spans[0]));
 
                 Effect::None(
-                    vm.make_boolean(recv.chars().all(char::is_numeric))
-                        .into_value(),
+                    vm.make_boolean(
+                        !recv.as_str().is_empty() && recv.chars().all(char::is_numeric),
+                    )
+                    .into_value(),
                 )
             }
 

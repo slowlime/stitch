@@ -260,6 +260,7 @@ fn add_implicit_returns(code: &mut ast::Block) {
     code.recurse_mut(&mut BlockReturns);
 }
 
+#[cfg(debug_assertions)]
 fn check_method_code(
     class_name: &str,
     method_name: &str,
@@ -1126,19 +1127,21 @@ impl<'gc> Vm<'gc> {
             .iter()
             .map(|name| {
                 let frame = self.frames.last().unwrap();
-                let local = frame
-                    .get_local_by_name(name)
-                    .unwrap_or_else(|| match &frame.callee {
+
+                match frame.get_local_by_name(name) {
+                    Some(local) => self.capture_local(local),
+
+                    None => match &frame.callee {
                         Callee::Method { .. } => panic!("unknown upvalue `{}`", name),
+
                         Callee::Block { block, .. } => {
                             match block.get().get_upvalue_by_name(name) {
-                                Some(upvalue) => upvalue.get_local(),
+                                Some(upvalue) => Gc::clone(upvalue),
                                 None => panic!("unknown upvalue `{}`", name),
                             }
                         }
-                    });
-
-                self.capture_local(local)
+                    }
+                }
             })
             .collect::<Vec<_>>();
 
@@ -1408,18 +1411,18 @@ impl<'gc> Vm<'gc> {
         }
     }
 
-    fn capture_local(&self, local: &Local<'gc>) -> Gc<'gc, Upvalue<'gc>> {
+    fn capture_local(&self, local: Pin<&Local<'gc>>) -> Gc<'gc, Upvalue<'gc>> {
         let mut next = self.upvalues.borrow().clone();
 
         while let Some(upvalue) = next {
-            if ptr::eq(upvalue.get_local(), local) {
+            if ptr::eq(upvalue.get_local(), local.clone().get_ref()) {
                 return upvalue;
             }
 
             next = upvalue.next.borrow().clone();
         }
 
-        let upvalue = Gc::new(self.gc, unsafe { Upvalue::new(local) });
+        let upvalue = Gc::new(self.gc, Upvalue::new(local));
         mem::swap(
             &mut *self.upvalues.borrow_mut(),
             &mut *upvalue.next.borrow_mut(),
