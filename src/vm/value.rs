@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut, RangeBounds};
 use std::ptr;
+use std::rc::Rc;
 
 use thiserror::Error;
 
@@ -32,14 +33,14 @@ impl<'gc> Value<'gc> {
         self.0.is_some()
     }
 
-    pub fn ensure_legal(&self) -> &Self {
+    fn ensure_legal(&self) -> &Gc<'gc, ValueKind<'gc>> {
         assert!(self.0.is_some(), "Value is illegal");
 
-        self
+        self.0.as_ref().unwrap()
     }
 
     pub fn ty(&self) -> Ty {
-        self.ensure_legal().0.as_ref().unwrap().ty()
+        self.ensure_legal().ty()
     }
 
     pub fn is<T: Tag>(&self) -> bool {
@@ -73,7 +74,7 @@ impl<'gc> Value<'gc> {
     }
 
     pub fn as_som_str(&self) -> Option<SomStr<'_>> {
-        self.ensure_legal().0.as_ref().unwrap().as_str()
+        self.ensure_legal().as_str()
     }
 
     pub fn as_som_str_or_err(&self, span: impl Into<Option<Span>>) -> Result<SomStr<'_>, VmError> {
@@ -84,8 +85,20 @@ impl<'gc> Value<'gc> {
         }.into())
     }
 
+    pub fn to_f64(&self) -> Option<f64> {
+        self.ensure_legal().to_f64()
+    }
+
+    pub fn to_f64_or_err(&self, span: impl Into<Option<Span>>) -> Result<f64, VmError> {
+        self.to_f64().ok_or_else(|| VmErrorKind::IllegalTy {
+            span: span.into(),
+            expected: vec![Ty::Float, Ty::Int].into(),
+            actual: self.ty(),
+        }.into())
+    }
+
     pub fn get_class<'a>(&'a self, vm: &'a Vm<'gc>) -> &'a TypedValue<'gc, tag::Class> {
-        self.ensure_legal().0.as_ref().unwrap().get_class(vm)
+        self.ensure_legal().get_class(vm)
     }
 
     pub fn get_obj(&self) -> Option<&Object<'gc>> {
@@ -131,7 +144,7 @@ impl Hash for Value<'_> {
                         0f64.to_bits().hash(state)
                     }
                     ValueKind::Float(f) => f.to_bits().hash(state),
-                    ValueKind::Array(arr) => arr.borrow().hash(state),
+                    ValueKind::Array(arr) => arr.inner().borrow().hash(state),
                     ValueKind::Block(block) => block.obj.get().unwrap().hash(state),
                     ValueKind::Class(class) => class.obj.get().unwrap().hash(state),
                     ValueKind::Method(method) => method.obj.get().unwrap().hash(state),
@@ -419,11 +432,10 @@ define_value_kind! {
     pub enum ValueKind<'gc> {
         Int("integer", i64 => i64): i => i,
         Float("double", f64 => f64): f => f,
-        Array("array", GcRefCell<Vec<Value<'gc>>> => &'a GcRefCell<Vec<Value<'gc>>>): ref arr => arr,
+        Array("array", SomArray<'gc> => &'a SomArray<'gc>): ref arr => arr,
         Block("block", Block<'gc> => &'a Block<'gc>): ref blk => blk,
         Class("class", Class<'gc> => &'a Class<'gc>): ref cls => cls,
         Method("method", Method<'gc> => &'a Method<'gc>): ref method => method,
-        // FIXME: Symbols are also strings: add Value::as_string() for casting and change the repr of symbols
         Symbol("symbol", SomSymbol => &'a SomSymbol): ref sym => sym,
         Object("object", Object<'gc> => &'a Object<'gc>): ref obj => obj,
         String("string", SomString => &'a SomString): ref s => s,
@@ -467,6 +479,14 @@ impl<'gc> ValueKind<'gc> {
         match self {
             Self::Symbol(sym) => Some(sym.as_som_str()),
             Self::String(s) => Some(s.as_som_str()),
+            _ => None,
+        }
+    }
+
+    pub fn to_f64(&self) -> Option<f64> {
+        match *self {
+            Self::Int(i) => Some(i as f64),
+            Self::Float(f) => Some(f),
             _ => None,
         }
     }
@@ -557,10 +577,49 @@ unsafe impl<T: Tag> Collect for TypedValue<'_, T> {
 }
 
 #[derive(Clone)]
+pub struct SomArray<'gc>(GcRefCell<Vec<Value<'gc>>>);
+
+impl<'gc> SomArray<'gc> {
+    pub fn new(values: Vec<Value<'gc>>) -> Self {
+        Self(GcRefCell::new(values))
+    }
+
+    pub fn inner(&self) -> &GcRefCell<Vec<Value<'gc>>> {
+        &self.0
+    }
+}
+
+impl Debug for SomArray<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut result = f.debug_tuple("SomArray");
+
+        if let Ok(inner) = self.0.try_borrow() {
+            if inner.len() > 8 {
+                result.field(&format_args!("Vec(len = {})", inner.len()));
+            } else {
+                result.field(&*inner);
+            }
+        }
+
+        result.finish()
+    }
+}
+
+impl Finalize for SomArray<'_> {}
+
+unsafe impl Collect for SomArray<'_> {
+    impl_collect! {
+        fn visit(&self) {
+            visit(&self.0);
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Block<'gc> {
     pub location: Location,
     pub obj: GcOnceCell<TypedValue<'gc, tag::Object>>,
-    pub code: ast::Block,
+    pub code: Rc<ast::Block>,
     pub upvalue_map: HashMap<String, usize>,
     pub upvalues: Vec<Gc<'gc, Upvalue<'gc>>>,
     pub defining_method: TypedValue<'gc, tag::Method>,
@@ -589,6 +648,7 @@ unsafe impl Collect for Block<'_> {
         fn visit(&self) {
             visit(&self.obj);
             visit(&self.upvalues);
+            visit(&self.defining_method);
         }
     }
 }

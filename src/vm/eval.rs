@@ -1,17 +1,49 @@
 use std::mem;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroUsize, IntErrorKind};
 use std::pin::Pin;
 use std::ptr;
+use std::rc::Rc;
 
 use crate::ast::{self, SymbolLit as Symbol};
 use crate::location::{Span, Spanned};
 use crate::vm::value::downcast;
+use crate::vm::vm_debug;
 
 use super::error::{VmError, VmErrorKind};
 use super::frame::{Callee, Frame, Local, Upvalue};
 use super::method::{MethodDef, Primitive};
 use super::value::{tag, ExtendedStringOps, StringOps, SubstrError, Ty, TypedValue, Value};
 use super::{check_arg_count, Vm};
+
+const F2P63: f64 = 9223372036854775808f64;
+const F2P53: f64 = 9007199254740992f64;
+
+fn i64_f64_eq(lhs: i64, rhs: f64) -> bool {
+    if rhs >= F2P63 || rhs < -F2P63 {
+        // outside the range of i64
+        false
+    } else if rhs.abs() >= F2P53 {
+        // f64's ulp >= 2, but still within the range of i64: cast to i64
+        lhs == rhs as i64
+    } else {
+        lhs as f64 == rhs
+    }
+}
+
+fn i64_f64_lt(lhs: i64, rhs: f64) -> bool {
+    if rhs >= F2P63 {
+        // outside the range of i64
+        true
+    } else if rhs < -F2P63 {
+        // outside the range of i64
+        false
+    } else if rhs.abs() >= F2P53 {
+        // f64's ulp >= 2, but still within the range of i64: cast to i64
+        lhs < rhs as i64
+    } else {
+        (lhs as f64) < rhs
+    }
+}
 
 /// The result of a computation — either a plain value or a triggered effect.
 #[derive(Debug)]
@@ -265,11 +297,10 @@ impl ast::Assign {
     }
 }
 
-impl Spanned<ast::Block> {
+impl Spanned<Rc<ast::Block>> {
     pub(super) fn eval<'gc>(&self, vm: &mut Vm<'gc>) -> Effect<'gc> {
         let frame = vm.frames.last().expect("stack frame is empty");
 
-        // TODO: whoa, cloning the whole ast here seems excessive
         Effect::None(
             vm.make_block(frame.get_defining_method().clone(), self.clone())
                 .into_value(),
@@ -358,16 +389,14 @@ impl ast::Dispatch {
 
             None => {
                 let recv = args.remove(0);
-                let mut class = recv.get_class(vm).get();
+                let class = recv.get_class(vm).get();
 
-                if vm.options.debug {
-                    vm.eprint(format!(
-                        "method not found: {}#{}\n",
-                        class.name.value,
-                        self.selector.value.name()
-                    ));
-                    class = recv.get_class(vm).get();
-                }
+                vm_debug!(
+                    vm,
+                    "method not found: {}#{}",
+                    class.name.value,
+                    self.selector.value.name(),
+                );
 
                 if let Some(method) = class
                     .get_method_by_name("doesNotUnderstand:arguments:")
@@ -504,6 +533,10 @@ impl<'gc> TypedValue<'gc, tag::Method> {
                 primitive: p,
                 ref params,
             } => {
+                if vm.options.debug {
+                    vm.debug_call(dispatch_span, &Callee::Method { method: self.clone() }, &args);
+                }
+
                 ok_or_unwind!(check_arg_count(
                     &args,
                     params,
@@ -668,12 +701,34 @@ impl Primitive {
             method.eval(vm, dispatch_span, args, arg_spans)
         }
 
+        #[inline]
+        fn int_bin_op<'gc, F, G>(
+            vm: &mut Vm<'gc>,
+            args: Vec<Value<'gc>>,
+            arg_spans: Vec<Option<Span>>,
+            int_handler: F,
+            float_handler: G,
+        ) -> Effect<'gc>
+        where
+            F: FnOnce(i64, i64) -> i64,
+            G: FnOnce(f64, f64) -> f64,
+        {
+            let [lhs, rhs] = args.try_into().unwrap();
+            let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
+
+            Effect::None(ok_or_unwind!(downcast!(rhs, {
+                Int(rhs) => Ok(vm.make_int(int_handler(lhs, rhs.get())).into_value()),
+                Float(rhs) => Ok(vm.make_float(float_handler(lhs as f64, rhs.get())).into_value()),
+                _ => error!(arg_spans[1]),
+            })))
+        }
+
         match self {
             Primitive::ArrayAt => {
                 let [recv, idx] = args.try_into().unwrap();
                 let arr = ok_or_unwind!(recv.downcast_or_err::<tag::Array>(arg_spans[0]));
                 let idx = ok_or_unwind!(idx.downcast_or_err::<tag::Int>(arg_spans[1])).get();
-                let contents = arr.get().borrow();
+                let contents = arr.get().inner().borrow();
                 let idx = ok_or_unwind!(check_arr_idx(dispatch_span, contents.len(), idx));
 
                 Effect::None(contents[idx].clone())
@@ -683,10 +738,13 @@ impl Primitive {
                 let [recv, idx, value] = args.try_into().unwrap();
                 let arr = ok_or_unwind!(recv.downcast_or_err::<tag::Array>(arg_spans[0]));
                 let idx = ok_or_unwind!(idx.downcast_or_err::<tag::Int>(arg_spans[1])).get();
-                let idx =
-                    ok_or_unwind!(check_arr_idx(dispatch_span, arr.get().borrow().len(), idx));
+                let idx = ok_or_unwind!(check_arr_idx(
+                    dispatch_span,
+                    arr.get().inner().borrow().len(),
+                    idx
+                ));
 
-                arr.get().borrow_mut()[idx] = value;
+                arr.get().inner().borrow_mut()[idx] = value;
 
                 Effect::None(arr.into_value())
             }
@@ -694,7 +752,7 @@ impl Primitive {
             Primitive::ArrayLength => {
                 let [recv] = args.try_into().unwrap();
                 let arr = ok_or_unwind!(recv.downcast_or_err::<tag::Array>(arg_spans[0]));
-                let len = arr.get().borrow().len();
+                let len = arr.get().inner().borrow().len();
 
                 Effect::None(vm.make_int(len as _).into_value())
             }
@@ -771,9 +829,14 @@ impl Primitive {
             Primitive::ClassFields => {
                 let [recv] = args.try_into().unwrap();
                 let cls = ok_or_unwind!(recv.downcast_or_err::<tag::Class>(arg_spans[0]));
-                let fields = cls.get().instance_fields
+                let fields = cls
+                    .get()
+                    .instance_fields
                     .iter()
-                    .map(|name| vm.make_symbol(ast::SymbolLit::String(name.clone())).into_value())
+                    .map(|name| {
+                        vm.make_symbol(ast::SymbolLit::String(name.clone()))
+                            .into_value()
+                    })
                     .collect();
 
                 Effect::None(vm.make_array(fields).into_value())
@@ -798,8 +861,7 @@ impl Primitive {
             Primitive::DoubleAdd => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Float>(arg_spans[0])).get();
-                // TODO: int?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Float>(arg_spans[1])).get();
+                let rhs = ok_or_unwind!(rhs.to_f64_or_err(arg_spans[1]));
 
                 Effect::None(vm.make_float(lhs + rhs).into_value())
             }
@@ -807,8 +869,7 @@ impl Primitive {
             Primitive::DoubleSub => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Float>(arg_spans[0])).get();
-                // TODO: int?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Float>(arg_spans[1])).get();
+                let rhs = ok_or_unwind!(rhs.to_f64_or_err(arg_spans[1]));
 
                 Effect::None(vm.make_float(lhs - rhs).into_value())
             }
@@ -816,8 +877,7 @@ impl Primitive {
             Primitive::DoubleMul => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Float>(arg_spans[0])).get();
-                // TODO: int?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Float>(arg_spans[1])).get();
+                let rhs = ok_or_unwind!(rhs.to_f64_or_err(arg_spans[1]));
 
                 Effect::None(vm.make_float(lhs * rhs).into_value())
             }
@@ -825,8 +885,7 @@ impl Primitive {
             Primitive::DoubleDiv => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Float>(arg_spans[0])).get();
-                // TODO: int?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Float>(arg_spans[1])).get();
+                let rhs = ok_or_unwind!(rhs.to_f64_or_err(arg_spans[1]));
 
                 Effect::None(vm.make_float(lhs / rhs).into_value())
             }
@@ -834,8 +893,7 @@ impl Primitive {
             Primitive::DoubleMod => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Float>(arg_spans[0])).get();
-                // TODO: int?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Float>(arg_spans[1])).get();
+                let rhs = ok_or_unwind!(rhs.to_f64_or_err(arg_spans[1]));
 
                 Effect::None(vm.make_float(lhs % rhs).into_value())
             }
@@ -893,20 +951,15 @@ impl Primitive {
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Float>(arg_spans[0])).get();
 
                 Effect::None(
-                    vm.make_boolean(
-                        // TODO: int?
-                        rhs.downcast::<tag::Float>()
-                            .is_ok_and(|rhs| lhs == rhs.get()),
-                    )
-                    .into_value(),
+                    vm.make_boolean(rhs.to_f64().is_some_and(|rhs| lhs == rhs))
+                        .into_value(),
                 )
             }
 
             Primitive::DoubleLt => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Float>(arg_spans[0])).get();
-                // TODO: int?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Float>(arg_spans[1])).get();
+                let rhs = ok_or_unwind!(rhs.to_f64_or_err(arg_spans[1]));
 
                 Effect::None(vm.make_boolean(lhs < rhs).into_value())
             }
@@ -966,6 +1019,7 @@ impl Primitive {
                 let mut call_args =
                     ok_or_unwind!(call_args.downcast_or_err::<tag::Array>(arg_spans[2]))
                         .get()
+                        .inner()
                         .borrow()
                         .clone();
                 call_args.insert(0, obj);
@@ -994,69 +1048,72 @@ impl Primitive {
                 Effect::None(vm.make_string(sym.get().as_str().to_owned()).into_value())
             }
 
-            Primitive::IntegerAdd => {
-                let [lhs, rhs] = args.try_into().unwrap();
-                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
-                // TODO: float?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get();
+            Primitive::IntegerAdd => int_bin_op(
+                vm,
+                args,
+                arg_spans,
+                |lhs, rhs| lhs.wrapping_add(rhs),
+                |lhs, rhs| lhs + rhs,
+            ),
 
-                Effect::None(vm.make_int(lhs.wrapping_add(rhs)).into_value())
-            }
+            Primitive::IntegerSub => int_bin_op(
+                vm,
+                args,
+                arg_spans,
+                |lhs, rhs| lhs.wrapping_sub(rhs),
+                |lhs, rhs| lhs - rhs,
+            ),
 
-            Primitive::IntegerSub => {
-                let [lhs, rhs] = args.try_into().unwrap();
-                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
-                // TODO: float?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get();
-
-                Effect::None(vm.make_int(lhs.wrapping_sub(rhs)).into_value())
-            }
-
-            Primitive::IntegerMul => {
-                let [lhs, rhs] = args.try_into().unwrap();
-                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
-                // TODO: float?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get();
-
-                Effect::None(vm.make_int(lhs.wrapping_mul(rhs)).into_value())
-            }
+            Primitive::IntegerMul => int_bin_op(
+                vm,
+                args,
+                arg_spans,
+                |lhs, rhs| lhs.wrapping_mul(rhs),
+                |lhs, rhs| lhs * rhs,
+            ),
 
             Primitive::IntegerDiv => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
-                // TODO: float?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get();
 
-                Effect::None(vm.make_int(lhs.wrapping_div(rhs)).into_value())
+                Effect::None(ok_or_unwind!(downcast!(rhs, {
+                    Int(rhs) => match rhs.get() {
+                        0 => Err(VmErrorKind::IntDivByZero {
+                            span: arg_spans[1],
+                        }.into()),
+
+                        rhs => Ok(vm.make_int(lhs.wrapping_div(rhs)).into_value()),
+                    },
+
+                    Float(rhs) => Ok(vm.make_float(lhs as f64 / rhs.get()).into_value()),
+
+                    _ => error!(arg_spans[1]),
+                })))
             }
 
             Primitive::IntegerFDiv => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get() as f64;
-                // TODO: float?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get() as f64;
+                let rhs = ok_or_unwind!(rhs.to_f64_or_err(arg_spans[1]));
 
                 Effect::None(vm.make_float(lhs / rhs).into_value())
             }
 
-            Primitive::IntegerMod => {
-                let [lhs, rhs] = args.try_into().unwrap();
-                let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
-                // TODO: float
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get();
-
-                let result = match lhs.checked_rem(rhs).unwrap_or(0) {
-                    rem if rem >= 0 && rhs >= 0 || rem < 0 && rhs < 0 => rem,
+            Primitive::IntegerMod => int_bin_op(
+                vm,
+                args,
+                arg_spans,
+                |lhs, rhs| match lhs.checked_rem(rhs).unwrap_or(0) {
+                    rem if !(rem < 0) ^ (rhs < 0) => rem,
+                    rem if rem < 0 => rem + rhs,
                     rem => rem - rhs,
-                };
-
-                Effect::None(vm.make_int(result).into_value())
-            }
+                },
+                |lhs, rhs| lhs % rhs,
+            ),
 
             Primitive::IntegerRem => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
-                // TODO: float?
                 let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get();
 
                 Effect::None(vm.make_int(lhs.checked_rem(rhs).unwrap_or(0)).into_value())
@@ -1122,10 +1179,11 @@ impl Primitive {
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
 
                 Effect::None(
-                    vm.make_boolean(
-                        // TODO: float?
-                        rhs.downcast::<tag::Int>().is_ok_and(|rhs| lhs == rhs.get()),
-                    )
+                    vm.make_boolean(downcast!(rhs, {
+                        Int(rhs) => lhs == rhs.get(),
+                        Float(rhs) => i64_f64_eq(lhs, rhs.get()),
+                        _ => false,
+                    }))
                     .into_value(),
                 )
             }
@@ -1133,10 +1191,12 @@ impl Primitive {
             Primitive::IntegerLt => {
                 let [lhs, rhs] = args.try_into().unwrap();
                 let lhs = ok_or_unwind!(lhs.downcast_or_err::<tag::Int>(arg_spans[0])).get();
-                // TODO: float?
-                let rhs = ok_or_unwind!(rhs.downcast_or_err::<tag::Int>(arg_spans[1])).get();
 
-                Effect::None(vm.make_boolean(lhs < rhs).into_value())
+                Effect::None(ok_or_unwind!(downcast!(rhs, {
+                    Int(rhs) => Ok(vm.make_boolean(lhs < rhs.get()).into_value()),
+                    Float(rhs) => Ok(vm.make_boolean(i64_f64_lt(lhs, rhs.get())).into_value()),
+                    _ => error!(arg_spans[1]),
+                })))
             }
 
             Primitive::IntegerAsString => {
@@ -1174,10 +1234,21 @@ impl Primitive {
 
                 match s.as_str().parse::<i64>() {
                     Ok(i) => Effect::None(vm.make_int(i).into_value()),
-                    Err(_) => Effect::unwind(VmErrorKind::IntegerFromInvalidString {
-                        span: dispatch_span,
-                        value: s.as_str().to_owned(),
-                    }),
+
+                    Err(e) => match e.kind() {
+                        IntErrorKind::PosOverflow => {
+                            Effect::None(vm.make_int(i64::MAX).into_value())
+                        }
+
+                        IntErrorKind::NegOverflow => {
+                            Effect::None(vm.make_int(i64::MIN).into_value())
+                        }
+
+                        _ => Effect::unwind(VmErrorKind::IntegerFromInvalidString {
+                            span: dispatch_span,
+                            value: s.as_str().to_owned(),
+                        }),
+                    },
                 }
             }
 
@@ -1198,8 +1269,24 @@ impl Primitive {
             Primitive::ObjectRefEq => {
                 let [lhs, rhs] = args.try_into().unwrap();
 
-                // TODO: compare ints/floats by value
-                Effect::None(vm.make_boolean(lhs.ptr_eq(&rhs)).into_value())
+                Effect::None(
+                    vm.make_boolean(downcast!(lhs, {
+                        Int(lhs) => downcast!(rhs, {
+                            Int(rhs) => lhs.get() == rhs.get(),
+                            Float(rhs) => i64_f64_eq(lhs.get(), rhs.get()),
+                            _ => false,
+                        }),
+
+                        Float(lhs) => downcast!(rhs, {
+                            Float(rhs) => lhs.get() == rhs.get(),
+                            Int(rhs) => i64_f64_eq(rhs.get(), lhs.get()),
+                            _ => false,
+                        }),
+
+                        lhs => lhs.ptr_eq(&rhs),
+                    }))
+                    .into_value(),
+                )
             }
 
             Primitive::ObjectHashcode | Primitive::StringHashcode => {
@@ -1233,6 +1320,7 @@ impl Primitive {
                 let call_args =
                     ok_or_unwind!(call_args.downcast_or_err::<tag::Array>(arg_spans[2]))
                         .get()
+                        .inner()
                         .borrow()
                         .clone();
 
@@ -1272,6 +1360,7 @@ impl Primitive {
                 let call_args =
                     ok_or_unwind!(call_args.downcast_or_err::<tag::Array>(arg_spans[2]))
                         .get()
+                        .inner()
                         .borrow()
                         .clone();
                 let superclass =
@@ -1306,7 +1395,6 @@ impl Primitive {
 
                 let idx = ok_or_unwind!(check_arr_idx(arg_spans[1], fields.len(), idx));
 
-                // TODO: forbid access to $-fields
                 Effect::None(fields[idx].clone())
             }
 
@@ -1328,7 +1416,6 @@ impl Primitive {
 
                     let idx = ok_or_unwind!(check_arr_idx(arg_spans[1], fields.len(), idx));
 
-                    // TODO: forbid access to $-fields
                     fields[idx] = value;
                 }
 
@@ -1427,7 +1514,10 @@ impl Primitive {
                 let lhs = ok_or_unwind!(lhs.as_som_str_or_err(arg_spans[0]));
                 let rhs = rhs.as_som_str();
 
-                Effect::None(vm.make_boolean(rhs.is_some_and(|rhs| lhs == rhs)).into_value())
+                Effect::None(
+                    vm.make_boolean(rhs.is_some_and(|rhs| lhs == rhs))
+                        .into_value(),
+                )
             }
 
             Primitive::StringPrimSubstringFromTo => {
@@ -1576,11 +1666,11 @@ impl Primitive {
             }
 
             Primitive::SystemFullGC => {
-                let [recv] = args.try_into().unwrap();
+                let [_] = args.try_into().unwrap();
 
                 vm.full_gc();
 
-                Effect::None(recv)
+                Effect::None(vm.make_boolean(true).into_value())
             }
         }
     }

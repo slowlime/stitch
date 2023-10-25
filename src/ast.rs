@@ -2,6 +2,7 @@ pub mod visit;
 
 use std::fmt::{self, Debug, Display, Write};
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 
 use crate::location::{Location, Span, Spanned};
 use crate::parse::is_ident;
@@ -400,7 +401,7 @@ impl AstRecurse for Stmt {
 #[derive(Debug, Clone, Default)]
 pub enum Expr {
     Assign(Assign),
-    Block(Spanned<Block>),
+    Block(Spanned<Rc<Block>>),
     Array(ArrayLit),
     Symbol(SymbolLit),
     String(StringLit),
@@ -465,7 +466,7 @@ impl AstRecurse for Expr {
     fn recurse_mut<'a, V: visit::VisitorMut<'a>>(&'a mut self, visitor: &mut V) {
         match self {
             Self::Assign(expr) => visitor.visit_assign(expr),
-            Self::Block(expr) => visitor.visit_block(&mut expr.value),
+            Self::Block(expr) => visitor.visit_block(Rc::make_mut(&mut expr.value)),
             Self::Array(expr) => visitor.visit_array(expr),
             Self::Symbol(expr) => visitor.visit_symbol(expr),
             Self::String(expr) => visitor.visit_string(expr),

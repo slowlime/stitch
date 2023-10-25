@@ -12,7 +12,7 @@ mod common;
 fn run_som_test_suite() {
     miette::set_panic_hook();
 
-    let gc = GarbageCollector::new();
+    let gc = GarbageCollector::default();
     let file_loader = PathFileLoader::new(vec![
         "third-party/SOM/Smalltalk".into(),
         "third-party/SOM/TestSuite".into(),

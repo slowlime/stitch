@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 use miette::{Diagnostic, SourceOffset};
 use thiserror::Error;
@@ -1027,7 +1028,7 @@ impl<'a> Parser<'a> {
 
         self.scopes.pop();
 
-        Ok(ast::Expr::Block(block))
+        Ok(ast::Expr::Block(block.map(Rc::new)))
     }
 
     fn parse_lit_expr(&mut self) -> Result<ast::Expr, ParserError> {

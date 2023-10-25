@@ -32,7 +32,7 @@ unsafe impl Collect for DropFlagger {
 
 #[test]
 fn test_gc() {
-    let gc = GarbageCollector::new();
+    let gc = GarbageCollector::default();
 
     let a = Gc::new(&gc, ());
     let b = Gc::new(&gc, (a.clone(), a.clone()));
@@ -54,7 +54,7 @@ fn test_gc_ref_cell() {
         }
     }
 
-    let gc = GarbageCollector::new();
+    let gc = GarbageCollector::default();
 
     let a = Gc::new(&gc, Bomb(GcRefCell::new(None)));
     let b = Gc::new(&gc, Bomb(GcRefCell::new(Some(a.clone()))));
@@ -69,7 +69,7 @@ fn test_gc_once_cell() {
     // should do nothing
     drop(cell);
 
-    let gc = GarbageCollector::new();
+    let gc = GarbageCollector::default();
 
     let cell = Gc::new(&gc, GcOnceCell::<Gc<DropFlagger>>::new());
     // should do nothing
@@ -106,7 +106,7 @@ fn test_gc_finalization() {
         }
     }
 
-    let gc = GarbageCollector::new();
+    let gc = GarbageCollector::default();
 
     let (flagger1, flag1) = DropFlagger::new();
     let (flagger2, flag2) = DropFlagger::new();

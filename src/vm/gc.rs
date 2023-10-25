@@ -63,6 +63,11 @@ impl<T: Collect> HasVTable for T {
 
 type NextCell = Cell<Option<GcErasedBox>>;
 
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    pub trace: bool,
+}
+
 pub struct GarbageCollector {
     // gc values are arranged in an intrusive linked list; this is the head of that list
     head: NextCell,
@@ -76,15 +81,18 @@ pub struct GarbageCollector {
     heap_size: Cell<usize>,
 
     collecting: Cell<Collecting>,
+
+    options: Options,
 }
 
 impl GarbageCollector {
-    pub fn new() -> Self {
+    pub fn new(options: Options) -> Self {
         Self {
             head: Cell::new(None),
             used: Cell::new(0),
             heap_size: Cell::new(4096),
             collecting: Cell::new(Collecting::No),
+            options,
         }
     }
 
@@ -95,13 +103,27 @@ impl GarbageCollector {
 
         let used = self.used.get();
         let heap_size = self.heap_size.get();
-        let threshold = LOAD_FACTOR as usize * (heap_size >> 7);
 
-        if used > threshold {
+        if used > heap_size {
             self.collect();
+            let threshold = (LOAD_FACTOR as usize * heap_size) >> 8;
 
             if self.used.get() > threshold {
+                if self.options.trace {
+                    eprintln!(
+                        "threshold {threshold} exceeded by {}; bumping heap size to {}",
+                        self.used.get() - threshold,
+                        heap_size * 2,
+                    );
+                }
+
                 self.heap_size.set(heap_size * 2);
+            } else if self.options.trace {
+                eprintln!(
+                    "threshold {threshold} not surpassed: {} remaining; keeping heap size at {}",
+                    threshold - self.used.get(),
+                    self.heap_size.get(),
+                );
             }
         }
     }
@@ -109,6 +131,14 @@ impl GarbageCollector {
     pub fn collect(&self) {
         if self.collecting.replace(Collecting::Yes).is_yes() {
             return;
+        }
+
+        if self.options.trace {
+            eprintln!(
+                "running gc: used {used}, heap limit {heap_size}",
+                used = self.used.get(),
+                heap_size = self.heap_size.get()
+            );
         }
 
         self.mark();
@@ -153,6 +183,14 @@ impl GarbageCollector {
                         .expect("inconsistent size"),
                 );
             }
+        }
+
+        if self.options.trace {
+            eprintln!(
+                "gc finished: used {used}, heap limit {heap_size}",
+                used = self.used.get(),
+                heap_size = self.heap_size.get()
+            );
         }
 
         self.collecting.set(Collecting::No);
@@ -220,7 +258,7 @@ impl GarbageCollector {
 
 impl Default for GarbageCollector {
     fn default() -> Self {
-        Self::new()
+        Self::new(Default::default())
     }
 }
 

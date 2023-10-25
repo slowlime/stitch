@@ -193,6 +193,12 @@ pub enum VmErrorKind {
         end: usize,
     },
 
+    #[error("integer division by zero")]
+    IntDivByZero {
+        #[label]
+        span: Option<Span>,
+    },
+
     #[error("cycle detected while loading class `{class_name}`")]
     ClassLoadCycle {
         #[label = "class defined here"]

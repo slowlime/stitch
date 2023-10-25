@@ -119,7 +119,7 @@ fn run_test_class(test_class_path: PathBuf) {
     let class_name = test_class_path.file_stem().unwrap().to_str().unwrap();
     let base_path = test_class_path.parent().unwrap().to_owned();
 
-    let gc = GarbageCollector::new();
+    let gc = GarbageCollector::default();
     let mut file_loader = TestFileLoader::new(base_path.clone());
     let test: VmTest =
         common::parse_comment_header(file_loader.load_user_class(class_name).unwrap());

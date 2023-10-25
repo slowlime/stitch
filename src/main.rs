@@ -10,7 +10,7 @@ use stitch::file::PathFileLoader;
 use stitch::parse::ParserOptions;
 use stitch::util::FormattedWriter;
 use stitch::vm::error::VmErrorKind;
-use stitch::vm::gc::GarbageCollector;
+use stitch::vm::gc::{GarbageCollector, Options as GcOptions};
 use stitch::vm::Vm;
 use stitch::vm::VmOptions;
 
@@ -28,7 +28,10 @@ fn main() -> ExitCode {
         },
     };
 
-    let gc = GarbageCollector::new();
+    let gc = GarbageCollector::new(GcOptions {
+        trace: args.verbose,
+    });
+
     let file_loader = PathFileLoader::new(args.class_search_paths);
     let stdout = Box::new(FormattedWriter(io::stdout()));
     let stderr = Box::new(FormattedWriter(io::stderr()));

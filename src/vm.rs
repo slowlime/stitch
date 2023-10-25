@@ -14,9 +14,10 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::pin::Pin;
 use std::ptr;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use miette::Diagnostic;
+use miette::{Diagnostic, SourceCode};
 use thiserror::Error;
 
 use crate::ast;
@@ -25,6 +26,7 @@ use crate::file::FileLoader;
 use crate::location::{Location, Span, Spanned};
 use crate::parse::{parse, ParserOptions};
 use crate::sourcemap::{SourceFile, SourceMap};
+use crate::vm::value::SomArray;
 
 use self::error::{VmError, VmErrorKind};
 use self::eval::Effect;
@@ -569,6 +571,18 @@ pub struct Builtins<'gc> {
     pub false_object: TypedValue<'gc, tag::Object>,
 }
 
+macro_rules! vm_debug {
+    ($self:expr) => (vm_debug!($self, ""));
+
+    ($self:expr, $( $arg:tt )*) => {
+        if $self.options.debug {
+            $self.eprint(format_args!("{}\n", format_args!($( $arg )*)));
+        }
+    };
+}
+
+pub(self) use vm_debug;
+
 pub struct Vm<'gc> {
     gc: &'gc GarbageCollector,
     globals: HashMap<String, Value<'gc>>,
@@ -576,8 +590,8 @@ pub struct Vm<'gc> {
     builtins: Builtins<'gc>,
     upvalues: GcRefCell<Option<Gc<'gc, Upvalue<'gc>>>>,
     start_time: Cell<Instant>,
-    stdout: Box<dyn Write>,
-    stderr: Box<dyn Write>,
+    stdout: Cell<Option<Box<dyn Write>>>,
+    stderr: Cell<Option<Box<dyn Write>>>,
     options: VmOptions,
     load_in_progress: HashSet<String>,
     pub file_loader: Box<dyn FileLoader>,
@@ -598,8 +612,8 @@ impl<'gc> Vm<'gc> {
             builtins: Default::default(),
             upvalues: GcRefCell::new(None),
             start_time: Cell::new(Instant::now()),
-            stdout,
-            stderr,
+            stdout: Cell::new(Some(stdout)),
+            stderr: Cell::new(Some(stderr)),
             options,
             load_in_progress: Default::default(),
             file_loader,
@@ -690,6 +704,9 @@ impl<'gc> Vm<'gc> {
         self.builtins.method = self
             .parse_and_load_builtin("Method", load_options.clone())
             .unwrap();
+        self.builtins.primitive = self
+            .parse_and_load_builtin("Primitive", load_options.clone())
+            .unwrap();
 
         let uninit_method_classes = [
             &self.builtins.object,
@@ -698,23 +715,28 @@ impl<'gc> Vm<'gc> {
             &self.builtins.method,
         ];
 
+        fn fix_method_obj_class<'gc>(vm: &Vm<'gc>, method: &TypedValue<'gc, tag::Method>) {
+            let method_obj = method.get().obj.get().unwrap();
+
+            let class = match method.get().def.value {
+                MethodDef::Code(_) => vm.builtins.method.clone(),
+                MethodDef::Primitive { .. } => vm.builtins.primitive.clone(),
+            };
+
+            method_obj
+                .get()
+                .class
+                .set(class)
+                .unwrap();
+        }
+
         for class in uninit_method_classes {
             for method in &class.get().methods {
-                let method_obj = method.get().obj.get().unwrap();
-                method_obj
-                    .get()
-                    .class
-                    .set(self.builtins.method.clone())
-                    .unwrap();
+                fix_method_obj_class(self, method);
             }
 
             for method in &class.get().get_metaclass().get().methods {
-                let method_obj = method.get().obj.get().unwrap();
-                method_obj
-                    .get()
-                    .class
-                    .set(self.builtins.method.clone())
-                    .unwrap();
+                fix_method_obj_class(self, method);
             }
         }
 
@@ -752,9 +774,6 @@ impl<'gc> Vm<'gc> {
             .unwrap();
         self.builtins.symbol = self
             .parse_and_load_builtin("Symbol", load_options.clone())
-            .unwrap();
-        self.builtins.primitive = self
-            .parse_and_load_builtin("Primitive", load_options.clone())
             .unwrap();
 
         self.parse_and_load_builtin("Boolean", load_options.clone())
@@ -978,6 +997,7 @@ impl<'gc> Vm<'gc> {
                 params,
             },
         };
+
         let def = Spanned::new(code, def_location);
         let method = self.make_method(method.selector, method.location, def);
 
@@ -1029,6 +1049,11 @@ impl<'gc> Vm<'gc> {
         location: Location,
         def: Spanned<MethodDef>,
     ) -> TypedValue<'gc, tag::Method> {
+        let class = match def.value {
+            MethodDef::Code(_) => self.builtins.method.clone(),
+            MethodDef::Primitive { .. } => self.builtins.primitive.clone(),
+        };
+
         let method = Method {
             selector,
             location,
@@ -1039,8 +1064,10 @@ impl<'gc> Vm<'gc> {
 
         let value = method.into_value(self.gc);
 
-        let obj = self.make_object(self.builtins.method.clone());
+        let obj = self.make_object(class);
         value.get().obj.set(obj).unwrap();
+
+        vm_debug!(self, "alloc:  method {:?}\n", value.get().selector.value.name());
 
         value
     }
@@ -1083,13 +1110,15 @@ impl<'gc> Vm<'gc> {
         let obj = self.make_object(metaclass);
         value.get().obj.set(obj).unwrap();
 
+        vm_debug!(self, "alloc:   class {:?}", value.get().name.value);
+
         value
     }
 
     fn make_block(
         &mut self,
         defining_method: TypedValue<'gc, tag::Method>,
-        code: Spanned<ast::Block>,
+        code: Spanned<Rc<ast::Block>>,
     ) -> TypedValue<'gc, tag::Block> {
         let upvalues = code
             .value
@@ -1139,26 +1168,38 @@ impl<'gc> Vm<'gc> {
         let obj = self.make_object(class);
         block.get().obj.set(obj).unwrap();
 
+        vm_debug!(self, "alloc:   block in {:?}", block.get().defining_method.get().selector.value.name());
+
         block
     }
 
     pub fn make_array(&self, values: Vec<Value<'gc>>) -> TypedValue<'gc, tag::Array> {
-        GcRefCell::new(values).into_value(self.gc)
+        vm_debug!(self, "alloc:   array of {} elements (capacity {}, size {} MB)", values.len(), values.capacity(),
+            (values.capacity() * mem::size_of::<Value>()) as f64 * 1e-6);
+        self.gc.collect();
+
+        SomArray::new(values).into_value(self.gc)
     }
 
     pub fn make_symbol(&self, sym: impl Into<SomSymbol>) -> TypedValue<'gc, tag::Symbol> {
+        let sym = Into::<SomSymbol>::into(sym);
+        vm_debug!(self, "alloc:  symbol {}", sym.value.as_str());
         Into::<SomSymbol>::into(sym).into_value(self.gc)
     }
 
     pub fn make_string(&self, s: impl Into<SomString>) -> TypedValue<'gc, tag::String> {
+        let s = Into::<SomString>::into(s);
+        vm_debug!(self, "alloc:  string {}", crate::vm::value::StringOps::as_str(&s));
         Into::<SomString>::into(s).into_value(self.gc)
     }
 
     pub fn make_int(&self, int: i64) -> TypedValue<'gc, tag::Int> {
+        vm_debug!(self, "alloc:     int {}", int);
         int.into_value(self.gc)
     }
 
     pub fn make_float(&self, float: f64) -> TypedValue<'gc, tag::Float> {
+        vm_debug!(self, "alloc:   float {}", float);
         float.into_value(self.gc)
     }
 
@@ -1171,6 +1212,14 @@ impl<'gc> Vm<'gc> {
     }
 
     pub fn make_object(&self, class: TypedValue<'gc, tag::Class>) -> TypedValue<'gc, tag::Object> {
+        if self.options.debug {
+            if class.is_legal() {
+                vm_debug!(self, "alloc:  object of class {}", class.get().name.value);
+            } else {
+                vm_debug!(self, "alloc:  object of class <uninit>");
+            }
+        }
+
         let field_count = class
             .checked_get()
             .map(|class| class.instance_fields.len())
@@ -1252,6 +1301,39 @@ impl<'gc> Vm<'gc> {
         result
     }
 
+    fn debug_call(&self, dispatch_span: Option<Span>, callee: &Callee, args: &[Value<'gc>]) {
+        if self.options.debug {
+            vm_debug!(self, " call: {} with arg count {}: {:?}", callee.name(), args.len(), args);
+
+            if let Some(span) = dispatch_span {
+                if let Ok(contents) = self.file_loader.get_source().read_span(&span.into(), 0, 0) {
+                    vm_debug!(self, "       span: line {}, column {} in file {}",
+                        contents.line() + 1,
+                        contents.column() + 1,
+                        contents.name().unwrap());
+                    let span_start_line = contents.line();
+
+                    if let Ok(contents) = self.file_loader.get_source().read_span(&span.into(), 2, 2) {
+                        for (i, line) in std::str::from_utf8(contents.data()).unwrap().lines().enumerate() {
+                            vm_debug!(self, "           {:>4} {} {}",
+                                contents.line() + i + 1,
+                                if contents.line() + i == span_start_line { "|" } else { ":" },
+                                line);
+                        }
+                    }
+                }
+            }
+
+            if matches!(callee, Callee::Method { .. }) {
+                vm_debug!(self, "       recv class: {}", args[0].get_class(self).get().name.value);
+            }
+
+            for frame in self.frames.iter().rev() {
+                vm_debug!(self, "       at: {}", frame.callee.name());
+            }
+        }
+    }
+
     fn push_frame(
         &mut self,
         block: &ast::Block,
@@ -1259,6 +1341,8 @@ impl<'gc> Vm<'gc> {
         callee: Callee<'gc>,
         args: Vec<Value<'gc>>,
     ) -> Result<(), VmError> {
+        self.debug_call(dispatch_span, &callee, &args);
+
         check_arg_count(
             &args,
             &block.params,
@@ -1303,18 +1387,6 @@ impl<'gc> Vm<'gc> {
         let local_addresses: HashSet<_> =
             frame.locals.iter().map(|local| local as *const _).collect();
 
-        /*
-        let mut maybe_upvalue = self.upvalues.borrow().clone();
-
-        while let Some(upvalue) = maybe_upvalue {
-            if local_addresses.contains(&(upvalue.get_local() as *const _)) {
-                upvalue.close();
-            }
-
-            maybe_upvalue = upvalue.next.borrow().clone();
-        }
-        */
-
         let mut cell = &self.upvalues;
         let mut upvalue_gc: Gc<'gc, Upvalue<'gc>>;
 
@@ -1357,12 +1429,18 @@ impl<'gc> Vm<'gc> {
         upvalue
     }
 
-    fn print(&mut self, msg: impl Display) {
-        let _ = write!(&mut self.stdout, "{}", msg);
+    fn print(&self, msg: impl Display) {
+        if let Some(mut stdout) = self.stdout.take() {
+            let _ = write!(&mut stdout, "{}", msg);
+            self.stdout.set(Some(stdout));
+        }
     }
 
-    fn eprint(&mut self, msg: impl Display) {
-        let _ = write!(&mut self.stderr, "{}", msg);
+    fn eprint(&self, msg: impl Display) {
+        if let Some(mut stderr) = self.stderr.take() {
+            let _ = write!(&mut stderr, "{}", msg);
+            self.stderr.set(Some(stderr));
+        }
     }
 
     fn full_gc(&self) {
