@@ -3,12 +3,13 @@ mod common;
 use std::fs;
 use std::path::PathBuf;
 
+use rstest::rstest;
 use serde::Deserialize;
+
 use stitch::parse::{BigNumberBehavior, ParserOptions};
 use stitch::sourcemap::SourceMap;
-use test_generator::test_resources;
 
-use common::Matchers;
+use self::common::Matchers;
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -58,14 +59,17 @@ fn test_parser(source_path: PathBuf, cfg: Option<ParserTest>) {
     }
 }
 
-#[test_resources("tests/parser/**/*.som")]
-fn test_parser_stitch(source_path: PathBuf) {
+#[rstest]
+fn test_parser_stitch(#[files("tests/parser/**/*.som")] source_path: PathBuf) {
     test_parser(source_path, None);
 }
 
-#[test_resources("third-party/SOM/TestSuite/**/*.som")]
-#[test_resources("third-party/SOM/Smalltalk/*.som")]
-fn test_parser_som_st(source_path: PathBuf) {
+#[rstest]
+fn test_parser_som_st(
+    #[files("third-party/SOM/TestSuite/**/*.som")]
+    #[files("third-part/SOM/Smalltalk/*.som")]
+    source_path: PathBuf,
+) {
     const FAILING_TEST_NAMES: &[&str] = &[
         // assigns to `self` and `super`, neither of which is supported
         "Self",

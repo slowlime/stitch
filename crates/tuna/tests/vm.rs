@@ -6,16 +6,15 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::SharedStringBuf;
+use rstest::rstest;
 use serde::Deserialize;
-use test_generator::test_resources;
 
 use stitch::file::FileLoader;
 use stitch::sourcemap::{SourceFile, SourceMap};
 use stitch::vm::gc::GarbageCollector;
 use stitch::vm::Vm;
 
-use self::common::Matchers;
+use self::common::{Matchers, SharedStringBuf};
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -71,9 +70,7 @@ impl FileLoader for TestFileLoader {
             return Ok(self.source_map.get_by_name(source_name).unwrap());
         }
 
-        let mut path = PathBuf::from(file!());
-        path.pop();
-        path.push("../third-party/SOM/Smalltalk/");
+        let mut path = PathBuf::from("third-party/SOM/Smalltalk/");
         path.push(format!("{class_name}.som"));
 
         let contents = fs::read_to_string(&path)
@@ -113,7 +110,8 @@ impl FileLoader for TestFileLoader {
     }
 }
 
-fn run_test_class(test_class_path: PathBuf) {
+#[rstest]
+fn test_vm(#[files("tests/vm/**/Test.som")] test_class_path: PathBuf) {
     miette::set_panic_hook();
 
     let class_name = test_class_path.file_stem().unwrap().to_str().unwrap();
@@ -212,9 +210,4 @@ fn run_test_class(test_class_path: PathBuf) {
             }
         }
     }
-}
-
-#[test_resources("tests/vm/**/Test.som")]
-fn test_vm(source_path: PathBuf) {
-    run_test_class(source_path);
 }
