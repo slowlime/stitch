@@ -6,13 +6,13 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use stitch::file::PathFileLoader;
-use stitch::parse::ParserOptions;
-use stitch::util::FormattedWriter;
-use stitch::vm::error::VmErrorKind;
-use stitch::vm::gc::{GarbageCollector, Options as GcOptions};
-use stitch::vm::Vm;
-use stitch::vm::VmOptions;
+use tuna::file::PathFileLoader;
+use tuna::parse::ParserOptions;
+use tuna::util::FormattedWriter;
+use tuna::vm::error::VmErrorKind;
+use tuna::vm::gc::{GarbageCollector, Options as GcOptions};
+use tuna::vm::Vm;
+use tuna::vm::VmOptions;
 
 use crate::args::Args;
 

@@ -1,10 +1,10 @@
 use std::io;
 
-use stitch::file::PathFileLoader;
-use stitch::parse::{ParserOptions, BigNumberBehavior};
-use stitch::util::FormattedWriter;
-use stitch::vm::gc::GarbageCollector;
-use stitch::vm::{Vm, VmOptions};
+use tuna::file::PathFileLoader;
+use tuna::parse::{ParserOptions, BigNumberBehavior};
+use tuna::util::FormattedWriter;
+use tuna::vm::gc::GarbageCollector;
+use tuna::vm::{Vm, VmOptions};
 
 mod common;
 

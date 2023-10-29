@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use rstest::rstest;
 use serde::Deserialize;
 
-use stitch::file::FileLoader;
-use stitch::sourcemap::{SourceFile, SourceMap};
-use stitch::vm::gc::GarbageCollector;
-use stitch::vm::Vm;
+use tuna::file::FileLoader;
+use tuna::sourcemap::{SourceFile, SourceMap};
+use tuna::vm::gc::GarbageCollector;
+use tuna::vm::Vm;
 
 use self::common::{Matchers, SharedStringBuf};
 

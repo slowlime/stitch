@@ -2,8 +2,8 @@ use std::cell::Cell;
 use std::mem;
 use std::rc::Rc;
 
-use stitch::impl_collect;
-use stitch::vm::gc::{Collect, Finalize, GarbageCollector, Gc, GcOnceCell, GcRefCell};
+use tuna::impl_collect;
+use tuna::vm::gc::{Collect, Finalize, GarbageCollector, Gc, GcOnceCell, GcRefCell};
 
 #[derive(Debug)]
 struct DropFlagger(Rc<Cell<usize>>);

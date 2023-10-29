@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use rstest::rstest;
 use serde::Deserialize;
 
-use stitch::parse::{BigNumberBehavior, ParserOptions};
-use stitch::sourcemap::SourceMap;
+use tuna::parse::{BigNumberBehavior, ParserOptions};
+use tuna::sourcemap::SourceMap;
 
 use self::common::Matchers;
 
@@ -35,7 +35,7 @@ fn test_parser(source_path: PathBuf, cfg: Option<ParserTest>) {
     let mut test = cfg.unwrap_or_else(|| common::parse_comment_header(source));
     test.fail = test.fail || !test.fail_message.is_empty();
 
-    let result = match stitch::parse::parse(&source, test.parser_options) {
+    let result = match tuna::parse::parse(&source, test.parser_options) {
         Ok(class) => Ok(class),
 
         Err(e) => Err(miette::Report::new(e).with_source_code(source_map)),
@@ -60,7 +60,7 @@ fn test_parser(source_path: PathBuf, cfg: Option<ParserTest>) {
 }
 
 #[rstest]
-fn test_parser_stitch(#[files("tests/parser/**/*.som")] source_path: PathBuf) {
+fn test_parser_tuna(#[files("tests/parser/**/*.som")] source_path: PathBuf) {
     test_parser(source_path, None);
 }
 

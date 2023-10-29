@@ -686,21 +686,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7c388c1b5e93756d0c740965c41e8822f866621d41acbdf6336a6a168f8840c"
 
 [[package]]
-name = "stitch"
-version = "0.0.1"
-dependencies = [
- "clap",
- "fxhash",
- "miette",
- "phf",
- "regex",
- "rstest",
- "serde",
- "serde_yaml",
- "thiserror",
-]
-
-[[package]]
 name = "strsim"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -784,6 +769,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tuna"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "fxhash",
+ "miette",
+ "phf",
+ "regex",
+ "rstest",
+ "serde",
+ "serde_yaml",
+ "thiserror",
 ]
 
 [[package]]

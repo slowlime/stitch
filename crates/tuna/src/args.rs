@@ -10,7 +10,7 @@ pub enum BigNumberBehavior {
     Saturate,
 }
 
-impl From<BigNumberBehavior> for stitch::parse::BigNumberBehavior {
+impl From<BigNumberBehavior> for tuna::parse::BigNumberBehavior {
     fn from(value: BigNumberBehavior) -> Self {
         match value {
             BigNumberBehavior::Error => Self::Error,
