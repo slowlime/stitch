@@ -2,13 +2,13 @@
 
 pub mod func;
 pub mod ty;
-pub mod value;
+pub mod expr;
 
 use slotmap::{SlotMap, new_key_type};
 
 use self::func::Func;
 use self::ty::{Type, TableType, GlobalType, MemoryType};
-use self::value::Value;
+use self::expr::Expr;
 
 new_key_type! {
     pub struct TypeId;
@@ -17,6 +17,7 @@ new_key_type! {
     pub struct MemoryId;
     pub struct GlobalId;
     pub struct ImportId;
+    pub struct LocalId;
 }
 
 #[derive(Debug, Clone)]
@@ -40,7 +41,7 @@ pub struct Table {
 #[derive(Debug, Clone)]
 pub enum TableDef {
     Import(ImportId),
-    Elems(Vec<Value>),
+    Elems(Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +65,7 @@ pub struct Global {
 #[derive(Debug, Clone)]
 pub enum GlobalDef {
     Import(ImportId),
-    Value(Value),
+    Value(Expr),
 }
 
 #[derive(Debug, Clone)]

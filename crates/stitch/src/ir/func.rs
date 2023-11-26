@@ -1,5 +1,7 @@
-use super::Import;
-use super::ty::FuncType;
+use slotmap::SlotMap;
+
+use super::{Import, LocalId};
+use super::ty::{FuncType, ValType};
 
 #[derive(Debug, Clone)]
 pub enum Func {
@@ -16,4 +18,5 @@ pub struct FuncImport {
 #[derive(Debug, Clone)]
 pub struct FuncBody {
     pub ty: FuncType,
+    pub locals: SlotMap<LocalId, ValType>
 }
