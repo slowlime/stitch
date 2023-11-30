@@ -5,5 +5,6 @@ edition = "2021"
 
 [dependencies]
 slotmap = "1.0.6"
+thiserror = "1.0.50"
 wasm-encoder = { version = "0.36.1", features = ["wasmparser"] }
 wasmparser = "0.116.0"
