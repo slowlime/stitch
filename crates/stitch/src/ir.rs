@@ -4,6 +4,8 @@ pub mod func;
 pub mod ty;
 pub mod expr;
 
+use std::fmt::{self, Display};
+
 use slotmap::{SlotMap, new_key_type};
 
 use self::func::Func;
@@ -20,9 +22,8 @@ new_key_type! {
     pub struct LocalId;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Module {
-    pub version: u16,
     pub types: SlotMap<TypeId, Type>,
     pub funcs: SlotMap<FuncId, Func>,
     pub tables: SlotMap<TableId, Table>,
@@ -81,4 +82,34 @@ pub enum ImportDesc {
     Table(TableType),
     Memory(MemoryType),
     Global(GlobalType),
+}
+
+impl ImportDesc {
+    pub fn kind(&self) -> ImportKind {
+        match self {
+            Self::Func(_) => ImportKind::Func,
+            Self::Table(_) => ImportKind::Table,
+            Self::Memory(_) => ImportKind::Memory,
+            Self::Global(_) => ImportKind::Global,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImportKind {
+    Func,
+    Table,
+    Memory,
+    Global,
+}
+
+impl Display for ImportKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Func => write!(f, "function"),
+            Self::Table => write!(f, "table"),
+            Self::Memory => write!(f, "memory"),
+            Self::Global => write!(f, "global"),
+        }
+    }
 }

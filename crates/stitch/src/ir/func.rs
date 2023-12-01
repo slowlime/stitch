@@ -1,6 +1,6 @@
 use slotmap::SlotMap;
 
-use super::{Import, LocalId};
+use super::{LocalId, ImportId};
 use super::ty::{FuncType, ValType};
 
 #[derive(Debug, Clone)]
@@ -12,7 +12,7 @@ pub enum Func {
 #[derive(Debug, Clone)]
 pub struct FuncImport {
     pub ty: FuncType,
-    pub import_idx: Import,
+    pub import: ImportId,
 }
 
 #[derive(Debug, Clone)]
