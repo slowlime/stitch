@@ -1,7 +1,9 @@
-use thiserror::Error;
-use wasmparser::{BinaryReaderError, CompositeType, Payload, SubType, WasmFeatures};
+use std::ops::Range;
 
-use crate::ir::{self, TypeId, FuncId, TableId, MemoryId, GlobalId, ImportId};
+use thiserror::Error;
+use wasmparser::{BinaryReaderError, CompositeType, ExternalKind, Payload, SubType, WasmFeatures};
+
+use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, MemoryId, TableId, TypeId};
 
 const FEATURES: WasmFeatures = WasmFeatures {
     mutable_global: true,
@@ -37,6 +39,26 @@ pub enum ParseError {
         module: String,
         name: String,
     },
+
+    #[error("element #{element_idx} (segment #{segment_idx}) stored at #{idx} is out of range for table #{table_idx}")]
+    TableElemOutOfRange {
+        element_idx: usize,
+        segment_idx: usize,
+        idx: usize,
+        table_idx: usize,
+    },
+
+    #[error(
+        "data segment #{segment_idx} spans memory bytes 0x{:x}..0x{:x}, \
+        which is out of range for memory #{mem_idx} of size 0x{mem_size:x}",
+        .range.start, .range.end
+    )]
+    DataOutOfRange {
+        segment_idx: usize,
+        range: Range<usize>,
+        mem_idx: usize,
+        mem_size: usize,
+    },
 }
 
 fn make_val_type(val_ty: wasmparser::ValType) -> ir::ty::ValType {
@@ -52,7 +74,10 @@ fn make_val_type(val_ty: wasmparser::ValType) -> ir::ty::ValType {
 }
 
 fn make_elem_type(ref_type: wasmparser::RefType) -> ir::ty::ElemType {
-    assert!(ref_type.is_func_ref(), "unsupported table element type {ref_type}");
+    assert!(
+        ref_type.is_func_ref(),
+        "unsupported table element type {ref_type}"
+    );
 
     ir::ty::ElemType::FuncType
 }
@@ -98,7 +123,7 @@ struct Parser {
     imports: Vec<ImportId>,
 }
 
-pub type Result<T> = ::std::result::Result<T, ParseError>;
+pub type Result<T, E = ParseError> = ::std::result::Result<T, E>;
 
 impl Parser {
     fn add_ty(&mut self, ty: ir::ty::Type) -> TypeId {
@@ -152,14 +177,20 @@ impl Parser {
                 }));
             }
 
-            desc => return Err(ParseError::UnsupportedImport {
-                kind: desc.kind(),
-                module: import.module.clone(),
-                name: import.name.clone(),
-            }),
+            desc => {
+                return Err(ParseError::UnsupportedImport {
+                    kind: desc.kind(),
+                    module: import.module.clone(),
+                    name: import.name.clone(),
+                })
+            }
         }
 
         Ok(id)
+    }
+
+    fn add_export(&mut self, export: ir::Export) -> ExportId {
+        self.module.exports.insert(export)
     }
 
     fn parse(mut self, bytes: &[u8]) -> Result<ir::Module> {
@@ -188,47 +219,42 @@ impl Parser {
 
                 Payload::FunctionSection(reader) => {
                     validator.function_section(&reader)?;
-                    todo!("parse functions")
+                    self.parse_funcs(reader)?;
                 }
 
                 Payload::TableSection(reader) => {
                     validator.table_section(&reader)?;
-                    todo!("parse tables")
+                    self.parse_tables(reader)?;
                 }
 
                 Payload::MemorySection(reader) => {
                     validator.memory_section(&reader)?;
-                    todo!("parse memory contents")
+                    self.parse_memories(reader)?;
                 }
 
                 Payload::GlobalSection(reader) => {
                     validator.global_section(&reader)?;
-                    todo!("parse globals")
+                    self.parse_globals(reader)?;
                 }
 
                 Payload::ExportSection(reader) => {
                     validator.export_section(&reader)?;
-                    todo!("parse exports")
+                    self.parse_exports(reader)?;
                 }
 
                 Payload::StartSection { func, range } => {
                     validator.start_section(func, &range)?;
-                    todo!("parse the start section")
+                    self.parse_start(func)?;
                 }
 
                 Payload::ElementSection(reader) => {
                     validator.element_section(&reader)?;
-                    todo!("parse elements")
-                }
-
-                Payload::DataCountSection { count, range } => {
-                    validator.data_count_section(count, &range)?;
-                    todo!("???")
+                    self.parse_elements(reader)?;
                 }
 
                 Payload::DataSection(reader) => {
                     validator.data_section(&reader)?;
-                    todo!("parse data")
+                    self.parse_data(reader)?;
                 }
 
                 Payload::CodeSectionStart { count, range, .. } => {
@@ -258,14 +284,19 @@ impl Parser {
         Ok(self.module)
     }
 
-    fn parse_types(&mut self, reader: wasmparser::TypeSectionReader) -> Result<()> {
+    fn parse_types(&mut self, reader: wasmparser::TypeSectionReader<'_>) -> Result<()> {
         for rec_group in reader {
             for SubType { composite_type, .. } in rec_group?.into_types() {
                 let CompositeType::Func(func_ty) = composite_type else {
                     unreachable!()
                 };
 
-                let params = func_ty.params().iter().copied().map(make_val_type).collect();
+                let params = func_ty
+                    .params()
+                    .iter()
+                    .copied()
+                    .map(make_val_type)
+                    .collect();
                 let ret = func_ty.results().get(0).copied().map(make_val_type);
                 let ty = ir::ty::Type::Func(ir::ty::FuncType { params, ret });
                 self.add_ty(ty);
@@ -275,7 +306,7 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_imports(&mut self, reader: wasmparser::ImportSectionReader) -> Result<()> {
+    fn parse_imports(&mut self, reader: wasmparser::ImportSectionReader<'_>) -> Result<()> {
         for import in reader {
             let wasmparser::Import { module, name, ty } = import?;
 
@@ -283,16 +314,192 @@ impl Parser {
                 module: module.to_owned(),
                 name: name.to_owned(),
                 desc: match ty {
-                    wasmparser::TypeRef::Func(idx) => ir::ImportDesc::Func(self.types[idx as usize]),
-                    wasmparser::TypeRef::Table(table_ty) => ir::ImportDesc::Table(make_table_type(table_ty)),
-                    wasmparser::TypeRef::Memory(mem_ty) => ir::ImportDesc::Memory(make_mem_type(mem_ty)),
-                    wasmparser::TypeRef::Global(global_ty) => ir::ImportDesc::Global(make_global_type(global_ty)),
+                    wasmparser::TypeRef::Func(idx) => {
+                        ir::ImportDesc::Func(self.types[idx as usize])
+                    }
+                    wasmparser::TypeRef::Table(table_ty) => {
+                        ir::ImportDesc::Table(make_table_type(table_ty))
+                    }
+                    wasmparser::TypeRef::Memory(mem_ty) => {
+                        ir::ImportDesc::Memory(make_mem_type(mem_ty))
+                    }
+                    wasmparser::TypeRef::Global(global_ty) => {
+                        ir::ImportDesc::Global(make_global_type(global_ty))
+                    }
                     wasmparser::TypeRef::Tag(_) => unreachable!("unsupported type {ty:?}"),
                 },
             })?;
         }
 
         Ok(())
+    }
+
+    fn parse_funcs(&mut self, reader: wasmparser::FunctionSectionReader<'_>) -> Result<()> {
+        for func_ty_idx in reader {
+            let ty = match &self.module.types[self.types[func_ty_idx? as usize]] {
+                ir::ty::Type::Func(func_ty) => func_ty.clone(),
+            };
+
+            self.add_func(ir::func::Func::Body(ir::func::FuncBody::new(ty)));
+        }
+
+        Ok(())
+    }
+
+    fn parse_tables(&mut self, reader: wasmparser::TableSectionReader<'_>) -> Result<()> {
+        for table in reader {
+            let table = table?;
+            let table_ty = make_table_type(table.ty);
+            assert!(matches!(table.init, wasmparser::TableInit::RefNull));
+
+            self.add_table(ir::Table::new(table_ty));
+        }
+
+        Ok(())
+    }
+
+    fn parse_memories(&mut self, reader: wasmparser::MemorySectionReader<'_>) -> Result<()> {
+        for memory_type in reader {
+            let ty = make_mem_type(memory_type?);
+            let size = ty.limits.min as usize;
+
+            self.add_mem(ir::Memory {
+                ty,
+                def: ir::MemoryDef::Bytes(vec![0; size]),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn parse_globals(&mut self, reader: wasmparser::GlobalSectionReader<'_>) -> Result<()> {
+        for global in reader {
+            let global = global?;
+            let ty = make_global_type(global.ty);
+            let expr = self.parse_expr(global.init_expr.get_operators_reader())?;
+            let def = ir::GlobalDef::Value(expr);
+
+            self.add_global(ir::Global { ty, def });
+        }
+
+        Ok(())
+    }
+
+    fn parse_exports(&mut self, reader: wasmparser::ExportSectionReader<'_>) -> Result<()> {
+        for export in reader {
+            let export = export?;
+            let idx = export.index as usize;
+
+            let def = match export.kind {
+                ExternalKind::Func => ir::ExportDef::Func(self.funcs[idx]),
+                ExternalKind::Table => ir::ExportDef::Table(self.tables[idx]),
+                ExternalKind::Memory => ir::ExportDef::Memory(self.mems[idx]),
+                ExternalKind::Global => ir::ExportDef::Global(self.globals[idx]),
+                _ => unreachable!(),
+            };
+
+            self.add_export(ir::Export {
+                name: export.name.to_owned(),
+                def,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn parse_start(&mut self, func_idx: u32) -> Result<()> {
+        self.module.start = Some(self.funcs[func_idx as usize]);
+
+        Ok(())
+    }
+
+    fn parse_elements(&mut self, reader: wasmparser::ElementSectionReader<'_>) -> Result<()> {
+        for (segment_idx, elem) in reader.into_iter().enumerate() {
+            let elem = elem?;
+
+            let wasmparser::ElementKind::Active {
+                table_index,
+                offset_expr,
+            } = elem.kind
+            else {
+                unreachable!();
+            };
+            let table_idx = table_index.unwrap_or(0);
+            let offset = self
+                .parse_expr(offset_expr.get_operators_reader())?
+                .as_u32()
+                .expect("table offset expr must have type i32");
+
+            let table = &mut self.module.tables[self.tables[table_idx as usize]];
+            let elems = match table.def {
+                ir::TableDef::Elems(ref mut elems) => elems,
+                _ => unreachable!("table imports are not supported"),
+            };
+
+            let wasmparser::ElementItems::Functions(func_reader) = elem.items else {
+                unreachable!("unsupported table content type");
+            };
+
+            for (i, func_idx) in func_reader.into_iter().enumerate() {
+                let func = self.funcs[func_idx? as usize];
+                let idx = offset as usize + i;
+
+                if idx >= elems.len() {
+                    return Err(ParseError::TableElemOutOfRange {
+                        element_idx: i,
+                        segment_idx,
+                        idx,
+                        table_idx: table_idx as usize,
+                    });
+                }
+
+                elems[idx] = Some(func);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn parse_data(&mut self, reader: wasmparser::DataSectionReader<'_>) -> Result<()> {
+        for (segment_idx, data) in reader.into_iter().enumerate() {
+            let data = data?;
+            let wasmparser::DataKind::Active {
+                memory_index: mem_idx,
+                offset_expr,
+            } = data.kind
+            else {
+                unreachable!();
+            };
+
+            let mem_idx = mem_idx as usize;
+            let offset = self
+                .parse_expr(offset_expr.get_operators_reader())?
+                .as_u32()
+                .expect("data segment offset must be an i32") as usize;
+            let range = offset..(data.data.len() + offset as usize);
+
+            let ir::MemoryDef::Bytes(ref mut bytes) = self.module.mems[self.mems[mem_idx]].def
+            else {
+                unreachable!("memory imports are not supported");
+            };
+
+            if range.end > bytes.len() {
+                return Err(ParseError::DataOutOfRange {
+                    segment_idx,
+                    range,
+                    mem_idx,
+                    mem_size: bytes.len(),
+                });
+            }
+
+            bytes[range].copy_from_slice(data.data);
+        }
+
+        Ok(())
+    }
+
+    fn parse_expr(&mut self, reader: wasmparser::OperatorsReader<'_>) -> Result<ir::expr::Expr> {
+        todo!()
     }
 }
 

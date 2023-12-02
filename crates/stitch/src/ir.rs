@@ -19,6 +19,7 @@ new_key_type! {
     pub struct MemoryId;
     pub struct GlobalId;
     pub struct ImportId;
+    pub struct ExportId;
     pub struct LocalId;
 }
 
@@ -31,6 +32,7 @@ pub struct Module {
     pub globals: SlotMap<GlobalId, Global>,
     pub start: Option<FuncId>,
     pub imports: SlotMap<ImportId, Import>,
+    pub exports: SlotMap<ExportId, Export>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,10 +41,21 @@ pub struct Table {
     pub def: TableDef,
 }
 
+impl Table {
+    pub fn new(ty: TableType) -> Self {
+        let elems = vec![None; ty.limits.min as usize];
+
+        Self {
+            ty,
+            def: TableDef::Elems(elems),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum TableDef {
     Import(ImportId),
-    Elems(Vec<Expr>),
+    Elems(Vec<Option<FuncId>>),
 }
 
 #[derive(Debug, Clone)]
@@ -112,4 +125,18 @@ impl Display for ImportKind {
             Self::Global => write!(f, "global"),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Export {
+    pub name: String,
+    pub def: ExportDef,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExportDef {
+    Func(FuncId),
+    Table(TableId),
+    Memory(MemoryId),
+    Global(GlobalId),
 }

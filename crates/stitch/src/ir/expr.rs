@@ -185,3 +185,47 @@ pub enum Expr {
     Call(FuncId, Vec<BExpr>),
     CallIndirect(TypeId, BExpr, Vec<BExpr>),
 }
+
+impl Expr {
+    pub fn as_i32(&self) -> Option<i32> {
+        match *self {
+            Self::I32(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_u32(&self) -> Option<u32> {
+        match *self {
+            Self::I32(value) => Some(value as u32),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match *self {
+            Self::I64(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_u64(&self) -> Option<u64> {
+        match *self {
+            Self::I64(value) => Some(value as u64),
+            _ => None,
+        }
+    }
+
+    pub fn as_f32(&self) -> Option<f32> {
+        match *self {
+            Self::F32(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match *self {
+            Self::F64(value) => Some(value),
+            _ => None,
+        }
+    }
+}
