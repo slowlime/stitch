@@ -11,6 +11,20 @@ pub enum Type {
     Func(FuncType),
 }
 
+impl Type {
+    pub fn as_func(&self) -> &FuncType {
+        match self {
+            Self::Func(ty) => ty,
+        }
+    }
+
+    pub fn as_func_mut(&self) -> &FuncType {
+        match self {
+            Self::Func(ty) => ty,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FuncType {
     pub params: Vec<ValType>,

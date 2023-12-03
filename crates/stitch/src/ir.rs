@@ -8,9 +8,10 @@ use std::fmt::{self, Display};
 
 use slotmap::{SlotMap, new_key_type};
 
-use self::func::Func;
 use self::ty::{Type, TableType, GlobalType, MemoryType};
-use self::expr::Expr;
+
+pub use self::func::{Func, FuncBody};
+pub use self::expr::Expr;
 
 new_key_type! {
     pub struct TypeId;

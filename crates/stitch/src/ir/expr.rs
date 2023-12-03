@@ -1,5 +1,5 @@
 use super::ty::ValType;
-use super::{LocalId, GlobalId, FuncId, TypeId};
+use super::{FuncId, GlobalId, LocalId, TypeId};
 
 type BExpr = Box<Expr>;
 
@@ -9,7 +9,7 @@ pub struct MemArg {
     pub align: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub enum Expr {
     // numeric instructions
     I32(i32),
@@ -173,17 +173,18 @@ pub enum Expr {
     MemoryGrow(BExpr),
 
     // control instructions
+    #[default]
     Nop,
     Unreachable,
-    Block(Option<ValType>, Vec<BExpr>),
-    Loop(Option<ValType>, Vec<BExpr>),
-    If(Option<ValType>, Vec<BExpr>, Vec<BExpr>),
+    Block(Option<ValType>, Vec<Expr>),
+    Loop(Option<ValType>, Vec<Expr>),
+    If(Option<ValType>, Vec<Expr>, Vec<Expr>),
     Br(u32, Option<BExpr>),
     BrIf(u32, BExpr, Option<BExpr>),
     BrTable(Vec<u32>, u32, BExpr, Option<BExpr>),
     Return(BExpr),
-    Call(FuncId, Vec<BExpr>),
-    CallIndirect(TypeId, BExpr, Vec<BExpr>),
+    Call(FuncId, Vec<Expr>),
+    CallIndirect(TypeId, BExpr, Vec<Expr>),
 }
 
 impl Expr {

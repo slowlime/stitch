@@ -1,5 +1,6 @@
 use slotmap::SlotMap;
 
+use super::expr::Expr;
 use super::{LocalId, ImportId};
 use super::ty::{FuncType, ValType};
 
@@ -7,6 +8,29 @@ use super::ty::{FuncType, ValType};
 pub enum Func {
     Import(FuncImport),
     Body(FuncBody),
+}
+
+impl Func {
+    pub fn ty(&self) -> &FuncType {
+        match self {
+            Self::Import(import) => &import.ty,
+            Self::Body(body) => &body.ty,
+        }
+    }
+
+    pub fn body(&self) -> Option<&FuncBody> {
+        match self {
+            Self::Body(body) => Some(body),
+            _ => None,
+        }
+    }
+
+    pub fn body_mut(&mut self) -> Option<&mut FuncBody> {
+        match self {
+            Self::Body(body) => Some(body),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -18,7 +42,9 @@ pub struct FuncImport {
 #[derive(Debug, Clone)]
 pub struct FuncBody {
     pub ty: FuncType,
-    pub locals: SlotMap<LocalId, ValType>
+    pub locals: SlotMap<LocalId, ValType>,
+    pub params: Vec<LocalId>,
+    pub body: Expr,
 }
 
 impl FuncBody {
@@ -26,6 +52,8 @@ impl FuncBody {
         Self {
             ty,
             locals: Default::default(),
+            params: Default::default(),
+            body: Default::default(),
         }
     }
 }

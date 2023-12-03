@@ -1,7 +1,9 @@
 use std::ops::Range;
 
 use thiserror::Error;
-use wasmparser::{BinaryReaderError, CompositeType, ExternalKind, Payload, SubType, WasmFeatures};
+use wasmparser::{
+    BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
+};
 
 use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, MemoryId, TableId, TypeId};
 
@@ -73,10 +75,10 @@ fn make_val_type(val_ty: wasmparser::ValType) -> ir::ty::ValType {
     }
 }
 
-fn make_elem_type(ref_type: wasmparser::RefType) -> ir::ty::ElemType {
+fn make_elem_type(ref_ty: wasmparser::RefType) -> ir::ty::ElemType {
     assert!(
-        ref_type.is_func_ref(),
-        "unsupported table element type {ref_type}"
+        ref_ty.is_func_ref(),
+        "unsupported table element type {ref_ty}"
     );
 
     ir::ty::ElemType::FuncType
@@ -112,6 +114,22 @@ fn make_global_type(global_ty: wasmparser::GlobalType) -> ir::ty::GlobalType {
     }
 }
 
+fn make_block_type(block_ty: wasmparser::BlockType) -> Option<ir::ty::ValType> {
+    match block_ty {
+        wasmparser::BlockType::Empty => None,
+        wasmparser::BlockType::Type(ty) => Some(make_val_type(ty)),
+        _ => unreachable!("func block types are not supported"),
+    }
+}
+
+#[derive(Debug, Default)]
+struct ImportCount {
+    funcs: usize,
+    tables: usize,
+    mems: usize,
+    globals: usize,
+}
+
 #[derive(Debug, Default)]
 struct Parser {
     module: ir::Module,
@@ -121,6 +139,8 @@ struct Parser {
     mems: Vec<MemoryId>,
     globals: Vec<GlobalId>,
     imports: Vec<ImportId>,
+
+    import_count: ImportCount,
 }
 
 pub type Result<T, E = ParseError> = ::std::result::Result<T, E>;
@@ -133,7 +153,7 @@ impl Parser {
         id
     }
 
-    fn add_func(&mut self, func: ir::func::Func) -> FuncId {
+    fn add_func(&mut self, func: ir::Func) -> FuncId {
         let id = self.module.funcs.insert(func);
         self.funcs.push(id);
 
@@ -167,12 +187,17 @@ impl Parser {
 
         let import = &self.module.imports[id];
 
+        match import.desc.kind() {
+            ir::ImportKind::Func => self.import_count.funcs += 1,
+            ir::ImportKind::Table => self.import_count.tables += 1,
+            ir::ImportKind::Memory => self.import_count.mems += 1,
+            ir::ImportKind::Global => self.import_count.globals += 1,
+        }
+
         match &import.desc {
             ir::ImportDesc::Func(ty_idx) => {
-                self.add_func(ir::func::Func::Import(ir::func::FuncImport {
-                    ty: match &self.module.types[*ty_idx] {
-                        ir::ty::Type::Func(ty) => ty.clone(),
-                    },
+                self.add_func(ir::Func::Import(ir::func::FuncImport {
+                    ty: self.module.types[*ty_idx].as_func().clone(),
                     import: id,
                 }));
             }
@@ -196,6 +221,7 @@ impl Parser {
     fn parse(mut self, bytes: &[u8]) -> Result<ir::Module> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = wasmparser::Validator::new_with_features(FEATURES);
+        let mut code_sections: usize = 0;
 
         for payload in parser.parse_all(bytes) {
             match payload? {
@@ -266,7 +292,9 @@ impl Parser {
                         .code_section_entry(&func)?
                         .into_validator(Default::default())
                         .validate(&func)?;
-                    todo!("parse the function body")
+                    let idx = self.import_count.funcs + code_sections;
+                    code_sections += 1;
+                    self.parse_code(self.funcs[idx], func)?;
                 }
 
                 Payload::CustomSection(_) => {}
@@ -336,11 +364,15 @@ impl Parser {
 
     fn parse_funcs(&mut self, reader: wasmparser::FunctionSectionReader<'_>) -> Result<()> {
         for func_ty_idx in reader {
-            let ty = match &self.module.types[self.types[func_ty_idx? as usize]] {
-                ir::ty::Type::Func(func_ty) => func_ty.clone(),
-            };
+            let ty = self.module.types[self.types[func_ty_idx? as usize]].as_func().clone();
+            let mut body = ir::FuncBody::new(ty);
 
-            self.add_func(ir::func::Func::Body(ir::func::FuncBody::new(ty)));
+            for param_ty in &body.ty.params {
+                let local_id = body.locals.insert(param_ty.clone());
+                body.params.push(local_id);
+            }
+
+            self.add_func(ir::Func::Body(body));
         }
 
         Ok(())
@@ -376,7 +408,7 @@ impl Parser {
         for global in reader {
             let global = global?;
             let ty = make_global_type(global.ty);
-            let expr = self.parse_expr(global.init_expr.get_operators_reader())?;
+            let expr = self.parse_expr(true, global.init_expr.get_operators_reader())?;
             let def = ir::GlobalDef::Value(expr);
 
             self.add_global(ir::Global { ty, def });
@@ -426,7 +458,7 @@ impl Parser {
             };
             let table_idx = table_index.unwrap_or(0);
             let offset = self
-                .parse_expr(offset_expr.get_operators_reader())?
+                .parse_expr(true, offset_expr.get_operators_reader())?
                 .as_u32()
                 .expect("table offset expr must have type i32");
 
@@ -473,7 +505,7 @@ impl Parser {
 
             let mem_idx = mem_idx as usize;
             let offset = self
-                .parse_expr(offset_expr.get_operators_reader())?
+                .parse_expr(true, offset_expr.get_operators_reader())?
                 .as_u32()
                 .expect("data segment offset must be an i32") as usize;
             let range = offset..(data.data.len() + offset as usize);
@@ -498,7 +530,189 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_expr(&mut self, reader: wasmparser::OperatorsReader<'_>) -> Result<ir::expr::Expr> {
+    fn parse_code(&mut self, func_id: FuncId, body: wasmparser::FunctionBody<'_>) -> Result<()> {
+        let locals_reader = body.get_locals_reader()?;
+        let ops_reader = body.get_operators_reader()?;
+        let mut locals = vec![];
+        let body = self.module.funcs[func_id].body_mut().unwrap();
+
+        for local in locals_reader {
+            let (count, val_type) = local?;
+            let ty = make_val_type(val_type);
+
+            for _ in 0..count {
+                locals.push(body.locals.insert(ty.clone()));
+            }
+        }
+
+        let has_return = body.ty.ret.is_some();
+        self.module.funcs[func_id].body_mut().unwrap().body =
+            self.parse_expr(has_return, ops_reader)?;
+
+        Ok(())
+    }
+
+    fn parse_expr(
+        &mut self,
+        has_return: bool,
+        reader: wasmparser::OperatorsReader<'_>,
+    ) -> Result<ir::Expr> {
+        use ir::Expr;
+
+        #[derive(Debug)]
+        struct Block {
+            branch: u8,
+            has_return: bool,
+            exprs: Vec<Expr>,
+        }
+
+        impl Block {
+            fn main(has_return: bool) -> Self {
+                Self {
+                    branch: 0,
+                    has_return,
+                    exprs: vec![],
+                }
+            }
+
+            fn branch(branch: u8, has_return: bool) -> Self {
+                Self {
+                    branch,
+                    has_return,
+                    exprs: vec![],
+                }
+            }
+        }
+
+        let mut blocks = vec![Block::main(has_return)];
+
+        fn capture_br_expr(blocks: &mut Vec<Block>, relative_depth: u32) -> Option<Box<ir::Expr>> {
+            blocks[blocks.len() - relative_depth as usize - 1]
+                .has_return
+                .then(|| Box::new(blocks.last_mut().unwrap().exprs.pop().unwrap()))
+        }
+
+        fn exprs(blocks: &mut Vec<Block>) -> &mut Vec<ir::Expr> {
+            &mut blocks.last_mut().unwrap().exprs
+        }
+
+        fn pop_expr(blocks: &mut Vec<Block>) -> ir::Expr {
+            // FIXME: THIS IS WRONG and we may need to introduce new blocks
+            exprs(blocks).pop().unwrap()
+        }
+
+        // FIXME: THIS IS WRONG and we have track (and drop) unreachable code
+        for op in reader {
+            let expr = match op? {
+                Operator::Unreachable => Expr::Unreachable,
+                Operator::Nop => Expr::Nop,
+
+                Operator::Block { blockty } => {
+                    let ty = make_block_type(blockty);
+                    let has_return = ty.is_some();
+                    exprs(&mut blocks).push(Expr::Block(ty, vec![]));
+                    blocks.push(Block::main(has_return));
+
+                    continue;
+                }
+
+                Operator::Loop { blockty } => {
+                    let ty = make_block_type(blockty);
+                    let has_return = ty.is_some();
+                    exprs(&mut blocks).push(Expr::Loop(ty, vec![]));
+                    blocks.push(Block::main(has_return));
+
+                    continue;
+                }
+
+                Operator::If { blockty } => {
+                    let ty = make_block_type(blockty);
+                    let has_return = ty.is_some();
+                    exprs(&mut blocks).push(Expr::If(ty, vec![], vec![]));
+                    blocks.push(Block::main(has_return));
+
+                    continue;
+                }
+
+                op @ (Operator::Else | Operator::End) => {
+                    let block = blocks.pop().unwrap();
+
+                    let exprs = match exprs(&mut blocks).last_mut().unwrap() {
+                        Expr::Block(_, exprs) => exprs,
+                        Expr::Loop(_, exprs) => exprs,
+                        Expr::If(_, exprs, _) if block.branch == 0 => exprs,
+                        Expr::If(_, _, exprs) => exprs,
+                        _ => unreachable!(),
+                    };
+                    *exprs = block.exprs;
+
+                    if matches!(op, Operator::Else) {
+                        blocks.push(Block::branch(1, block.has_return));
+                    }
+
+                    continue;
+                }
+
+                Operator::Br { relative_depth } => {
+                    Expr::Br(relative_depth, capture_br_expr(&mut blocks, relative_depth))
+                }
+
+                Operator::BrIf { relative_depth } => {
+                    let condition = Box::new(pop_expr(&mut blocks));
+                    let ret_expr = capture_br_expr(&mut blocks, relative_depth);
+
+                    Expr::BrIf(relative_depth, condition, ret_expr)
+                }
+
+                Operator::BrTable { targets } => {
+                    let condition = Box::new(pop_expr(&mut blocks));
+                    let ret_expr = capture_br_expr(&mut blocks, targets.default());
+
+                    Expr::BrTable(
+                        targets.targets().collect::<Result<Vec<_>, _>>()?,
+                        targets.default(),
+                        condition,
+                        ret_expr,
+                    )
+                }
+
+                Operator::Return => Expr::Return(Box::new(pop_expr(&mut blocks))),
+
+                Operator::Call { function_index } => {
+                    let func_id = self.funcs[function_index as usize];
+                    let func_ty = self.module.funcs[func_id].ty();
+                    let args = (0..func_ty.params.len()).map(|_| pop_expr(&mut blocks)).collect();
+
+                    Expr::Call(func_id, args)
+                }
+
+                Operator::CallIndirect { type_index, .. } => {
+                    let type_id = self.types[type_index as usize];
+                    let func_ty = self.module.types[type_id].as_func();
+                    let idx_expr = pop_expr(&mut blocks);
+                    let args = (0..func_ty.params.len()).map(|_| pop_expr(&mut blocks)).collect();
+
+                    Expr::CallIndirect(type_id, Box::new(idx_expr), args)
+                }
+
+                Operator::Drop => Expr::Drop(Box::new(pop_expr(&mut blocks))),
+
+                Operator::Select => {
+                    let condition = Box::new(pop_expr(&mut blocks));
+                    let v1 = Box::new(pop_expr(&mut blocks));
+                    let v0 = Box::new(pop_expr(&mut blocks));
+
+                    Expr::Select(v0, v1, condition)
+                }
+
+                // TODO: the rest of the operands
+
+                _ => todo!()
+            };
+
+            exprs(&mut blocks).push(expr);
+        }
+
         todo!()
     }
 }
