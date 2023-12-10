@@ -55,7 +55,7 @@ pub enum Expr {
     I32ShrS(BExpr, BExpr),
     I32ShrU(BExpr, BExpr),
     I32Rotl(BExpr, BExpr),
-    I32Rolr(BExpr, BExpr),
+    I32Rotr(BExpr, BExpr),
 
     I64Add(BExpr, BExpr),
     I64Sub(BExpr, BExpr),
@@ -71,7 +71,7 @@ pub enum Expr {
     I64ShrS(BExpr, BExpr),
     I64ShrU(BExpr, BExpr),
     I64Rotl(BExpr, BExpr),
-    I64Rolr(BExpr, BExpr),
+    I64Rotr(BExpr, BExpr),
 
     F32Add(BExpr, BExpr),
     F32Sub(BExpr, BExpr),
@@ -127,6 +127,39 @@ pub enum Expr {
     F64Gt(BExpr, BExpr),
     F64Le(BExpr, BExpr),
     F64Ge(BExpr, BExpr),
+
+    I32WrapI64(BExpr),
+
+    I64ExtendI32S(BExpr),
+    I64ExtendI32U(BExpr),
+
+    I32TruncF32S(BExpr),
+    I32TruncF32U(BExpr),
+    I32TruncF64S(BExpr),
+    I32TruncF64U(BExpr),
+
+    I64TruncF32S(BExpr),
+    I64TruncF32U(BExpr),
+    I64TruncF64S(BExpr),
+    I64TruncF64U(BExpr),
+
+    F32DemoteF64(BExpr),
+    F64PromoteF32(BExpr),
+
+    F32ConvertI32S(BExpr),
+    F32ConvertI32U(BExpr),
+    F32ConvertI64S(BExpr),
+    F32ConvertI64U(BExpr),
+
+    F64ConvertI32S(BExpr),
+    F64ConvertI32U(BExpr),
+    F64ConvertI64S(BExpr),
+    F64ConvertI64U(BExpr),
+
+    F32ReinterpretI32(BExpr),
+    F64ReinterpretI64(BExpr),
+    I32ReinterpretF32(BExpr),
+    I64ReinterpretF64(BExpr),
 
     // parametric instructions
     Drop(BExpr),
