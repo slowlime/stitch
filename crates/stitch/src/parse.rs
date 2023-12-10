@@ -5,7 +5,7 @@ use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
-use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, MemoryId, TableId, TypeId};
+use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, LocalId, MemoryId, TableId, TypeId};
 
 const FEATURES: WasmFeatures = WasmFeatures {
     mutable_global: true,
@@ -119,6 +119,13 @@ fn make_block_type(block_ty: wasmparser::BlockType) -> Option<ir::ty::ValType> {
         wasmparser::BlockType::Empty => None,
         wasmparser::BlockType::Type(ty) => Some(make_val_type(ty)),
         _ => unreachable!("func block types are not supported"),
+    }
+}
+
+fn make_mem_arg(mem_arg: wasmparser::MemArg) -> ir::expr::MemArg {
+    ir::expr::MemArg {
+        offset: mem_arg.offset as u32,
+        align: mem_arg.align as u32,
     }
 }
 
@@ -364,7 +371,9 @@ impl Parser {
 
     fn parse_funcs(&mut self, reader: wasmparser::FunctionSectionReader<'_>) -> Result<()> {
         for func_ty_idx in reader {
-            let ty = self.module.types[self.types[func_ty_idx? as usize]].as_func().clone();
+            let ty = self.module.types[self.types[func_ty_idx? as usize]]
+                .as_func()
+                .clone();
             let mut body = ir::FuncBody::new(ty);
 
             for param_ty in &body.ty.params {
@@ -408,7 +417,7 @@ impl Parser {
         for global in reader {
             let global = global?;
             let ty = make_global_type(global.ty);
-            let expr = self.parse_expr(true, global.init_expr.get_operators_reader())?;
+            let expr = self.parse_expr(None, true, global.init_expr.get_operators_reader())?;
             let def = ir::GlobalDef::Value(expr);
 
             self.add_global(ir::Global { ty, def });
@@ -458,7 +467,7 @@ impl Parser {
             };
             let table_idx = table_index.unwrap_or(0);
             let offset = self
-                .parse_expr(true, offset_expr.get_operators_reader())?
+                .parse_expr(None, true, offset_expr.get_operators_reader())?
                 .as_u32()
                 .expect("table offset expr must have type i32");
 
@@ -505,7 +514,7 @@ impl Parser {
 
             let mem_idx = mem_idx as usize;
             let offset = self
-                .parse_expr(true, offset_expr.get_operators_reader())?
+                .parse_expr(None, true, offset_expr.get_operators_reader())?
                 .as_u32()
                 .expect("data segment offset must be an i32") as usize;
             let range = offset..(data.data.len() + offset as usize);
@@ -533,8 +542,8 @@ impl Parser {
     fn parse_code(&mut self, func_id: FuncId, body: wasmparser::FunctionBody<'_>) -> Result<()> {
         let locals_reader = body.get_locals_reader()?;
         let ops_reader = body.get_operators_reader()?;
-        let mut locals = vec![];
         let body = self.module.funcs[func_id].body_mut().unwrap();
+        let mut locals = body.params.clone();
 
         for local in locals_reader {
             let (count, val_type) = local?;
@@ -546,14 +555,15 @@ impl Parser {
         }
 
         let has_return = body.ty.ret.is_some();
-        self.module.funcs[func_id].body_mut().unwrap().body =
-            self.parse_expr(has_return, ops_reader)?;
+        let body = self.parse_expr(Some(&locals), has_return, ops_reader)?;
+        self.module.funcs[func_id].body_mut().unwrap().body = body;
 
         Ok(())
     }
 
     fn parse_expr(
         &mut self,
+        locals: Option<&[LocalId]>,
         has_return: bool,
         reader: wasmparser::OperatorsReader<'_>,
     ) -> Result<ir::Expr> {
@@ -681,7 +691,9 @@ impl Parser {
                 Operator::Call { function_index } => {
                     let func_id = self.funcs[function_index as usize];
                     let func_ty = self.module.funcs[func_id].ty();
-                    let args = (0..func_ty.params.len()).map(|_| pop_expr(&mut blocks)).collect();
+                    let args = (0..func_ty.params.len())
+                        .map(|_| pop_expr(&mut blocks))
+                        .collect();
 
                     Expr::Call(func_id, args)
                 }
@@ -690,7 +702,9 @@ impl Parser {
                     let type_id = self.types[type_index as usize];
                     let func_ty = self.module.types[type_id].as_func();
                     let idx_expr = pop_expr(&mut blocks);
-                    let args = (0..func_ty.params.len()).map(|_| pop_expr(&mut blocks)).collect();
+                    let args = (0..func_ty.params.len())
+                        .map(|_| pop_expr(&mut blocks))
+                        .collect();
 
                     Expr::CallIndirect(type_id, Box::new(idx_expr), args)
                 }
@@ -705,9 +719,156 @@ impl Parser {
                     Expr::Select(v0, v1, condition)
                 }
 
+                Operator::LocalGet { local_index } => {
+                    Expr::LocalGet(locals.unwrap()[local_index as usize])
+                }
+
+                Operator::LocalSet { local_index } => Expr::LocalSet(
+                    locals.unwrap()[local_index as usize],
+                    Box::new(pop_expr(&mut blocks)),
+                ),
+
+                Operator::LocalTee { local_index } => Expr::LocalTee(
+                    locals.unwrap()[local_index as usize],
+                    Box::new(pop_expr(&mut blocks)),
+                ),
+
+                Operator::GlobalGet { global_index } => {
+                    Expr::GlobalGet(self.globals[global_index as usize])
+                }
+
+                Operator::GlobalSet { global_index } => Expr::GlobalSet(
+                    self.globals[global_index as usize],
+                    Box::new(pop_expr(&mut blocks)),
+                ),
+
+                Operator::I32Load { memarg } => {
+                    Expr::I32Load(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I64Load { memarg } => {
+                    Expr::I64Load(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::F32Load { memarg } => {
+                    Expr::F32Load(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::F64Load { memarg } => {
+                    Expr::F64Load(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I32Load8S { memarg } => {
+                    Expr::I32Load8S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I32Load8U { memarg } => {
+                    Expr::I32Load8U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I32Load16S { memarg } => {
+                    Expr::I32Load16S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I32Load16U { memarg } => {
+                    Expr::I32Load16U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I64Load8S { memarg } => {
+                    Expr::I64Load8S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I64Load8U { memarg } => {
+                    Expr::I64Load8U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I64Load16S { memarg } => {
+                    Expr::I64Load16S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I64Load16U { memarg } => {
+                    Expr::I64Load16U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I64Load32S { memarg } => {
+                    Expr::I64Load32S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I64Load32U { memarg } => {
+                    Expr::I64Load32U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                }
+
+                Operator::I32Store { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::I32Store(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::I64Store { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::I64Store(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::F32Store { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::F32Store(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::F64Store { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::F64Store(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::I32Store8 { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::I32Store8(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::I32Store16 { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::I32Store16(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::I64Store8 { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::I64Store8(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::I64Store16 { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::I64Store16(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::I64Store32 { memarg } => {
+                    let value = Box::new(pop_expr(&mut blocks));
+                    let offset = Box::new(pop_expr(&mut blocks));
+
+                    Expr::I64Store32(make_mem_arg(memarg), offset, value)
+                }
+
+                Operator::I32Const { value } => Expr::I32(value),
+                Operator::I64Const { value } => Expr::I64(value),
+                Operator::F32Const { value } => Expr::F32(f32::from_bits(value.bits())),
+                Operator::F64Const { value } => Expr::F64(f64::from_bits(value.bits())),
+
                 // TODO: the rest of the operands
 
-                _ => todo!()
+                _ => todo!(),
             };
 
             exprs(&mut blocks).push(expr);
