@@ -1,3 +1,4 @@
+use std::mem;
 use std::ops::Range;
 
 use thiserror::Error;
@@ -5,6 +6,7 @@ use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
+use crate::ir::expr::{ExprTy, ReturnValueCount};
 use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, LocalId, MemoryId, TableId, TypeId};
 
 const FEATURES: WasmFeatures = WasmFeatures {
@@ -555,7 +557,7 @@ impl Parser {
         }
 
         let has_return = body.ty.ret.is_some();
-        let body = self.parse_expr(Some(&locals), has_return, ops_reader)?;
+        let body = self.parse_expr(Some((&locals, func_id)), has_return, ops_reader)?;
         self.module.funcs[func_id].body_mut().unwrap().body = body;
 
         Ok(())
@@ -563,7 +565,7 @@ impl Parser {
 
     fn parse_expr(
         &mut self,
-        locals: Option<&[LocalId]>,
+        func: Option<(&[LocalId], FuncId)>,
         has_return: bool,
         reader: wasmparser::OperatorsReader<'_>,
     ) -> Result<ir::Expr> {
@@ -594,33 +596,116 @@ impl Parser {
             }
         }
 
-        let mut blocks = vec![Block::main(has_return)];
-
-        fn capture_br_expr(blocks: &mut Vec<Block>, relative_depth: u32) -> Option<Box<ir::Expr>> {
-            blocks[blocks.len() - relative_depth as usize - 1]
-                .has_return
-                .then(|| Box::new(blocks.last_mut().unwrap().exprs.pop().unwrap()))
+        struct Context<'a> {
+            parser: &'a mut Parser,
+            blocks: Vec<Block>,
+            func: Option<(&'a [LocalId], FuncId)>,
         }
 
         fn exprs(blocks: &mut Vec<Block>) -> &mut Vec<ir::Expr> {
             &mut blocks.last_mut().unwrap().exprs
         }
 
-        fn pop_expr(blocks: &mut Vec<Block>) -> ir::Expr {
-            // FIXME: not every ast node produces a value
-            // we have to find the first node that does and group everything that follows it into a block
-            exprs(blocks).pop().unwrap()
+        impl Context<'_> {
+            fn local(&self, idx: u32) -> LocalId {
+                self.func.unwrap().0[idx as usize]
+            }
+
+            fn capture_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
+                self.blocks[self.blocks.len() - relative_depth as usize - 1]
+                    .has_return
+                    .then(|| Box::new(self.blocks.last_mut().unwrap().exprs.pop().unwrap()))
+            }
+
+            fn pop_expr(&mut self) -> ir::Expr {
+                let start_idx = exprs(&mut self.blocks)
+                    .iter()
+                    .enumerate()
+                    .rfind(|(_, expr)| match expr.ret_value_count() {
+                        ReturnValueCount::Zero => false,
+                        ReturnValueCount::One => true,
+                        ReturnValueCount::Call(func) => {
+                            self.parser.module.funcs[func].ty().ret.is_some()
+                        }
+                        ReturnValueCount::CallIndirect(ty) => {
+                            self.parser.module.types[ty].as_func().ret.is_some()
+                        }
+                        ReturnValueCount::Unreachable => {
+                            panic!("cannot pop_expr after an unreachable instruction")
+                        }
+                    })
+                    .map(|(idx, _)| idx)
+                    .expect("no expr in the block produces a value");
+
+                if start_idx + 1 == exprs(&mut self.blocks).len() {
+                    exprs(&mut self.blocks).pop().unwrap()
+                } else {
+                    let ty = match exprs(&mut self.blocks)[start_idx].ty() {
+                        ExprTy::Concrete(ty) => ty,
+                        ExprTy::Local(local) => self.parser.module.funcs[self.func.unwrap().1]
+                            .body()
+                            .unwrap()
+                            .locals[local]
+                            .clone(),
+
+                        ExprTy::Global(global) => {
+                            self.parser.module.globals[global].ty.val_type.clone()
+                        }
+
+                        ExprTy::Call(func) => {
+                            self.parser.module.funcs[func].ty().ret.clone().unwrap()
+                        }
+
+                        ExprTy::CallIndirect(ty) => {
+                            self.parser.module.types[ty].as_func().ret.clone().unwrap()
+                        }
+
+                        ExprTy::Unreachable | ExprTy::Empty => unreachable!(),
+                    };
+
+                    Expr::Block(
+                        Some(ty),
+                        exprs(&mut self.blocks).drain(start_idx..).collect(),
+                    )
+                }
+            }
+
+            fn pop_expr2<F, R>(&mut self, f: F) -> R
+            where
+                F: FnOnce(Box<ir::Expr>, Box<ir::Expr>) -> R,
+            {
+                let v1 = Box::new(self.pop_expr());
+                let v0 = Box::new(self.pop_expr());
+
+                f(v0, v1)
+            }
+
+            fn push_block(&mut self, expr: Expr, block: Block) {
+                exprs(&mut self.blocks).push(expr);
+                self.blocks.push(block);
+            }
+
+            fn pop_block(&mut self) -> Block {
+                let mut block = self.blocks.pop().unwrap();
+
+                let exprs = match exprs(&mut self.blocks).last_mut().unwrap() {
+                    Expr::Block(_, exprs) => exprs,
+                    Expr::Loop(_, exprs) => exprs,
+                    Expr::If(_, exprs, _) if block.branch == 0 => exprs,
+                    Expr::If(_, _, exprs) => exprs,
+                    _ => unreachable!(),
+                };
+                *exprs = mem::take(&mut block.exprs);
+
+                block
+            }
         }
 
-        fn pop_expr2<F, R>(blocks: &mut Vec<Block>, f: F) -> R
-        where
-            F: FnOnce(Box<ir::Expr>, Box<ir::Expr>) -> R,
-        {
-            let v1 = Box::new(pop_expr(blocks));
-            let v0 = Box::new(pop_expr(blocks));
-
-            f(v0, v1)
-        }
+        let mut ctx = Context {
+            parser: self,
+            blocks: vec![Block::main(has_return)],
+            func,
+        };
 
         // FIXME: an unreachable operation may consume and produce as many values as needed to type-check
         // this, needless to say, completely breaks the tree model
@@ -639,8 +724,7 @@ impl Parser {
                 Operator::Block { blockty } => {
                     let ty = make_block_type(blockty);
                     let has_return = ty.is_some();
-                    exprs(&mut blocks).push(Expr::Block(ty, vec![]));
-                    blocks.push(Block::main(has_return));
+                    ctx.push_block(Expr::Block(ty, vec![]), Block::main(has_return));
 
                     continue;
                 }
@@ -648,8 +732,7 @@ impl Parser {
                 Operator::Loop { blockty } => {
                     let ty = make_block_type(blockty);
                     let has_return = ty.is_some();
-                    exprs(&mut blocks).push(Expr::Loop(ty, vec![]));
-                    blocks.push(Block::main(has_return));
+                    ctx.push_block(Expr::Loop(ty, vec![]), Block::main(has_return));
 
                     continue;
                 }
@@ -657,45 +740,35 @@ impl Parser {
                 Operator::If { blockty } => {
                     let ty = make_block_type(blockty);
                     let has_return = ty.is_some();
-                    exprs(&mut blocks).push(Expr::If(ty, vec![], vec![]));
-                    blocks.push(Block::main(has_return));
+                    ctx.push_block(Expr::If(ty, vec![], vec![]), Block::main(has_return));
 
                     continue;
                 }
 
                 op @ (Operator::Else | Operator::End) => {
-                    let block = blocks.pop().unwrap();
-
-                    let exprs = match exprs(&mut blocks).last_mut().unwrap() {
-                        Expr::Block(_, exprs) => exprs,
-                        Expr::Loop(_, exprs) => exprs,
-                        Expr::If(_, exprs, _) if block.branch == 0 => exprs,
-                        Expr::If(_, _, exprs) => exprs,
-                        _ => unreachable!(),
-                    };
-                    *exprs = block.exprs;
+                    let block = ctx.pop_block();
 
                     if matches!(op, Operator::Else) {
-                        blocks.push(Block::branch(1, block.has_return));
+                        ctx.blocks.push(Block::branch(1, block.has_return));
                     }
 
                     continue;
                 }
 
                 Operator::Br { relative_depth } => {
-                    Expr::Br(relative_depth, capture_br_expr(&mut blocks, relative_depth))
+                    Expr::Br(relative_depth, ctx.capture_br_expr(relative_depth))
                 }
 
                 Operator::BrIf { relative_depth } => {
-                    let condition = Box::new(pop_expr(&mut blocks));
-                    let ret_expr = capture_br_expr(&mut blocks, relative_depth);
+                    let condition = Box::new(ctx.pop_expr());
+                    let ret_expr = ctx.capture_br_expr(relative_depth);
 
                     Expr::BrIf(relative_depth, condition, ret_expr)
                 }
 
                 Operator::BrTable { targets } => {
-                    let condition = Box::new(pop_expr(&mut blocks));
-                    let ret_expr = capture_br_expr(&mut blocks, targets.default());
+                    let condition = Box::new(ctx.pop_expr());
+                    let ret_expr = ctx.capture_br_expr(targets.default());
 
                     Expr::BrTable(
                         targets.targets().collect::<Result<Vec<_>, _>>()?,
@@ -705,340 +778,323 @@ impl Parser {
                     )
                 }
 
-                Operator::Return => Expr::Return(Box::new(pop_expr(&mut blocks))),
+                Operator::Return => Expr::Return(Box::new(ctx.pop_expr())),
 
                 Operator::Call { function_index } => {
-                    let func_id = self.funcs[function_index as usize];
-                    let func_ty = self.module.funcs[func_id].ty();
-                    let args = (0..func_ty.params.len())
-                        .map(|_| pop_expr(&mut blocks))
-                        .collect();
+                    let func_id = ctx.parser.funcs[function_index as usize];
+                    let func_ty = ctx.parser.module.funcs[func_id].ty();
+                    let args = (0..func_ty.params.len()).map(|_| ctx.pop_expr()).collect();
 
                     Expr::Call(func_id, args)
                 }
 
                 Operator::CallIndirect { type_index, .. } => {
-                    let type_id = self.types[type_index as usize];
-                    let func_ty = self.module.types[type_id].as_func();
-                    let idx_expr = pop_expr(&mut blocks);
-                    let args = (0..func_ty.params.len())
-                        .map(|_| pop_expr(&mut blocks))
-                        .collect();
+                    let type_id = ctx.parser.types[type_index as usize];
+                    let param_count = ctx.parser.module.types[type_id].as_func().params.len();
+                    let idx_expr = ctx.pop_expr();
+
+                    let mut args = (0..param_count).map(|_| ctx.pop_expr()).collect::<Vec<_>>();
+                    args.reverse();
 
                     Expr::CallIndirect(type_id, Box::new(idx_expr), args)
                 }
 
-                Operator::Drop => Expr::Drop(Box::new(pop_expr(&mut blocks))),
+                Operator::Drop => Expr::Drop(Box::new(ctx.pop_expr())),
 
                 Operator::Select => {
-                    let condition = Box::new(pop_expr(&mut blocks));
-                    let v1 = Box::new(pop_expr(&mut blocks));
-                    let v0 = Box::new(pop_expr(&mut blocks));
+                    let condition = Box::new(ctx.pop_expr());
+                    let v1 = Box::new(ctx.pop_expr());
+                    let v0 = Box::new(ctx.pop_expr());
 
                     Expr::Select(v0, v1, condition)
                 }
 
-                Operator::LocalGet { local_index } => {
-                    Expr::LocalGet(locals.unwrap()[local_index as usize])
+                Operator::LocalGet { local_index } => Expr::LocalGet(ctx.local(local_index)),
+
+                Operator::LocalSet { local_index } => {
+                    Expr::LocalSet(ctx.local(local_index), Box::new(ctx.pop_expr()))
                 }
 
-                Operator::LocalSet { local_index } => Expr::LocalSet(
-                    locals.unwrap()[local_index as usize],
-                    Box::new(pop_expr(&mut blocks)),
-                ),
-
-                Operator::LocalTee { local_index } => Expr::LocalTee(
-                    locals.unwrap()[local_index as usize],
-                    Box::new(pop_expr(&mut blocks)),
-                ),
+                Operator::LocalTee { local_index } => {
+                    Expr::LocalTee(ctx.local(local_index), Box::new(ctx.pop_expr()))
+                }
 
                 Operator::GlobalGet { global_index } => {
-                    Expr::GlobalGet(self.globals[global_index as usize])
+                    Expr::GlobalGet(ctx.parser.globals[global_index as usize])
                 }
 
                 Operator::GlobalSet { global_index } => Expr::GlobalSet(
-                    self.globals[global_index as usize],
-                    Box::new(pop_expr(&mut blocks)),
+                    ctx.parser.globals[global_index as usize],
+                    Box::new(ctx.pop_expr()),
                 ),
 
                 Operator::I32Load { memarg } => {
-                    Expr::I32Load(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I32Load(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I64Load { memarg } => {
-                    Expr::I64Load(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I64Load(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::F32Load { memarg } => {
-                    Expr::F32Load(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::F32Load(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::F64Load { memarg } => {
-                    Expr::F64Load(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::F64Load(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I32Load8S { memarg } => {
-                    Expr::I32Load8S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I32Load8S(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I32Load8U { memarg } => {
-                    Expr::I32Load8U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I32Load8U(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I32Load16S { memarg } => {
-                    Expr::I32Load16S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I32Load16S(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I32Load16U { memarg } => {
-                    Expr::I32Load16U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I32Load16U(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I64Load8S { memarg } => {
-                    Expr::I64Load8S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I64Load8S(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I64Load8U { memarg } => {
-                    Expr::I64Load8U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I64Load8U(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I64Load16S { memarg } => {
-                    Expr::I64Load16S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I64Load16S(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I64Load16U { memarg } => {
-                    Expr::I64Load16U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I64Load16U(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I64Load32S { memarg } => {
-                    Expr::I64Load32S(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I64Load32S(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I64Load32U { memarg } => {
-                    Expr::I64Load32U(make_mem_arg(memarg), Box::new(pop_expr(&mut blocks)))
+                    Expr::I64Load32U(make_mem_arg(memarg), Box::new(ctx.pop_expr()))
                 }
 
                 Operator::I32Store { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::I32Store(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::I64Store { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::I64Store(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::F32Store { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::F32Store(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::F64Store { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::F64Store(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::I32Store8 { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::I32Store8(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::I32Store16 { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::I32Store16(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::I64Store8 { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::I64Store8(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::I64Store16 { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::I64Store16(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::I64Store32 { memarg } => {
-                    let value = Box::new(pop_expr(&mut blocks));
-                    let offset = Box::new(pop_expr(&mut blocks));
+                    let value = Box::new(ctx.pop_expr());
+                    let offset = Box::new(ctx.pop_expr());
 
                     Expr::I64Store32(make_mem_arg(memarg), offset, value)
                 }
 
                 Operator::MemorySize { .. } => Expr::MemorySize,
-                Operator::MemoryGrow { .. } => Expr::MemoryGrow(Box::new(pop_expr(&mut blocks))),
+                Operator::MemoryGrow { .. } => Expr::MemoryGrow(Box::new(ctx.pop_expr())),
 
                 Operator::I32Const { value } => Expr::I32(value),
                 Operator::I64Const { value } => Expr::I64(value),
                 Operator::F32Const { value } => Expr::F32(f32::from_bits(value.bits())),
                 Operator::F64Const { value } => Expr::F64(f64::from_bits(value.bits())),
 
-                Operator::I32Eqz => Expr::I32Eqz(Box::new(pop_expr(&mut blocks))),
-                Operator::I32Eq => pop_expr2(&mut blocks, Expr::I32Eq),
-                Operator::I32Ne => pop_expr2(&mut blocks, Expr::I32Ne),
-                Operator::I32LtS => pop_expr2(&mut blocks, Expr::I32LtS),
-                Operator::I32LtU => pop_expr2(&mut blocks, Expr::I32LtU),
-                Operator::I32GtS => pop_expr2(&mut blocks, Expr::I32GtS),
-                Operator::I32GtU => pop_expr2(&mut blocks, Expr::I32GtU),
-                Operator::I32LeS => pop_expr2(&mut blocks, Expr::I32LeS),
-                Operator::I32LeU => pop_expr2(&mut blocks, Expr::I32LeU),
-                Operator::I32GeS => pop_expr2(&mut blocks, Expr::I32GeS),
-                Operator::I32GeU => pop_expr2(&mut blocks, Expr::I32GeU),
+                Operator::I32Eqz => Expr::I32Eqz(Box::new(ctx.pop_expr())),
+                Operator::I32Eq => ctx.pop_expr2(Expr::I32Eq),
+                Operator::I32Ne => ctx.pop_expr2(Expr::I32Ne),
+                Operator::I32LtS => ctx.pop_expr2(Expr::I32LtS),
+                Operator::I32LtU => ctx.pop_expr2(Expr::I32LtU),
+                Operator::I32GtS => ctx.pop_expr2(Expr::I32GtS),
+                Operator::I32GtU => ctx.pop_expr2(Expr::I32GtU),
+                Operator::I32LeS => ctx.pop_expr2(Expr::I32LeS),
+                Operator::I32LeU => ctx.pop_expr2(Expr::I32LeU),
+                Operator::I32GeS => ctx.pop_expr2(Expr::I32GeS),
+                Operator::I32GeU => ctx.pop_expr2(Expr::I32GeU),
 
-                Operator::I64Eqz => Expr::I64Eqz(Box::new(pop_expr(&mut blocks))),
-                Operator::I64Eq => pop_expr2(&mut blocks, Expr::I64Eq),
-                Operator::I64Ne => pop_expr2(&mut blocks, Expr::I64Ne),
-                Operator::I64LtS => pop_expr2(&mut blocks, Expr::I64LtS),
-                Operator::I64LtU => pop_expr2(&mut blocks, Expr::I64LtU),
-                Operator::I64GtS => pop_expr2(&mut blocks, Expr::I64GtS),
-                Operator::I64GtU => pop_expr2(&mut blocks, Expr::I64GtU),
-                Operator::I64LeS => pop_expr2(&mut blocks, Expr::I64LeS),
-                Operator::I64LeU => pop_expr2(&mut blocks, Expr::I64LeU),
-                Operator::I64GeS => pop_expr2(&mut blocks, Expr::I64GeS),
-                Operator::I64GeU => pop_expr2(&mut blocks, Expr::I64GeU),
+                Operator::I64Eqz => Expr::I64Eqz(Box::new(ctx.pop_expr())),
+                Operator::I64Eq => ctx.pop_expr2(Expr::I64Eq),
+                Operator::I64Ne => ctx.pop_expr2(Expr::I64Ne),
+                Operator::I64LtS => ctx.pop_expr2(Expr::I64LtS),
+                Operator::I64LtU => ctx.pop_expr2(Expr::I64LtU),
+                Operator::I64GtS => ctx.pop_expr2(Expr::I64GtS),
+                Operator::I64GtU => ctx.pop_expr2(Expr::I64GtU),
+                Operator::I64LeS => ctx.pop_expr2(Expr::I64LeS),
+                Operator::I64LeU => ctx.pop_expr2(Expr::I64LeU),
+                Operator::I64GeS => ctx.pop_expr2(Expr::I64GeS),
+                Operator::I64GeU => ctx.pop_expr2(Expr::I64GeU),
 
-                Operator::F32Eq => pop_expr2(&mut blocks, Expr::F32Eq),
-                Operator::F32Ne => pop_expr2(&mut blocks, Expr::F32Ne),
-                Operator::F32Lt => pop_expr2(&mut blocks, Expr::F32Lt),
-                Operator::F32Gt => pop_expr2(&mut blocks, Expr::F32Gt),
-                Operator::F32Le => pop_expr2(&mut blocks, Expr::F32Le),
-                Operator::F32Ge => pop_expr2(&mut blocks, Expr::F32Ge),
+                Operator::F32Eq => ctx.pop_expr2(Expr::F32Eq),
+                Operator::F32Ne => ctx.pop_expr2(Expr::F32Ne),
+                Operator::F32Lt => ctx.pop_expr2(Expr::F32Lt),
+                Operator::F32Gt => ctx.pop_expr2(Expr::F32Gt),
+                Operator::F32Le => ctx.pop_expr2(Expr::F32Le),
+                Operator::F32Ge => ctx.pop_expr2(Expr::F32Ge),
 
-                Operator::F64Eq => pop_expr2(&mut blocks, Expr::F64Eq),
-                Operator::F64Ne => pop_expr2(&mut blocks, Expr::F64Ne),
-                Operator::F64Lt => pop_expr2(&mut blocks, Expr::F64Lt),
-                Operator::F64Gt => pop_expr2(&mut blocks, Expr::F64Gt),
-                Operator::F64Le => pop_expr2(&mut blocks, Expr::F64Le),
-                Operator::F64Ge => pop_expr2(&mut blocks, Expr::F64Ge),
+                Operator::F64Eq => ctx.pop_expr2(Expr::F64Eq),
+                Operator::F64Ne => ctx.pop_expr2(Expr::F64Ne),
+                Operator::F64Lt => ctx.pop_expr2(Expr::F64Lt),
+                Operator::F64Gt => ctx.pop_expr2(Expr::F64Gt),
+                Operator::F64Le => ctx.pop_expr2(Expr::F64Le),
+                Operator::F64Ge => ctx.pop_expr2(Expr::F64Ge),
 
-                Operator::I32Clz => Expr::I32Clz(Box::new(pop_expr(&mut blocks))),
-                Operator::I32Ctz => Expr::I32Ctz(Box::new(pop_expr(&mut blocks))),
-                Operator::I32Popcnt => Expr::I32Popcnt(Box::new(pop_expr(&mut blocks))),
-                Operator::I32Add => pop_expr2(&mut blocks, Expr::I32Add),
-                Operator::I32Sub => pop_expr2(&mut blocks, Expr::I32Sub),
-                Operator::I32Mul => pop_expr2(&mut blocks, Expr::I32Mul),
-                Operator::I32DivS => pop_expr2(&mut blocks, Expr::I32DivS),
-                Operator::I32DivU => pop_expr2(&mut blocks, Expr::I32DivU),
-                Operator::I32RemS => pop_expr2(&mut blocks, Expr::I32RemS),
-                Operator::I32RemU => pop_expr2(&mut blocks, Expr::I32RemU),
-                Operator::I32And => pop_expr2(&mut blocks, Expr::I32And),
-                Operator::I32Or => pop_expr2(&mut blocks, Expr::I32Or),
-                Operator::I32Xor => pop_expr2(&mut blocks, Expr::I32Xor),
-                Operator::I32Shl => pop_expr2(&mut blocks, Expr::I32Shl),
-                Operator::I32ShrS => pop_expr2(&mut blocks, Expr::I32ShrS),
-                Operator::I32ShrU => pop_expr2(&mut blocks, Expr::I32ShrU),
-                Operator::I32Rotl => pop_expr2(&mut blocks, Expr::I32Rotl),
-                Operator::I32Rotr => pop_expr2(&mut blocks, Expr::I32Rotr),
+                Operator::I32Clz => Expr::I32Clz(Box::new(ctx.pop_expr())),
+                Operator::I32Ctz => Expr::I32Ctz(Box::new(ctx.pop_expr())),
+                Operator::I32Popcnt => Expr::I32Popcnt(Box::new(ctx.pop_expr())),
+                Operator::I32Add => ctx.pop_expr2(Expr::I32Add),
+                Operator::I32Sub => ctx.pop_expr2(Expr::I32Sub),
+                Operator::I32Mul => ctx.pop_expr2(Expr::I32Mul),
+                Operator::I32DivS => ctx.pop_expr2(Expr::I32DivS),
+                Operator::I32DivU => ctx.pop_expr2(Expr::I32DivU),
+                Operator::I32RemS => ctx.pop_expr2(Expr::I32RemS),
+                Operator::I32RemU => ctx.pop_expr2(Expr::I32RemU),
+                Operator::I32And => ctx.pop_expr2(Expr::I32And),
+                Operator::I32Or => ctx.pop_expr2(Expr::I32Or),
+                Operator::I32Xor => ctx.pop_expr2(Expr::I32Xor),
+                Operator::I32Shl => ctx.pop_expr2(Expr::I32Shl),
+                Operator::I32ShrS => ctx.pop_expr2(Expr::I32ShrS),
+                Operator::I32ShrU => ctx.pop_expr2(Expr::I32ShrU),
+                Operator::I32Rotl => ctx.pop_expr2(Expr::I32Rotl),
+                Operator::I32Rotr => ctx.pop_expr2(Expr::I32Rotr),
 
-                Operator::I64Clz => Expr::I64Clz(Box::new(pop_expr(&mut blocks))),
-                Operator::I64Ctz => Expr::I64Ctz(Box::new(pop_expr(&mut blocks))),
-                Operator::I64Popcnt => Expr::I64Popcnt(Box::new(pop_expr(&mut blocks))),
-                Operator::I64Add => pop_expr2(&mut blocks, Expr::I64Add),
-                Operator::I64Sub => pop_expr2(&mut blocks, Expr::I64Sub),
-                Operator::I64Mul => pop_expr2(&mut blocks, Expr::I64Mul),
-                Operator::I64DivS => pop_expr2(&mut blocks, Expr::I64DivS),
-                Operator::I64DivU => pop_expr2(&mut blocks, Expr::I64DivU),
-                Operator::I64RemS => pop_expr2(&mut blocks, Expr::I64RemS),
-                Operator::I64RemU => pop_expr2(&mut blocks, Expr::I64RemU),
-                Operator::I64And => pop_expr2(&mut blocks, Expr::I64And),
-                Operator::I64Or => pop_expr2(&mut blocks, Expr::I64Or),
-                Operator::I64Xor => pop_expr2(&mut blocks, Expr::I64Xor),
-                Operator::I64Shl => pop_expr2(&mut blocks, Expr::I64Shl),
-                Operator::I64ShrS => pop_expr2(&mut blocks, Expr::I64ShrS),
-                Operator::I64ShrU => pop_expr2(&mut blocks, Expr::I64ShrU),
-                Operator::I64Rotl => pop_expr2(&mut blocks, Expr::I64Rotl),
-                Operator::I64Rotr => pop_expr2(&mut blocks, Expr::I64Rotr),
+                Operator::I64Clz => Expr::I64Clz(Box::new(ctx.pop_expr())),
+                Operator::I64Ctz => Expr::I64Ctz(Box::new(ctx.pop_expr())),
+                Operator::I64Popcnt => Expr::I64Popcnt(Box::new(ctx.pop_expr())),
+                Operator::I64Add => ctx.pop_expr2(Expr::I64Add),
+                Operator::I64Sub => ctx.pop_expr2(Expr::I64Sub),
+                Operator::I64Mul => ctx.pop_expr2(Expr::I64Mul),
+                Operator::I64DivS => ctx.pop_expr2(Expr::I64DivS),
+                Operator::I64DivU => ctx.pop_expr2(Expr::I64DivU),
+                Operator::I64RemS => ctx.pop_expr2(Expr::I64RemS),
+                Operator::I64RemU => ctx.pop_expr2(Expr::I64RemU),
+                Operator::I64And => ctx.pop_expr2(Expr::I64And),
+                Operator::I64Or => ctx.pop_expr2(Expr::I64Or),
+                Operator::I64Xor => ctx.pop_expr2(Expr::I64Xor),
+                Operator::I64Shl => ctx.pop_expr2(Expr::I64Shl),
+                Operator::I64ShrS => ctx.pop_expr2(Expr::I64ShrS),
+                Operator::I64ShrU => ctx.pop_expr2(Expr::I64ShrU),
+                Operator::I64Rotl => ctx.pop_expr2(Expr::I64Rotl),
+                Operator::I64Rotr => ctx.pop_expr2(Expr::I64Rotr),
 
-                Operator::F32Abs => Expr::F32Abs(Box::new(pop_expr(&mut blocks))),
-                Operator::F32Neg => Expr::F32Neg(Box::new(pop_expr(&mut blocks))),
-                Operator::F32Ceil => Expr::F32Ceil(Box::new(pop_expr(&mut blocks))),
-                Operator::F32Floor => Expr::F32Floor(Box::new(pop_expr(&mut blocks))),
-                Operator::F32Trunc => Expr::F32Trunc(Box::new(pop_expr(&mut blocks))),
-                Operator::F32Nearest => Expr::F32Nearest(Box::new(pop_expr(&mut blocks))),
-                Operator::F32Sqrt => Expr::F32Sqrt(Box::new(pop_expr(&mut blocks))),
-                Operator::F32Add => pop_expr2(&mut blocks, Expr::F32Add),
-                Operator::F32Sub => pop_expr2(&mut blocks, Expr::F32Sub),
-                Operator::F32Mul => pop_expr2(&mut blocks, Expr::F32Mul),
-                Operator::F32Div => pop_expr2(&mut blocks, Expr::F32Div),
-                Operator::F32Min => pop_expr2(&mut blocks, Expr::F32Min),
-                Operator::F32Max => pop_expr2(&mut blocks, Expr::F32Max),
-                Operator::F32Copysign => pop_expr2(&mut blocks, Expr::F32Copysign),
+                Operator::F32Abs => Expr::F32Abs(Box::new(ctx.pop_expr())),
+                Operator::F32Neg => Expr::F32Neg(Box::new(ctx.pop_expr())),
+                Operator::F32Ceil => Expr::F32Ceil(Box::new(ctx.pop_expr())),
+                Operator::F32Floor => Expr::F32Floor(Box::new(ctx.pop_expr())),
+                Operator::F32Trunc => Expr::F32Trunc(Box::new(ctx.pop_expr())),
+                Operator::F32Nearest => Expr::F32Nearest(Box::new(ctx.pop_expr())),
+                Operator::F32Sqrt => Expr::F32Sqrt(Box::new(ctx.pop_expr())),
+                Operator::F32Add => ctx.pop_expr2(Expr::F32Add),
+                Operator::F32Sub => ctx.pop_expr2(Expr::F32Sub),
+                Operator::F32Mul => ctx.pop_expr2(Expr::F32Mul),
+                Operator::F32Div => ctx.pop_expr2(Expr::F32Div),
+                Operator::F32Min => ctx.pop_expr2(Expr::F32Min),
+                Operator::F32Max => ctx.pop_expr2(Expr::F32Max),
+                Operator::F32Copysign => ctx.pop_expr2(Expr::F32Copysign),
 
-                Operator::F64Abs => Expr::F64Abs(Box::new(pop_expr(&mut blocks))),
-                Operator::F64Neg => Expr::F64Neg(Box::new(pop_expr(&mut blocks))),
-                Operator::F64Ceil => Expr::F64Ceil(Box::new(pop_expr(&mut blocks))),
-                Operator::F64Floor => Expr::F64Floor(Box::new(pop_expr(&mut blocks))),
-                Operator::F64Trunc => Expr::F64Trunc(Box::new(pop_expr(&mut blocks))),
-                Operator::F64Nearest => Expr::F64Nearest(Box::new(pop_expr(&mut blocks))),
-                Operator::F64Sqrt => Expr::F64Sqrt(Box::new(pop_expr(&mut blocks))),
-                Operator::F64Add => pop_expr2(&mut blocks, Expr::F64Add),
-                Operator::F64Sub => pop_expr2(&mut blocks, Expr::F64Sub),
-                Operator::F64Mul => pop_expr2(&mut blocks, Expr::F64Mul),
-                Operator::F64Div => pop_expr2(&mut blocks, Expr::F64Div),
-                Operator::F64Min => pop_expr2(&mut blocks, Expr::F64Min),
-                Operator::F64Max => pop_expr2(&mut blocks, Expr::F64Max),
-                Operator::F64Copysign => pop_expr2(&mut blocks, Expr::F64Copysign),
+                Operator::F64Abs => Expr::F64Abs(Box::new(ctx.pop_expr())),
+                Operator::F64Neg => Expr::F64Neg(Box::new(ctx.pop_expr())),
+                Operator::F64Ceil => Expr::F64Ceil(Box::new(ctx.pop_expr())),
+                Operator::F64Floor => Expr::F64Floor(Box::new(ctx.pop_expr())),
+                Operator::F64Trunc => Expr::F64Trunc(Box::new(ctx.pop_expr())),
+                Operator::F64Nearest => Expr::F64Nearest(Box::new(ctx.pop_expr())),
+                Operator::F64Sqrt => Expr::F64Sqrt(Box::new(ctx.pop_expr())),
+                Operator::F64Add => ctx.pop_expr2(Expr::F64Add),
+                Operator::F64Sub => ctx.pop_expr2(Expr::F64Sub),
+                Operator::F64Mul => ctx.pop_expr2(Expr::F64Mul),
+                Operator::F64Div => ctx.pop_expr2(Expr::F64Div),
+                Operator::F64Min => ctx.pop_expr2(Expr::F64Min),
+                Operator::F64Max => ctx.pop_expr2(Expr::F64Max),
+                Operator::F64Copysign => ctx.pop_expr2(Expr::F64Copysign),
 
-                Operator::I32WrapI64 => Expr::I32WrapI64(Box::new(pop_expr(&mut blocks))),
-                Operator::I32TruncF32S => Expr::I32TruncF32S(Box::new(pop_expr(&mut blocks))),
-                Operator::I32TruncF32U => Expr::I32TruncF32U(Box::new(pop_expr(&mut blocks))),
-                Operator::I32TruncF64S => Expr::I32TruncF64S(Box::new(pop_expr(&mut blocks))),
-                Operator::I32TruncF64U => Expr::I32TruncF64U(Box::new(pop_expr(&mut blocks))),
+                Operator::I32WrapI64 => Expr::I32WrapI64(Box::new(ctx.pop_expr())),
+                Operator::I32TruncF32S => Expr::I32TruncF32S(Box::new(ctx.pop_expr())),
+                Operator::I32TruncF32U => Expr::I32TruncF32U(Box::new(ctx.pop_expr())),
+                Operator::I32TruncF64S => Expr::I32TruncF64S(Box::new(ctx.pop_expr())),
+                Operator::I32TruncF64U => Expr::I32TruncF64U(Box::new(ctx.pop_expr())),
 
-                Operator::I64ExtendI32S => Expr::I64ExtendI32S(Box::new(pop_expr(&mut blocks))),
-                Operator::I64ExtendI32U => Expr::I64ExtendI32U(Box::new(pop_expr(&mut blocks))),
-                Operator::I64TruncF32S => Expr::I64TruncF32S(Box::new(pop_expr(&mut blocks))),
-                Operator::I64TruncF32U => Expr::I64TruncF32U(Box::new(pop_expr(&mut blocks))),
-                Operator::I64TruncF64S => Expr::I32TruncF64S(Box::new(pop_expr(&mut blocks))),
-                Operator::I64TruncF64U => Expr::I64TruncF64U(Box::new(pop_expr(&mut blocks))),
+                Operator::I64ExtendI32S => Expr::I64ExtendI32S(Box::new(ctx.pop_expr())),
+                Operator::I64ExtendI32U => Expr::I64ExtendI32U(Box::new(ctx.pop_expr())),
+                Operator::I64TruncF32S => Expr::I64TruncF32S(Box::new(ctx.pop_expr())),
+                Operator::I64TruncF32U => Expr::I64TruncF32U(Box::new(ctx.pop_expr())),
+                Operator::I64TruncF64S => Expr::I32TruncF64S(Box::new(ctx.pop_expr())),
+                Operator::I64TruncF64U => Expr::I64TruncF64U(Box::new(ctx.pop_expr())),
 
-                Operator::F32ConvertI32S => Expr::F32ConvertI32S(Box::new(pop_expr(&mut blocks))),
-                Operator::F32ConvertI32U => Expr::F32ConvertI32U(Box::new(pop_expr(&mut blocks))),
-                Operator::F32ConvertI64S => Expr::F32ConvertI64S(Box::new(pop_expr(&mut blocks))),
-                Operator::F32ConvertI64U => Expr::F32ConvertI64U(Box::new(pop_expr(&mut blocks))),
-                Operator::F32DemoteF64 => Expr::F32DemoteF64(Box::new(pop_expr(&mut blocks))),
+                Operator::F32ConvertI32S => Expr::F32ConvertI32S(Box::new(ctx.pop_expr())),
+                Operator::F32ConvertI32U => Expr::F32ConvertI32U(Box::new(ctx.pop_expr())),
+                Operator::F32ConvertI64S => Expr::F32ConvertI64S(Box::new(ctx.pop_expr())),
+                Operator::F32ConvertI64U => Expr::F32ConvertI64U(Box::new(ctx.pop_expr())),
+                Operator::F32DemoteF64 => Expr::F32DemoteF64(Box::new(ctx.pop_expr())),
 
-                Operator::F64ConvertI32S => Expr::F64ConvertI32S(Box::new(pop_expr(&mut blocks))),
-                Operator::F64ConvertI32U => Expr::F64ConvertI32U(Box::new(pop_expr(&mut blocks))),
-                Operator::F64ConvertI64S => Expr::F64ConvertI64S(Box::new(pop_expr(&mut blocks))),
-                Operator::F64ConvertI64U => Expr::F64ConvertI64U(Box::new(pop_expr(&mut blocks))),
-                Operator::F64PromoteF32 => Expr::F64PromoteF32(Box::new(pop_expr(&mut blocks))),
+                Operator::F64ConvertI32S => Expr::F64ConvertI32S(Box::new(ctx.pop_expr())),
+                Operator::F64ConvertI32U => Expr::F64ConvertI32U(Box::new(ctx.pop_expr())),
+                Operator::F64ConvertI64S => Expr::F64ConvertI64S(Box::new(ctx.pop_expr())),
+                Operator::F64ConvertI64U => Expr::F64ConvertI64U(Box::new(ctx.pop_expr())),
+                Operator::F64PromoteF32 => Expr::F64PromoteF32(Box::new(ctx.pop_expr())),
 
-                Operator::I32ReinterpretF32 => {
-                    Expr::I32ReinterpretF32(Box::new(pop_expr(&mut blocks)))
-                }
-
-                Operator::I64ReinterpretF64 => {
-                    Expr::I64ReinterpretF64(Box::new(pop_expr(&mut blocks)))
-                }
-
-                Operator::F32ReinterpretI32 => {
-                    Expr::F32ReinterpretI32(Box::new(pop_expr(&mut blocks)))
-                }
-
-                Operator::F64ReinterpretI64 => {
-                    Expr::F64ReinterpretI64(Box::new(pop_expr(&mut blocks)))
-                }
+                Operator::I32ReinterpretF32 => Expr::I32ReinterpretF32(Box::new(ctx.pop_expr())),
+                Operator::I64ReinterpretF64 => Expr::I64ReinterpretF64(Box::new(ctx.pop_expr())),
+                Operator::F32ReinterpretI32 => Expr::F32ReinterpretI32(Box::new(ctx.pop_expr())),
+                Operator::F64ReinterpretI64 => Expr::F64ReinterpretI64(Box::new(ctx.pop_expr())),
 
                 _ => todo!(),
             };
 
-            exprs(&mut blocks).push(expr);
+            exprs(&mut ctx.blocks).push(expr);
         }
 
         todo!()

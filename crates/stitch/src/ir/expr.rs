@@ -262,4 +262,273 @@ impl Expr {
             _ => None,
         }
     }
+
+    /// Returns the number of values the expression evaluates to.
+    pub fn ret_value_count(&self) -> ReturnValueCount {
+        match self {
+            Self::Drop(_)
+            | Self::LocalSet(_, _)
+            | Self::GlobalSet(_, _)
+            | Self::I32Store(_, _, _)
+            | Self::I64Store(_, _, _)
+            | Self::F32Store(_, _, _)
+            | Self::F64Store(_, _, _)
+            | Self::I32Store8(_, _, _)
+            | Self::I32Store16(_, _, _)
+            | Self::I64Store8(_, _, _)
+            | Self::I64Store16(_, _, _)
+            | Self::I64Store32(_, _, _)
+            | Self::Nop => ReturnValueCount::Zero,
+
+            Self::Block(ty, _) | Self::Loop(ty, _) | Self::If(ty, _, _) => {
+                if ty.is_some() {
+                    ReturnValueCount::One
+                } else {
+                    ReturnValueCount::Zero
+                }
+            }
+
+            Self::Call(func, _) => ReturnValueCount::Call(*func),
+            Self::CallIndirect(ty, _, _) => ReturnValueCount::CallIndirect(*ty),
+
+            Self::Br(_, _)
+            | Self::BrIf(_, _, _)
+            | Self::BrTable(_, _, _, _)
+            | Self::Return(_)
+            | Self::Unreachable => ReturnValueCount::Unreachable,
+
+            _ => ReturnValueCount::One,
+        }
+    }
+
+    pub fn ty(&self) -> ExprTy {
+        match self {
+            Self::I32(_) => ValType::I32.into(),
+            Self::I64(_) => ValType::I64.into(),
+            Self::F32(_) => ValType::F32.into(),
+            Self::F64(_) => ValType::F64.into(),
+
+            Self::I32Clz(_) | Self::I32Ctz(_) | Self::I32Popcnt(_) => ValType::I32.into(),
+
+            Self::I64Clz(_) | Self::I64Ctz(_) | Self::I64Popcnt(_) => ValType::I64.into(),
+
+            Self::F32Abs(_)
+            | Self::F32Neg(_)
+            | Self::F32Sqrt(_)
+            | Self::F32Ceil(_)
+            | Self::F32Floor(_)
+            | Self::F32Trunc(_)
+            | Self::F32Nearest(_) => ValType::F32.into(),
+
+            Self::F64Abs(_)
+            | Self::F64Neg(_)
+            | Self::F64Sqrt(_)
+            | Self::F64Ceil(_)
+            | Self::F64Floor(_)
+            | Self::F64Trunc(_)
+            | Self::F64Nearest(_) => ValType::F64.into(),
+
+            Self::I32Add(_, _)
+            | Self::I32Sub(_, _)
+            | Self::I32Mul(_, _)
+            | Self::I32DivS(_, _)
+            | Self::I32DivU(_, _)
+            | Self::I32RemS(_, _)
+            | Self::I32RemU(_, _)
+            | Self::I32And(_, _)
+            | Self::I32Or(_, _)
+            | Self::I32Xor(_, _)
+            | Self::I32Shl(_, _)
+            | Self::I32ShrS(_, _)
+            | Self::I32ShrU(_, _)
+            | Self::I32Rotl(_, _)
+            | Self::I32Rotr(_, _) => ValType::I32.into(),
+
+            Self::I64Add(_, _)
+            | Self::I64Sub(_, _)
+            | Self::I64Mul(_, _)
+            | Self::I64DivS(_, _)
+            | Self::I64DivU(_, _)
+            | Self::I64RemS(_, _)
+            | Self::I64RemU(_, _)
+            | Self::I64And(_, _)
+            | Self::I64Or(_, _)
+            | Self::I64Xor(_, _)
+            | Self::I64Shl(_, _)
+            | Self::I64ShrS(_, _)
+            | Self::I64ShrU(_, _)
+            | Self::I64Rotl(_, _)
+            | Self::I64Rotr(_, _) => ValType::I64.into(),
+
+            Self::F32Add(_, _)
+            | Self::F32Sub(_, _)
+            | Self::F32Mul(_, _)
+            | Self::F32Div(_, _)
+            | Self::F32Min(_, _)
+            | Self::F32Max(_, _)
+            | Self::F32Copysign(_, _) => ValType::F32.into(),
+
+            Self::F64Add(_, _)
+            | Self::F64Sub(_, _)
+            | Self::F64Mul(_, _)
+            | Self::F64Div(_, _)
+            | Self::F64Min(_, _)
+            | Self::F64Max(_, _)
+            | Self::F64Copysign(_, _) => ValType::F64.into(),
+
+            Self::I32Eqz(_) => ValType::I32.into(),
+            Self::I64Eqz(_) => ValType::I64.into(),
+
+            Self::I32Eq(_, _)
+            | Self::I32Ne(_, _)
+            | Self::I32LtS(_, _)
+            | Self::I32LtU(_, _)
+            | Self::I32GtS(_, _)
+            | Self::I32GtU(_, _)
+            | Self::I32LeS(_, _)
+            | Self::I32LeU(_, _)
+            | Self::I32GeS(_, _)
+            | Self::I32GeU(_, _) => ValType::I32.into(),
+
+            Self::I64Eq(_, _)
+            | Self::I64Ne(_, _)
+            | Self::I64LtS(_, _)
+            | Self::I64LtU(_, _)
+            | Self::I64GtS(_, _)
+            | Self::I64GtU(_, _)
+            | Self::I64LeS(_, _)
+            | Self::I64LeU(_, _)
+            | Self::I64GeS(_, _)
+            | Self::I64GeU(_, _) => ValType::I64.into(),
+
+            Self::F32Eq(_, _)
+            | Self::F32Ne(_, _)
+            | Self::F32Lt(_, _)
+            | Self::F32Gt(_, _)
+            | Self::F32Le(_, _)
+            | Self::F32Ge(_, _) => ValType::F32.into(),
+
+            Self::F64Eq(_, _)
+            | Self::F64Ne(_, _)
+            | Self::F64Lt(_, _)
+            | Self::F64Gt(_, _)
+            | Self::F64Le(_, _)
+            | Self::F64Ge(_, _) => ValType::F64.into(),
+
+            Self::I32WrapI64(_) => ValType::I32.into(),
+
+            Self::I64ExtendI32S(_) | Self::I64ExtendI32U(_) => ValType::I64.into(),
+
+            Self::I32TruncF32S(_)
+            | Self::I32TruncF32U(_)
+            | Self::I32TruncF64S(_)
+            | Self::I32TruncF64U(_) => ValType::I32.into(),
+
+            Self::I64TruncF32S(_)
+            | Self::I64TruncF32U(_)
+            | Self::I64TruncF64S(_)
+            | Self::I64TruncF64U(_) => ValType::I64.into(),
+
+            Self::F32DemoteF64(_) => ValType::F32.into(),
+            Self::F64PromoteF32(_) => ValType::F64.into(),
+
+            Self::F32ConvertI32S(_)
+            | Self::F32ConvertI32U(_)
+            | Self::F32ConvertI64S(_)
+            | Self::F32ConvertI64U(_) => ValType::F32.into(),
+
+            Self::F64ConvertI32S(_)
+            | Self::F64ConvertI32U(_)
+            | Self::F64ConvertI64S(_)
+            | Self::F64ConvertI64U(_) => ValType::F64.into(),
+
+            Self::F32ReinterpretI32(_) => ValType::F32.into(),
+            Self::F64ReinterpretI64(_) => ValType::F64.into(),
+            Self::I32ReinterpretF32(_) => ValType::I32.into(),
+            Self::I64ReinterpretF64(_) => ValType::I64.into(),
+
+            Self::Drop(_) => ExprTy::Empty,
+            Self::Select(lhs, _, _) => lhs.ty(),
+
+            Self::LocalGet(local) | Self::LocalSet(local, _) | Self::LocalTee(local, _) => {
+                ExprTy::Local(*local)
+            }
+
+            Self::GlobalGet(global) | Self::GlobalSet(global, _) => ExprTy::Global(*global),
+
+            Self::I32Load(_, _) => ValType::I32.into(),
+            Self::I64Load(_, _) => ValType::I64.into(),
+            Self::F32Load(_, _) => ValType::F32.into(),
+            Self::F64Load(_, _) => ValType::F64.into(),
+
+            Self::I32Store(_, _, _)
+            | Self::I64Store(_, _, _)
+            | Self::F32Store(_, _, _)
+            | Self::F64Store(_, _, _) => ExprTy::Empty,
+
+            Self::I32Load8S(_, _)
+            | Self::I32Load8U(_, _)
+            | Self::I32Load16S(_, _)
+            | Self::I32Load16U(_, _) => ValType::I32.into(),
+
+            Self::I64Load8S(_, _)
+            | Self::I64Load8U(_, _)
+            | Self::I64Load16S(_, _)
+            | Self::I64Load16U(_, _)
+            | Self::I64Load32S(_, _)
+            | Self::I64Load32U(_, _) => ValType::I64.into(),
+
+            Self::I32Store8(_, _, _) | Self::I32Store16(_, _, _) => ValType::I32.into(),
+
+            Self::I64Store8(_, _, _) | Self::I64Store16(_, _, _) | Self::I64Store32(_, _, _) => {
+                ValType::I64.into()
+            }
+
+            Self::MemorySize | Self::MemoryGrow(_) => ValType::I32.into(),
+
+            Self::Nop => ExprTy::Empty,
+            Self::Unreachable => ExprTy::Unreachable,
+
+            Self::Block(ty, _) | Self::Loop(ty, _) | Self::If(ty, _, _) => match ty {
+                Some(ty) => ExprTy::Concrete(ty.clone()),
+                None => ExprTy::Empty,
+            },
+
+            Self::Br(_, _) | Self::BrIf(_, _, _) | Self::BrTable(_, _, _, _) | Self::Return(_) => {
+                ExprTy::Unreachable
+            }
+
+            Self::Call(func, _) => ExprTy::Call(*func),
+            Self::CallIndirect(ty, _, _) => ExprTy::CallIndirect(*ty),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReturnValueCount {
+    Zero,
+    One,
+    Call(FuncId),
+    CallIndirect(TypeId),
+    Unreachable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ExprTy {
+    Concrete(ValType),
+    Local(LocalId),
+    Global(GlobalId),
+    Call(FuncId),
+    CallIndirect(TypeId),
+
+    Unreachable,
+
+    /// The expression evaluates to no values.
+    Empty,
+}
+
+impl From<ValType> for ExprTy {
+    fn from(val_ty: ValType) -> Self {
+        Self::Concrete(val_ty)
+    }
 }
