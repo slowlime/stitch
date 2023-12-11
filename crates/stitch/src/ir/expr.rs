@@ -215,7 +215,7 @@ pub enum Expr {
     Br(u32, Option<BExpr>),
     BrIf(u32, BExpr, Option<BExpr>),
     BrTable(Vec<u32>, u32, BExpr, Option<BExpr>),
-    Return(BExpr),
+    Return(Option<BExpr>),
     Call(FuncId, Vec<Expr>),
     CallIndirect(TypeId, BExpr, Vec<Expr>),
 }

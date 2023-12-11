@@ -419,7 +419,10 @@ impl Parser {
         for global in reader {
             let global = global?;
             let ty = make_global_type(global.ty);
-            let expr = self.parse_expr(None, true, global.init_expr.get_operators_reader())?;
+            let [expr] = self
+                .parse_expr(None, true, global.init_expr.get_operators_reader())?
+                .try_into()
+                .unwrap();
             let def = ir::GlobalDef::Value(expr);
 
             self.add_global(ir::Global { ty, def });
@@ -468,8 +471,11 @@ impl Parser {
                 unreachable!();
             };
             let table_idx = table_index.unwrap_or(0);
-            let offset = self
+            let [offset] = self
                 .parse_expr(None, true, offset_expr.get_operators_reader())?
+                .try_into()
+                .unwrap();
+            let offset = offset
                 .as_u32()
                 .expect("table offset expr must have type i32");
 
@@ -515,10 +521,11 @@ impl Parser {
             };
 
             let mem_idx = mem_idx as usize;
-            let offset = self
+            let [offset] = self
                 .parse_expr(None, true, offset_expr.get_operators_reader())?
-                .as_u32()
-                .expect("data segment offset must be an i32") as usize;
+                .try_into()
+                .unwrap();
+            let offset = offset.as_u32().expect("data segment offset must be an i32") as usize;
             let range = offset..(data.data.len() + offset as usize);
 
             let ir::MemoryDef::Bytes(ref mut bytes) = self.module.mems[self.mems[mem_idx]].def
@@ -568,7 +575,7 @@ impl Parser {
         func: Option<(&[LocalId], FuncId)>,
         has_return: bool,
         reader: wasmparser::OperatorsReader<'_>,
-    ) -> Result<ir::Expr> {
+    ) -> Result<Vec<ir::Expr>> {
         use ir::Expr;
 
         #[derive(Debug)]
@@ -611,34 +618,55 @@ impl Parser {
                 self.func.unwrap().0[idx as usize]
             }
 
-            fn capture_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
-                self.blocks[self.blocks.len() - relative_depth as usize - 1]
-                    .has_return
-                    .then(|| Box::new(self.blocks.last_mut().unwrap().exprs.pop().unwrap()))
+            fn push_expr(&mut self, expr: ir::Expr) {
+                exprs(&mut self.blocks).push(expr);
             }
 
-            fn pop_expr(&mut self) -> ir::Expr {
+            fn drop_all(&mut self) {
+                let mut dropped = vec![];
+
+                while let Some(expr) = self.maybe_pop_expr() {
+                    dropped.push(Expr::Drop(Box::new(expr)));
+                }
+
+                for expr in dropped {
+                    self.push_expr(expr);
+                }
+            }
+
+            fn capture_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
+                let expr = self.blocks[self.blocks.len() - relative_depth as usize - 1]
+                    .has_return
+                    .then(|| Box::new(self.pop_expr()));
+                self.drop_all();
+
+                expr
+            }
+
+            fn maybe_pop_expr(&mut self) -> Option<ir::Expr> {
                 let start_idx = exprs(&mut self.blocks)
                     .iter()
                     .enumerate()
                     .rfind(|(_, expr)| match expr.ret_value_count() {
                         ReturnValueCount::Zero => false,
                         ReturnValueCount::One => true,
+
                         ReturnValueCount::Call(func) => {
                             self.parser.module.funcs[func].ty().ret.is_some()
                         }
+
                         ReturnValueCount::CallIndirect(ty) => {
                             self.parser.module.types[ty].as_func().ret.is_some()
                         }
+
                         ReturnValueCount::Unreachable => {
                             panic!("cannot pop_expr after an unreachable instruction")
                         }
                     })
-                    .map(|(idx, _)| idx)
-                    .expect("no expr in the block produces a value");
+                    .map(|(idx, _)| idx)?;
 
                 if start_idx + 1 == exprs(&mut self.blocks).len() {
-                    exprs(&mut self.blocks).pop().unwrap()
+                    Some(exprs(&mut self.blocks).pop().unwrap())
                 } else {
                     let ty = match exprs(&mut self.blocks)[start_idx].ty() {
                         ExprTy::Concrete(ty) => ty,
@@ -663,11 +691,16 @@ impl Parser {
                         ExprTy::Unreachable | ExprTy::Empty => unreachable!(),
                     };
 
-                    Expr::Block(
+                    Some(Expr::Block(
                         Some(ty),
-                        exprs(&mut self.blocks).drain(start_idx..).collect(),
-                    )
+                        exprs(&mut self.blocks).split_off(start_idx),
+                    ))
                 }
+            }
+
+            fn pop_expr(&mut self) -> ir::Expr {
+                self.maybe_pop_expr()
+                    .expect("no expr in the block produces a value")
             }
 
             fn pop_expr2<F, R>(&mut self, f: F) -> R
@@ -707,19 +740,30 @@ impl Parser {
             func,
         };
 
-        // FIXME: an unreachable operation may consume and produce as many values as needed to type-check
-        // this, needless to say, completely breaks the tree model
-        // a solution:
-        // - drop all ops in a block following an unreachable op
-        // - have the unreachable op take all available values
-        // - treat the unreachable op as producing as many values as needed for the block (that is, one or none)
-        // should be ok for wasm mvp (and me)
-        // the multi-value proposal break this irredeemably and needs more thinking
-        // (i think binaryen also did a tree ast: how did they deal with that? could be worth probing into)
+        let mut unreachable_level = 0u32;
+
         for op in reader {
             let expr = match op? {
-                Operator::Unreachable => Expr::Unreachable,
-                Operator::Nop => Expr::Nop,
+                op @ (Operator::Else | Operator::End) => {
+                    unreachable_level = unreachable_level.saturating_sub(1);
+                    let block = ctx.pop_block();
+
+                    if matches!(op, Operator::Else) {
+                        ctx.blocks.push(Block::branch(1, block.has_return));
+                    }
+
+                    continue;
+                }
+
+                Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. }
+                    if unreachable_level > 0 =>
+                {
+                    unreachable_level += 1;
+
+                    continue;
+                }
+
+                _ if unreachable_level > 0 => continue,
 
                 Operator::Block { blockty } => {
                     let ty = make_block_type(blockty);
@@ -745,15 +789,13 @@ impl Parser {
                     continue;
                 }
 
-                op @ (Operator::Else | Operator::End) => {
-                    let block = ctx.pop_block();
+                Operator::Unreachable => {
+                    ctx.drop_all();
 
-                    if matches!(op, Operator::Else) {
-                        ctx.blocks.push(Block::branch(1, block.has_return));
-                    }
-
-                    continue;
+                    Expr::Unreachable
                 }
+
+                Operator::Nop => Expr::Nop,
 
                 Operator::Br { relative_depth } => {
                     Expr::Br(relative_depth, ctx.capture_br_expr(relative_depth))
@@ -778,7 +820,7 @@ impl Parser {
                     )
                 }
 
-                Operator::Return => Expr::Return(Box::new(ctx.pop_expr())),
+                Operator::Return => Expr::Return(ctx.capture_br_expr(0)),
 
                 Operator::Call { function_index } => {
                     let func_id = ctx.parser.funcs[function_index as usize];
@@ -1091,13 +1133,16 @@ impl Parser {
                 Operator::F32ReinterpretI32 => Expr::F32ReinterpretI32(Box::new(ctx.pop_expr())),
                 Operator::F64ReinterpretI64 => Expr::F64ReinterpretI64(Box::new(ctx.pop_expr())),
 
-                _ => todo!(),
+                op => unreachable!("unsupported operation {op:?}"),
             };
 
-            exprs(&mut ctx.blocks).push(expr);
+            unreachable_level = (expr.ret_value_count() == ReturnValueCount::Unreachable) as u32;
+            ctx.push_expr(expr);
         }
 
-        todo!()
+        assert_eq!(ctx.blocks.len(), 1);
+
+        Ok(ctx.blocks.pop().unwrap().exprs)
     }
 }
 

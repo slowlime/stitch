@@ -44,7 +44,7 @@ pub struct FuncBody {
     pub ty: FuncType,
     pub locals: SlotMap<LocalId, ValType>,
     pub params: Vec<LocalId>,
-    pub body: Expr,
+    pub body: Vec<Expr>,
 }
 
 impl FuncBody {
