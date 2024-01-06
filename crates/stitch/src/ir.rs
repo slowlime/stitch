@@ -1,17 +1,19 @@
 //! A simple AST-based IR for a WebAssembly module.
 
+pub mod expr;
 pub mod func;
 pub mod ty;
-pub mod expr;
 
 use std::fmt::{self, Display};
 
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{new_key_type, SlotMap};
 
-use self::ty::{Type, TableType, GlobalType, MemoryType};
+use crate::util::slot::BiSlotMap;
 
-pub use self::func::{Func, FuncBody};
+use self::ty::{GlobalType, MemoryType, TableType, Type};
+
 pub use self::expr::Expr;
+pub use self::func::{Func, FuncBody};
 
 new_key_type! {
     pub struct TypeId;
@@ -26,7 +28,7 @@ new_key_type! {
 
 #[derive(Debug, Default, Clone)]
 pub struct Module {
-    pub types: SlotMap<TypeId, Type>,
+    pub types: BiSlotMap<TypeId, Type>,
     pub funcs: SlotMap<FuncId, Func>,
     pub tables: SlotMap<TableId, Table>,
     pub mems: SlotMap<MemoryId, Memory>,
@@ -34,6 +36,17 @@ pub struct Module {
     pub start: Option<FuncId>,
     pub imports: SlotMap<ImportId, Import>,
     pub exports: SlotMap<ExportId, Export>,
+}
+
+impl Module {
+    /// Inserts the types of the signatures of the module's functions.
+    pub fn insert_func_types(&mut self) {
+        for func in self.funcs.values() {
+            let Func::Body(body) = func else { continue };
+
+            self.types.insert(Type::Func(body.ty.clone()));
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

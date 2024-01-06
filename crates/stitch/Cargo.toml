@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+hashbrown = "0.14.3"
 slotmap = "1.0.6"
 thiserror = "1.0.50"
 wasm-encoder = { version = "0.36.1", features = ["wasmparser"] }

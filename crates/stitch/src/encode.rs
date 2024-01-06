@@ -1,27 +1,30 @@
-use wasm_encoder::{TypeSection, ImportSection, EntityType};
+use wasm_encoder::{EntityType, FunctionSection, ImportSection, TypeSection};
 
-use crate::ir::ty::{ValType, TableType, ElemType, MemoryType, GlobalType};
-use crate::ir::{Module, TypeId, self, ImportId, ImportDesc};
+use crate::ir::ty::{ElemType, GlobalType, MemoryType, TableType, Type, ValType};
+use crate::ir::{self, Func, FuncId, ImportDesc, ImportId, Module, TypeId};
 use crate::util::slot::SeqSlot;
 
 pub struct Encoder<'a> {
-    module: &'a Module,
+    module: &'a mut Module,
     encoder: wasm_encoder::Module,
     types: SeqSlot<TypeId>,
     imports: SeqSlot<ImportId>,
+    funcs: SeqSlot<FuncId>,
 }
 
 impl<'a> Encoder<'a> {
-    fn new(module: &'a Module) -> Self {
+    fn new(module: &'a mut Module) -> Self {
         Self {
             module,
             encoder: Default::default(),
             types: Default::default(),
             imports: Default::default(),
+            funcs: Default::default(),
         }
     }
 
     fn encode(mut self) {
+        self.module.insert_func_types();
         self.encode_types();
         self.encode_imports();
         self.encode_funcs();
@@ -64,7 +67,9 @@ impl<'a> Encoder<'a> {
                 ImportDesc::Func(ty_id) => EntityType::Function(self.types[*ty_id] as u32),
                 ImportDesc::Table(table_ty) => EntityType::Table(self.convert_table_type(table_ty)),
                 ImportDesc::Memory(mem_ty) => EntityType::Memory(self.convert_mem_type(mem_ty)),
-                ImportDesc::Global(global_ty) => EntityType::Global(self.convert_global_type(global_ty)),
+                ImportDesc::Global(global_ty) => {
+                    EntityType::Global(self.convert_global_type(global_ty))
+                }
             };
 
             sec.import(&import.module, &import.name, entity);
@@ -74,7 +79,30 @@ impl<'a> Encoder<'a> {
     }
 
     fn encode_funcs(&mut self) {
-        todo!()
+        let mut sec = FunctionSection::new();
+
+        // imports go first
+        for (func_id, func) in &self.module.funcs {
+            if matches!(func, Func::Import(_)) {
+                self.funcs.insert(func_id);
+            }
+        }
+
+        for (func_id, func) in &self.module.funcs {
+            let Func::Body(body) = func else { continue };
+
+            let ty_id = self
+                .module
+                .types
+                .get_key(&Type::Func(body.ty.clone()))
+                .expect("module should have all func types");
+
+            let ty_idx = self.types.get(ty_id).unwrap();
+            sec.function(ty_idx as u32);
+            self.funcs.insert(func_id);
+        }
+
+        self.encoder.section(&sec);
     }
 
     fn encode_tables(&mut self) {
