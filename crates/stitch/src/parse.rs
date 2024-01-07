@@ -724,8 +724,8 @@ impl Parser {
                 let exprs = match exprs(&mut self.blocks).last_mut().unwrap() {
                     Expr::Block(_, exprs) => exprs,
                     Expr::Loop(_, exprs) => exprs,
-                    Expr::If(_, exprs, _) if block.branch == 0 => exprs,
-                    Expr::If(_, _, exprs) => exprs,
+                    Expr::If(_, _, exprs, _) if block.branch == 0 => exprs,
+                    Expr::If(_, _, _, exprs) => exprs,
                     _ => unreachable!(),
                 };
                 *exprs = mem::take(&mut block.exprs);
@@ -782,9 +782,10 @@ impl Parser {
                 }
 
                 Operator::If { blockty } => {
+                    let condition = Box::new(ctx.pop_expr());
                     let ty = make_block_type(blockty);
                     let has_return = ty.is_some();
-                    ctx.push_block(Expr::If(ty, vec![], vec![]), Block::main(has_return));
+                    ctx.push_block(Expr::If(ty, condition, vec![], vec![]), Block::main(has_return));
 
                     continue;
                 }

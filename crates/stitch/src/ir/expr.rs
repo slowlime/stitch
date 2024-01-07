@@ -211,7 +211,7 @@ pub enum Expr {
     Unreachable,
     Block(Option<ValType>, Vec<Expr>),
     Loop(Option<ValType>, Vec<Expr>),
-    If(Option<ValType>, Vec<Expr>, Vec<Expr>),
+    If(Option<ValType>, BExpr, Vec<Expr>, Vec<Expr>),
     Br(u32, Option<BExpr>),
     BrIf(u32, BExpr, Option<BExpr>),
     BrTable(Vec<u32>, u32, BExpr, Option<BExpr>),
@@ -280,7 +280,7 @@ impl Expr {
             | Self::I64Store32(_, _, _)
             | Self::Nop => ReturnValueCount::Zero,
 
-            Self::Block(ty, _) | Self::Loop(ty, _) | Self::If(ty, _, _) => {
+            Self::Block(ty, _) | Self::Loop(ty, _) | Self::If(ty, _, _, _) => {
                 if ty.is_some() {
                     ReturnValueCount::One
                 } else {
@@ -489,7 +489,7 @@ impl Expr {
             Self::Nop => ExprTy::Empty,
             Self::Unreachable => ExprTy::Unreachable,
 
-            Self::Block(ty, _) | Self::Loop(ty, _) | Self::If(ty, _, _) => match ty {
+            Self::Block(ty, _) | Self::Loop(ty, _) | Self::If(ty, _, _, _) => match ty {
                 Some(ty) => ExprTy::Concrete(ty.clone()),
                 None => ExprTy::Empty,
             },
