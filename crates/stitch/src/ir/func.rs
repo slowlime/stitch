@@ -11,6 +11,10 @@ pub enum Func {
 }
 
 impl Func {
+    pub fn is_import(&self) -> bool {
+        matches!(self, Self::Import(_))
+    }
+
     pub fn ty(&self) -> &FuncType {
         match self {
             Self::Import(import) => &import.ty,

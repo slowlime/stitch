@@ -72,6 +72,12 @@ pub enum TableDef {
     Elems(Vec<Option<FuncId>>),
 }
 
+impl TableDef {
+    pub fn is_import(&self) -> bool {
+        matches!(self, Self::Import(_))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Memory {
     pub ty: MemoryType,
@@ -84,6 +90,12 @@ pub enum MemoryDef {
     Bytes(Vec<u8>),
 }
 
+impl MemoryDef {
+    pub fn is_import(&self) -> bool {
+        matches!(self, Self::Import(_))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Global {
     pub ty: GlobalType,
@@ -94,6 +106,12 @@ pub struct Global {
 pub enum GlobalDef {
     Import(ImportId),
     Value(Expr),
+}
+
+impl GlobalDef {
+    pub fn is_import(&self) -> bool {
+        matches!(self, Self::Import(_))
+    }
 }
 
 #[derive(Debug, Clone)]

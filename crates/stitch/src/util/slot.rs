@@ -44,7 +44,7 @@ pub mod seq {
     }
 }
 
-pub use seq::SeqSlot;
+pub use self::seq::SeqSlot;
 
 pub mod bi {
     use std::borrow::Borrow;
@@ -284,4 +284,4 @@ pub mod bi {
     }
 }
 
-pub use bi::BiSlotMap;
+pub use self::bi::BiSlotMap;
