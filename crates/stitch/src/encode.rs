@@ -2,14 +2,14 @@ use std::collections::HashSet;
 
 use wasm_encoder::{
     CodeSection, ElementSection, EntityType, ExportSection, FunctionSection, GlobalSection,
-    ImportSection, MemorySection, StartSection, TableSection, TypeSection,
+    ImportSection, MemorySection, StartSection, TableSection, TypeSection, DataSection,
 };
 
 use crate::ir::expr::MemArg;
 use crate::ir::ty::{ElemType, GlobalType, MemoryType, TableType, Type, ValType};
 use crate::ir::{
     self, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId, ImportDesc, ImportId,
-    LocalId, MemoryId, Module, TableDef, TableId, TypeId,
+    LocalId, MemoryId, Module, TableDef, TableId, TypeId, MemoryDef,
 };
 use crate::util::iter::segments;
 use crate::util::slot::SeqSlot;
@@ -26,7 +26,7 @@ pub struct Encoder<'a> {
 }
 
 impl<'a> Encoder<'a> {
-    fn new(module: &'a mut Module) -> Self {
+    pub fn new(module: &'a mut Module) -> Self {
         Self {
             module,
             encoder: Default::default(),
@@ -39,7 +39,7 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    fn encode(mut self) {
+    pub fn encode(mut self) -> Vec<u8> {
         self.module.insert_func_types();
         self.encode_types();
         self.encode_imports();
@@ -52,6 +52,8 @@ impl<'a> Encoder<'a> {
         self.encode_elements();
         self.encode_code();
         self.encode_data();
+
+        self.encoder.finish()
     }
 
     fn encode_types(&mut self) {
@@ -224,7 +226,7 @@ impl<'a> Encoder<'a> {
         let mut sec = ElementSection::new();
 
         for (idx, table) in self.module.tables.values().enumerate() {
-            assert_eq!(idx, 0, "multiple memories are not supported");
+            assert_eq!(idx, 0, "multiple tables are not supported");
 
             match &table.def {
                 TableDef::Import(_) => panic!("table imports are not supported"),
@@ -301,7 +303,31 @@ impl<'a> Encoder<'a> {
     }
 
     fn encode_data(&mut self) {
-        todo!()
+        use wasm_encoder::ConstExpr;
+
+        let mut sec = DataSection::new();
+
+        for (idx, mem) in self.module.mems.values().enumerate() {
+            assert_eq!(idx, 0, "multiple memories are not supported");
+
+            match &mem.def {
+                MemoryDef::Import(_) => panic!("memory imports are not supported"),
+
+                MemoryDef::Bytes(bytes) => segments(
+                    bytes.iter().copied(),
+                    16,
+                    |&byte| byte != 0,
+                    |segment| {
+                        let offset = segment.offset();
+                        let bytes = segment.collect::<Vec<_>>();
+
+                        sec.active(0, &ConstExpr::i32_const(offset as i32), bytes);
+                    },
+                )
+            }
+        }
+
+        self.encoder.section(&sec);
     }
 }
 
