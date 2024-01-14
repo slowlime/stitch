@@ -291,8 +291,10 @@ impl Expr {
             Self::Call(func, _) => ReturnValueCount::Call(*func),
             Self::CallIndirect(ty, _, _) => ReturnValueCount::CallIndirect(*ty),
 
+            Self::BrIf(_, _, Some(_)) => ReturnValueCount::One,
+            Self::BrIf(_, _, None) => ReturnValueCount::Zero,
+
             Self::Br(_, _)
-            | Self::BrIf(_, _, _)
             | Self::BrTable(_, _, _, _)
             | Self::Return(_)
             | Self::Unreachable => ReturnValueCount::Unreachable,
@@ -494,7 +496,10 @@ impl Expr {
                 None => ExprTy::Empty,
             },
 
-            Self::Br(_, _) | Self::BrIf(_, _, _) | Self::BrTable(_, _, _, _) | Self::Return(_) => {
+            Self::BrIf(_, _, Some(expr)) => expr.ty(),
+            Self::BrIf(_, _, None) => ExprTy::Empty,
+
+            Self::Br(_, _) | Self::BrTable(_, _, _, _) | Self::Return(_) => {
                 ExprTy::Unreachable
             }
 

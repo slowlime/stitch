@@ -303,6 +303,7 @@ impl Parser {
                         .validate(&func)?;
                     let idx = self.import_count.funcs + code_sections;
                     code_sections += 1;
+
                     self.parse_code(self.funcs[idx], func)?;
                 }
 
@@ -607,6 +608,7 @@ impl Parser {
             parser: &'a mut Parser,
             blocks: Vec<Block>,
             func: Option<(&'a [LocalId], FuncId)>,
+            body: Option<Vec<Expr>>,
         }
 
         fn exprs(blocks: &mut Vec<Block>) -> &mut Vec<ir::Expr> {
@@ -634,10 +636,14 @@ impl Parser {
                 }
             }
 
-            fn capture_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
-                let expr = self.blocks[self.blocks.len() - relative_depth as usize - 1]
+            fn pop_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
+                self.blocks[self.blocks.len() - relative_depth as usize - 1]
                     .has_return
-                    .then(|| Box::new(self.pop_expr()));
+                    .then(|| Box::new(self.pop_expr()))
+            }
+
+            fn capture_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
+                let expr = self.pop_br_expr(relative_depth);
                 self.drop_all();
 
                 expr
@@ -721,6 +727,12 @@ impl Parser {
             fn pop_block(&mut self) -> Block {
                 let mut block = self.blocks.pop().unwrap();
 
+                if self.blocks.is_empty() {
+                    self.body = Some(mem::take(&mut block.exprs));
+
+                    return block;
+                }
+
                 let exprs = match exprs(&mut self.blocks).last_mut().unwrap() {
                     Expr::Block(_, exprs) => exprs,
                     Expr::Loop(_, exprs) => exprs,
@@ -738,6 +750,7 @@ impl Parser {
             parser: self,
             blocks: vec![Block::main(has_return)],
             func,
+            body: None,
         };
 
         let mut unreachable_level = 0u32;
@@ -804,7 +817,7 @@ impl Parser {
 
                 Operator::BrIf { relative_depth } => {
                     let condition = Box::new(ctx.pop_expr());
-                    let ret_expr = ctx.capture_br_expr(relative_depth);
+                    let ret_expr = ctx.pop_br_expr(relative_depth);
 
                     Expr::BrIf(relative_depth, condition, ret_expr)
                 }
@@ -1141,9 +1154,9 @@ impl Parser {
             ctx.push_expr(expr);
         }
 
-        assert_eq!(ctx.blocks.len(), 1);
+        assert!(ctx.blocks.is_empty());
 
-        Ok(ctx.blocks.pop().unwrap().exprs)
+        Ok(ctx.body.unwrap())
     }
 }
 
