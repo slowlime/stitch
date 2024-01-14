@@ -1,4 +1,4 @@
-mod encode;
-mod ir;
-mod parse;
+pub mod encode;
+pub mod ir;
+pub mod parse;
 mod util;

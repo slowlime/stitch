@@ -14,7 +14,7 @@ use crate::ir::{
 use crate::util::iter::segments;
 use crate::util::slot::SeqSlot;
 
-pub struct Encoder<'a> {
+struct Encoder<'a> {
     module: &'a mut Module,
     encoder: wasm_encoder::Module,
     types: SeqSlot<TypeId>,
@@ -812,4 +812,8 @@ impl<'a> BodyEncoder<'a, '_> {
             None => wasm_encoder::BlockType::Empty,
         }
     }
+}
+
+pub fn encode(module: &mut Module) -> Vec<u8> {
+    Encoder::new(module).encode()
 }
