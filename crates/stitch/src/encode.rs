@@ -395,6 +395,7 @@ struct BodyEncoder<'a, 'b> {
 impl<'a> BodyEncoder<'a, '_> {
     fn encode(mut self) -> wasm_encoder::Function {
         self.block(&self.body.body);
+        self.nullary(wasm_encoder::Instruction::End);
 
         self.func_encoder
     }
@@ -557,6 +558,13 @@ impl<'a> BodyEncoder<'a, '_> {
             Expr::I32ReinterpretF32(inner) => self.unary(inner, Instruction::I32ReinterpretF32),
             Expr::I64ReinterpretF64(inner) => self.unary(inner, Instruction::I64ReinterpretF64),
 
+            Expr::I32Extend8S(inner) => self.unary(inner, Instruction::I32Extend8S),
+            Expr::I32Extend16S(inner) => self.unary(inner, Instruction::I32Extend16S),
+
+            Expr::I64Extend8S(inner) => self.unary(inner, Instruction::I64Extend8S),
+            Expr::I64Extend16S(inner) => self.unary(inner, Instruction::I64Extend16S),
+            Expr::I64Extend32S(inner) => self.unary(inner, Instruction::I64Extend32S),
+
             Expr::Drop(inner) => self.unary(inner, Instruction::Drop),
 
             Expr::Select(first, second, condition) => {
@@ -621,7 +629,7 @@ impl<'a> BodyEncoder<'a, '_> {
             Expr::F64Store(mem_arg, addr, inner) => self.binary(
                 addr,
                 inner,
-                Instruction::I64Store(self.convert_mem_arg(mem_arg)),
+                Instruction::F64Store(self.convert_mem_arg(mem_arg)),
             ),
 
             Expr::I32Load8S(mem_arg, addr) => {

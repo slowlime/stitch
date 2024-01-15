@@ -5,6 +5,8 @@ use std::{env, fs};
 use stitch::{parse, encode};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    pretty_env_logger::init();
+
     let mut args = env::args_os().skip(1);
 
     if args.len() != 2 {

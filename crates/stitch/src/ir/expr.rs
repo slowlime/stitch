@@ -161,6 +161,13 @@ pub enum Expr {
     I32ReinterpretF32(BExpr),
     I64ReinterpretF64(BExpr),
 
+    I32Extend8S(BExpr),
+    I32Extend16S(BExpr),
+
+    I64Extend8S(BExpr),
+    I64Extend16S(BExpr),
+    I64Extend32S(BExpr),
+
     // parametric instructions
     Drop(BExpr),
     Select(BExpr, BExpr, BExpr),
@@ -448,6 +455,9 @@ impl Expr {
             Self::F64ReinterpretI64(_) => ValType::F64.into(),
             Self::I32ReinterpretF32(_) => ValType::I32.into(),
             Self::I64ReinterpretF64(_) => ValType::I64.into(),
+
+            Self::I32Extend8S(_) | Self::I32Extend16S(_) => ValType::I32.into(),
+            Self::I64Extend8S(_) | Self::I64Extend16S(_) | Self::I64Extend32S(_) => ValType::I64.into(),
 
             Self::Drop(_) => ExprTy::Empty,
             Self::Select(lhs, _, _) => lhs.ty(),

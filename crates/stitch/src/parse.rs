@@ -1,6 +1,7 @@
 use std::mem;
 use std::ops::Range;
 
+use log::{log_enabled, trace};
 use thiserror::Error;
 use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
@@ -9,10 +10,12 @@ use wasmparser::{
 use crate::ir::expr::{ExprTy, ReturnValueCount};
 use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, LocalId, MemoryId, TableId, TypeId};
 
+const PAGE_SIZE: usize = 65536;
+
 const FEATURES: WasmFeatures = WasmFeatures {
     mutable_global: true,
     saturating_float_to_int: false,
-    sign_extension: false,
+    sign_extension: true,
     reference_types: false,
     multi_value: false,
     bulk_memory: false,
@@ -156,6 +159,7 @@ pub type Result<T, E = ParseError> = ::std::result::Result<T, E>;
 
 impl Parser {
     fn add_ty(&mut self, ty: ir::ty::Type) -> TypeId {
+        trace!("ty {}: {ty:?}", self.types.len());
         let id = self.module.types.insert(ty);
         self.types.push(id);
 
@@ -230,7 +234,7 @@ impl Parser {
     fn parse(mut self, bytes: &[u8]) -> Result<ir::Module> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = wasmparser::Validator::new_with_features(FEATURES);
-        let mut code_sections: usize = 0;
+        let mut code_section_entries: usize = 0;
 
         for payload in parser.parse_all(bytes) {
             match payload? {
@@ -297,14 +301,16 @@ impl Parser {
                 }
 
                 Payload::CodeSectionEntry(func) => {
+                    let idx = self.import_count.funcs + code_section_entries;
+                    code_section_entries += 1;
+
+                    trace!("parsing func {idx}: {:x?}", func.range());
+                    self.parse_code(self.funcs[idx], func.clone())?;
+
                     validator
                         .code_section_entry(&func)?
                         .into_validator(Default::default())
                         .validate(&func)?;
-                    let idx = self.import_count.funcs + code_sections;
-                    code_sections += 1;
-
-                    self.parse_code(self.funcs[idx], func)?;
                 }
 
                 Payload::CustomSection(_) => {}
@@ -373,10 +379,14 @@ impl Parser {
     }
 
     fn parse_funcs(&mut self, reader: wasmparser::FunctionSectionReader<'_>) -> Result<()> {
-        for func_ty_idx in reader {
-            let ty = self.module.types[self.types[func_ty_idx? as usize]]
+        let mut idx = 0;
+        for result in reader {
+            let func_ty_idx = result?;
+            let ty = self.module.types[self.types[func_ty_idx as usize]]
                 .as_func()
                 .clone();
+            trace!("func {idx}: ({func_ty_idx}) {ty:?}");
+            idx += 1;
             let mut body = ir::FuncBody::new(ty);
 
             for param_ty in &body.ty.params {
@@ -405,11 +415,11 @@ impl Parser {
     fn parse_memories(&mut self, reader: wasmparser::MemorySectionReader<'_>) -> Result<()> {
         for memory_type in reader {
             let ty = make_mem_type(memory_type?);
-            let size = ty.limits.min as usize;
+            let pages = ty.limits.min as usize;
 
             self.add_mem(ir::Memory {
                 ty,
-                def: ir::MemoryDef::Bytes(vec![0; size]),
+                def: ir::MemoryDef::Bytes(vec![0; pages * PAGE_SIZE]),
             });
         }
 
@@ -564,6 +574,12 @@ impl Parser {
             }
         }
 
+        trace!("locals:");
+
+        for (idx, local) in locals.iter().enumerate() {
+            trace!("  {idx:>2}: {:?}", body.locals[*local]);
+        }
+
         let has_return = body.ty.ret.is_some();
         let body = self.parse_expr(Some((&locals, func_id)), has_return, ops_reader)?;
         self.module.funcs[func_id].body_mut().unwrap().body = body;
@@ -582,23 +598,23 @@ impl Parser {
         #[derive(Debug)]
         struct Block {
             branch: u8,
-            has_return: bool,
+            br_captures_expr: bool,
             exprs: Vec<Expr>,
         }
 
         impl Block {
-            fn main(has_return: bool) -> Self {
+            fn main(br_captures_expr: bool) -> Self {
                 Self {
                     branch: 0,
-                    has_return,
+                    br_captures_expr,
                     exprs: vec![],
                 }
             }
 
-            fn branch(branch: u8, has_return: bool) -> Self {
+            fn branch(branch: u8, br_captures_expr: bool) -> Self {
                 Self {
                     branch,
-                    has_return,
+                    br_captures_expr,
                     exprs: vec![],
                 }
             }
@@ -638,7 +654,7 @@ impl Parser {
 
             fn pop_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
                 self.blocks[self.blocks.len() - relative_depth as usize - 1]
-                    .has_return
+                    .br_captures_expr
                     .then(|| Box::new(self.pop_expr()))
             }
 
@@ -755,14 +771,32 @@ impl Parser {
 
         let mut unreachable_level = 0u32;
 
-        for op in reader {
-            let expr = match op? {
+        for op_offset in reader.into_iter_with_offsets() {
+            let (op, offset) = op_offset?;
+
+            if log_enabled!(log::Level::Trace) {
+                let indent = ":   ".repeat(ctx.blocks.len());
+
+                trace!(
+                    "{indent}{:<2} {op:?} [{unreachable_level}] @ {offset}",
+                    ctx.blocks.len()
+                );
+
+                if let Operator::Call { function_index } = op {
+                    trace!(
+                        "{indent}   func ty: {:?}",
+                        ctx.parser.module.funcs[ctx.parser.funcs[function_index as usize]].ty()
+                    );
+                }
+            }
+
+            let expr = match op {
                 op @ (Operator::Else | Operator::End) => {
                     unreachable_level = unreachable_level.saturating_sub(1);
                     let block = ctx.pop_block();
 
                     if matches!(op, Operator::Else) {
-                        ctx.blocks.push(Block::branch(1, block.has_return));
+                        ctx.blocks.push(Block::branch(1, block.br_captures_expr));
                     }
 
                     continue;
@@ -780,16 +814,19 @@ impl Parser {
 
                 Operator::Block { blockty } => {
                     let ty = make_block_type(blockty);
-                    let has_return = ty.is_some();
-                    ctx.push_block(Expr::Block(ty, vec![]), Block::main(has_return));
+                    let br_captures_expr = ty.is_some();
+                    ctx.push_block(Expr::Block(ty, vec![]), Block::main(br_captures_expr));
 
                     continue;
                 }
 
                 Operator::Loop { blockty } => {
                     let ty = make_block_type(blockty);
-                    let has_return = ty.is_some();
-                    ctx.push_block(Expr::Loop(ty, vec![]), Block::main(has_return));
+
+                    // a branch to a loop restarts the loop without popping any values off the stack
+                    let br_captures_expr = false;
+
+                    ctx.push_block(Expr::Loop(ty, vec![]), Block::main(br_captures_expr));
 
                     continue;
                 }
@@ -797,8 +834,11 @@ impl Parser {
                 Operator::If { blockty } => {
                     let condition = Box::new(ctx.pop_expr());
                     let ty = make_block_type(blockty);
-                    let has_return = ty.is_some();
-                    ctx.push_block(Expr::If(ty, condition, vec![], vec![]), Block::main(has_return));
+                    let br_captures_expr = ty.is_some();
+                    ctx.push_block(
+                        Expr::If(ty, condition, vec![], vec![]),
+                        Block::main(br_captures_expr),
+                    );
 
                     continue;
                 }
@@ -834,12 +874,16 @@ impl Parser {
                     )
                 }
 
-                Operator::Return => Expr::Return(ctx.capture_br_expr(0)),
+                Operator::Return => Expr::Return(ctx.capture_br_expr(ctx.blocks.len() as u32 - 1)),
 
                 Operator::Call { function_index } => {
                     let func_id = ctx.parser.funcs[function_index as usize];
                     let func_ty = ctx.parser.module.funcs[func_id].ty();
-                    let args = (0..func_ty.params.len()).map(|_| ctx.pop_expr()).collect();
+
+                    let mut args = (0..func_ty.params.len())
+                        .map(|_| ctx.pop_expr())
+                        .collect::<Vec<_>>();
+                    args.reverse();
 
                     Expr::Call(func_id, args)
                 }
@@ -1127,7 +1171,7 @@ impl Parser {
                 Operator::I64ExtendI32U => Expr::I64ExtendI32U(Box::new(ctx.pop_expr())),
                 Operator::I64TruncF32S => Expr::I64TruncF32S(Box::new(ctx.pop_expr())),
                 Operator::I64TruncF32U => Expr::I64TruncF32U(Box::new(ctx.pop_expr())),
-                Operator::I64TruncF64S => Expr::I32TruncF64S(Box::new(ctx.pop_expr())),
+                Operator::I64TruncF64S => Expr::I64TruncF64S(Box::new(ctx.pop_expr())),
                 Operator::I64TruncF64U => Expr::I64TruncF64U(Box::new(ctx.pop_expr())),
 
                 Operator::F32ConvertI32S => Expr::F32ConvertI32S(Box::new(ctx.pop_expr())),
@@ -1146,6 +1190,13 @@ impl Parser {
                 Operator::I64ReinterpretF64 => Expr::I64ReinterpretF64(Box::new(ctx.pop_expr())),
                 Operator::F32ReinterpretI32 => Expr::F32ReinterpretI32(Box::new(ctx.pop_expr())),
                 Operator::F64ReinterpretI64 => Expr::F64ReinterpretI64(Box::new(ctx.pop_expr())),
+
+                Operator::I32Extend8S => Expr::I32Extend8S(Box::new(ctx.pop_expr())),
+                Operator::I32Extend16S => Expr::I32Extend16S(Box::new(ctx.pop_expr())),
+
+                Operator::I64Extend8S => Expr::I64Extend8S(Box::new(ctx.pop_expr())),
+                Operator::I64Extend16S => Expr::I64Extend16S(Box::new(ctx.pop_expr())),
+                Operator::I64Extend32S => Expr::I64Extend32S(Box::new(ctx.pop_expr())),
 
                 op => unreachable!("unsupported operation {op:?}"),
             };
