@@ -1,7 +1,71 @@
+use std::fmt::{self, Debug, Display};
+
 use super::ty::ValType;
 use super::{FuncId, GlobalId, LocalId, TypeId};
 
 type BExpr = Box<Expr>;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct F32(u32);
+
+impl F32 {
+    pub fn to_f32(&self) -> f32 {
+        f32::from_bits(self.0)
+    }
+}
+
+impl Debug for F32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.to_f32())
+    }
+}
+
+impl Display for F32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_f32())
+    }
+}
+
+impl PartialOrd for F32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.to_f32().partial_cmp(&other.to_f32())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct F64(u64);
+
+impl F64 {
+    pub fn to_f64(&self) -> f64 {
+        f64::from_bits(self.0)
+    }
+}
+
+impl Debug for F64 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.to_f64())
+    }
+}
+
+impl Display for F64 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_f64())
+    }
+}
+
+impl PartialOrd for F64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.to_f64().partial_cmp(&other.to_f64())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Value {
+    I32(i32),
+    I64(i64),
+    F32(F32),
+    F64(F64),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemArg {
