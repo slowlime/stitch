@@ -9,6 +9,18 @@ type BExpr = Box<Expr>;
 pub struct F32(u32);
 
 impl F32 {
+    pub fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    pub fn from_f32(value: f32) -> Self {
+        Self::from_bits(value.to_bits())
+    }
+
+    pub fn to_bits(&self) -> u32 {
+        self.0
+    }
+
     pub fn to_f32(&self) -> f32 {
         f32::from_bits(self.0)
     }
@@ -32,10 +44,28 @@ impl PartialOrd for F32 {
     }
 }
 
+impl From<f32> for F32 {
+    fn from(value: f32) -> Self {
+        Self::from_f32(value)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct F64(u64);
 
 impl F64 {
+    pub fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    pub fn from_f64(value: f64) -> Self {
+        Self::from_bits(value.to_bits())
+    }
+
+    pub fn to_bits(&self) -> u64 {
+        self.0
+    }
+
     pub fn to_f64(&self) -> f64 {
         f64::from_bits(self.0)
     }
@@ -59,6 +89,12 @@ impl PartialOrd for F64 {
     }
 }
 
+impl From<f64> for F64 {
+    fn from(value: f64) -> Self {
+        Self::from_f64(value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Value {
     I32(i32),
@@ -78,8 +114,8 @@ pub enum Expr {
     // numeric instructions
     I32(i32),
     I64(i64),
-    F32(f32),
-    F64(f64),
+    F32(F32),
+    F64(F64),
 
     I32Clz(BExpr),
     I32Ctz(BExpr),
@@ -292,42 +328,52 @@ pub enum Expr {
 }
 
 impl Expr {
-    pub fn as_i32(&self) -> Option<i32> {
+    pub fn to_value(&self) -> Option<Value> {
+        match *self {
+            Self::I32(value) => Some(Value::I32(value)),
+            Self::I64(value) => Some(Value::I64(value)),
+            Self::F32(value) => Some(Value::F32(value)),
+            Self::F64(value) => Some(Value::F64(value)),
+            _ => None,
+        }
+    }
+
+    pub fn to_i32(&self) -> Option<i32> {
         match *self {
             Self::I32(value) => Some(value),
             _ => None,
         }
     }
 
-    pub fn as_u32(&self) -> Option<u32> {
+    pub fn to_u32(&self) -> Option<u32> {
         match *self {
             Self::I32(value) => Some(value as u32),
             _ => None,
         }
     }
 
-    pub fn as_i64(&self) -> Option<i64> {
+    pub fn to_i64(&self) -> Option<i64> {
         match *self {
             Self::I64(value) => Some(value),
             _ => None,
         }
     }
 
-    pub fn as_u64(&self) -> Option<u64> {
+    pub fn to_u64(&self) -> Option<u64> {
         match *self {
             Self::I64(value) => Some(value as u64),
             _ => None,
         }
     }
 
-    pub fn as_f32(&self) -> Option<f32> {
+    pub fn to_f32(&self) -> Option<F32> {
         match *self {
             Self::F32(value) => Some(value),
             _ => None,
         }
     }
 
-    pub fn as_f64(&self) -> Option<f64> {
+    pub fn to_f64(&self) -> Option<F64> {
         match *self {
             Self::F64(value) => Some(value),
             _ => None,

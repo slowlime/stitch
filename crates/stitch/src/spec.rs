@@ -147,9 +147,33 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             };
         }
 
+        macro_rules! try_u32 {
+            ($expr:expr) => {
+                try_i32!($expr) as u32
+            };
+        }
+
         macro_rules! try_i64 {
             ($expr:expr) => {
                 try_expr!($expr, I64)
+            };
+        }
+
+        macro_rules! try_u64 {
+            ($expr:expr) => {
+                try_i64!($expr) as u64
+            };
+        }
+
+        macro_rules! try_f32 {
+            ($expr:expr) => {
+                try_expr!($expr, F32)
+            };
+        }
+
+        macro_rules! try_f64 {
+            ($expr:expr) => {
+                try_expr!($expr, F64)
             };
         }
 
@@ -164,108 +188,176 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::I64Ctz(inner) => Expr::I64(try_i64!(inner).trailing_zeros() as i64),
             Expr::I64Popcnt(inner) => Expr::I64(try_i64!(inner).count_ones() as i64),
 
-            Expr::F32Abs(_) => todo!(),
-            Expr::F32Neg(_) => todo!(),
-            Expr::F32Sqrt(_) => todo!(),
-            Expr::F32Ceil(_) => todo!(),
-            Expr::F32Floor(_) => todo!(),
-            Expr::F32Trunc(_) => todo!(),
-            Expr::F32Nearest(_) => todo!(),
+            Expr::F32Abs(inner) => Expr::F32(try_f32!(inner).to_f32().abs().into()),
+            Expr::F32Neg(inner) => Expr::F32((-try_f32!(inner).to_f32()).into()),
+            Expr::F32Sqrt(inner) => Expr::F32(try_f32!(inner).to_f32().sqrt().into()),
+            Expr::F32Ceil(inner) => Expr::F32(try_f32!(inner).to_f32().ceil().into()),
+            Expr::F32Floor(inner) => Expr::F32(try_f32!(inner).to_f32().floor().into()),
+            Expr::F32Trunc(inner) => Expr::F32(try_f32!(inner).to_f32().trunc().into()),
+            Expr::F32Nearest(_) => expr.clone(), // TODO
 
-            Expr::F64Abs(_) => todo!(),
-            Expr::F64Neg(_) => todo!(),
-            Expr::F64Sqrt(_) => todo!(),
-            Expr::F64Ceil(_) => todo!(),
-            Expr::F64Floor(_) => todo!(),
-            Expr::F64Trunc(_) => todo!(),
-            Expr::F64Nearest(_) => todo!(),
+            Expr::F64Abs(inner) => Expr::F64(try_f64!(inner).to_f64().abs().into()),
+            Expr::F64Neg(inner) => Expr::F64((-try_f64!(inner).to_f64()).into()),
+            Expr::F64Sqrt(inner) => Expr::F64(try_f64!(inner).to_f64().sqrt().into()),
+            Expr::F64Ceil(inner) => Expr::F64(try_f64!(inner).to_f64().ceil().into()),
+            Expr::F64Floor(inner) => Expr::F64(try_f64!(inner).to_f64().floor().into()),
+            Expr::F64Trunc(inner) => Expr::F64(try_f64!(inner).to_f64().trunc().into()),
+            Expr::F64Nearest(_) => expr.clone(), // TODO
 
-            Expr::I32Add(_, _) => todo!(),
-            Expr::I32Sub(_, _) => todo!(),
-            Expr::I32Mul(_, _) => todo!(),
-            Expr::I32DivS(_, _) => todo!(),
-            Expr::I32DivU(_, _) => todo!(),
-            Expr::I32RemS(_, _) => todo!(),
-            Expr::I32RemU(_, _) => todo!(),
-            Expr::I32And(_, _) => todo!(),
-            Expr::I32Or(_, _) => todo!(),
-            Expr::I32Xor(_, _) => todo!(),
-            Expr::I32Shl(_, _) => todo!(),
-            Expr::I32ShrS(_, _) => todo!(),
-            Expr::I32ShrU(_, _) => todo!(),
-            Expr::I32Rotl(_, _) => todo!(),
-            Expr::I32Rotr(_, _) => todo!(),
+            Expr::I32Add(lhs, rhs) => Expr::I32(try_i32!(lhs).wrapping_add(try_i32!(rhs))),
+            Expr::I32Sub(lhs, rhs) => Expr::I32(try_i32!(lhs).wrapping_sub(try_i32!(rhs))),
+            Expr::I32Mul(lhs, rhs) => Expr::I32(try_i32!(lhs).wrapping_mul(try_i32!(rhs))),
+            Expr::I32DivS(lhs, rhs) => Expr::I32(try_i32!(lhs).wrapping_div(try_i32!(rhs))),
+            Expr::I32DivU(lhs, rhs) => Expr::I32(try_u32!(lhs).wrapping_div(try_u32!(rhs)) as i32),
 
-            Expr::I64Add(_, _) => todo!(),
-            Expr::I64Sub(_, _) => todo!(),
-            Expr::I64Mul(_, _) => todo!(),
-            Expr::I64DivS(_, _) => todo!(),
-            Expr::I64DivU(_, _) => todo!(),
-            Expr::I64RemS(_, _) => todo!(),
-            Expr::I64RemU(_, _) => todo!(),
-            Expr::I64And(_, _) => todo!(),
-            Expr::I64Or(_, _) => todo!(),
-            Expr::I64Xor(_, _) => todo!(),
-            Expr::I64Shl(_, _) => todo!(),
-            Expr::I64ShrS(_, _) => todo!(),
-            Expr::I64ShrU(_, _) => todo!(),
-            Expr::I64Rotl(_, _) => todo!(),
-            Expr::I64Rotr(_, _) => todo!(),
+            Expr::I32RemS(lhs, rhs) => match try_i32!(rhs) {
+                0 => expr.clone(), // undefined
+                rhs => Expr::I32(try_i32!(lhs).wrapping_rem(rhs)),
+            },
 
-            Expr::F32Add(_, _) => todo!(),
-            Expr::F32Sub(_, _) => todo!(),
-            Expr::F32Mul(_, _) => todo!(),
-            Expr::F32Div(_, _) => todo!(),
-            Expr::F32Min(_, _) => todo!(),
-            Expr::F32Max(_, _) => todo!(),
-            Expr::F32Copysign(_, _) => todo!(),
+            Expr::I32RemU(lhs, rhs) => match try_u32!(rhs) {
+                0 => expr.clone(), // undefined
+                rhs => Expr::I32(try_u32!(lhs).wrapping_rem(rhs) as i32),
+            },
 
-            Expr::F64Add(_, _) => todo!(),
-            Expr::F64Sub(_, _) => todo!(),
-            Expr::F64Mul(_, _) => todo!(),
-            Expr::F64Div(_, _) => todo!(),
-            Expr::F64Min(_, _) => todo!(),
-            Expr::F64Max(_, _) => todo!(),
-            Expr::F64Copysign(_, _) => todo!(),
+            Expr::I32And(lhs, rhs) => Expr::I32(try_i32!(lhs) & try_i32!(rhs)),
+            Expr::I32Or(lhs, rhs) => Expr::I32(try_i32!(lhs) | try_i32!(rhs)),
+            Expr::I32Xor(lhs, rhs) => Expr::I32(try_i32!(lhs) ^ try_i32!(rhs)),
+            Expr::I32Shl(lhs, rhs) => Expr::I32(try_i32!(lhs).wrapping_shl(try_u32!(rhs))),
+            Expr::I32ShrS(lhs, rhs) => Expr::I32(try_i32!(lhs).wrapping_shr(try_u32!(rhs))),
+            Expr::I32ShrU(lhs, rhs) => Expr::I32(try_u32!(lhs).wrapping_shr(try_u32!(rhs)) as i32),
+            Expr::I32Rotl(lhs, rhs) => Expr::I32(try_i32!(lhs).rotate_left(try_u32!(rhs))),
+            Expr::I32Rotr(lhs, rhs) => Expr::I32(try_i32!(lhs).rotate_right(try_u32!(rhs))),
 
-            Expr::I32Eqz(_) => todo!(),
-            Expr::I64Eqz(_) => todo!(),
+            Expr::I64Add(lhs, rhs) => Expr::I64(try_i64!(lhs).wrapping_add(try_i64!(rhs))),
+            Expr::I64Sub(lhs, rhs) => Expr::I64(try_i64!(lhs).wrapping_sub(try_i64!(rhs))),
+            Expr::I64Mul(lhs, rhs) => Expr::I64(try_i64!(lhs).wrapping_mul(try_i64!(rhs))),
+            Expr::I64DivS(lhs, rhs) => Expr::I64(try_i64!(lhs).wrapping_div(try_i64!(rhs))),
+            Expr::I64DivU(lhs, rhs) => Expr::I64(try_u64!(lhs).wrapping_div(try_u64!(rhs)) as i64),
 
-            Expr::I32Eq(_, _) => todo!(),
-            Expr::I32Ne(_, _) => todo!(),
-            Expr::I32LtS(_, _) => todo!(),
-            Expr::I32LtU(_, _) => todo!(),
-            Expr::I32GtS(_, _) => todo!(),
-            Expr::I32GtU(_, _) => todo!(),
-            Expr::I32LeS(_, _) => todo!(),
-            Expr::I32LeU(_, _) => todo!(),
-            Expr::I32GeS(_, _) => todo!(),
-            Expr::I32GeU(_, _) => todo!(),
+            Expr::I64RemS(lhs, rhs) => match try_i64!(rhs) {
+                0 => expr.clone(),
+                rhs => Expr::I64(try_i64!(lhs).wrapping_rem(rhs)),
+            },
 
-            Expr::I64Eq(_, _) => todo!(),
-            Expr::I64Ne(_, _) => todo!(),
-            Expr::I64LtS(_, _) => todo!(),
-            Expr::I64LtU(_, _) => todo!(),
-            Expr::I64GtS(_, _) => todo!(),
-            Expr::I64GtU(_, _) => todo!(),
-            Expr::I64LeS(_, _) => todo!(),
-            Expr::I64LeU(_, _) => todo!(),
-            Expr::I64GeS(_, _) => todo!(),
-            Expr::I64GeU(_, _) => todo!(),
+            Expr::I64RemU(lhs, rhs) => match try_u64!(rhs) {
+                0 => expr.clone(),
+                rhs => Expr::I64(try_u64!(lhs).wrapping_rem(rhs) as i64),
+            },
 
-            Expr::F32Eq(_, _) => todo!(),
-            Expr::F32Ne(_, _) => todo!(),
-            Expr::F32Lt(_, _) => todo!(),
-            Expr::F32Gt(_, _) => todo!(),
-            Expr::F32Le(_, _) => todo!(),
-            Expr::F32Ge(_, _) => todo!(),
+            Expr::I64And(lhs, rhs) => Expr::I64(try_i64!(lhs) & try_i64!(rhs)),
+            Expr::I64Or(lhs, rhs) => Expr::I64(try_i64!(lhs) | try_i64!(rhs)),
+            Expr::I64Xor(lhs, rhs) => Expr::I64(try_i64!(lhs) ^ try_i64!(rhs)),
+            Expr::I64Shl(lhs, rhs) => Expr::I64(try_i64!(lhs).wrapping_shl(try_u64!(rhs) as u32)),
+            Expr::I64ShrS(lhs, rhs) => Expr::I64(try_i64!(lhs).wrapping_shr(try_u64!(rhs) as u32)),
 
-            Expr::F64Eq(_, _) => todo!(),
-            Expr::F64Ne(_, _) => todo!(),
-            Expr::F64Lt(_, _) => todo!(),
-            Expr::F64Gt(_, _) => todo!(),
-            Expr::F64Le(_, _) => todo!(),
-            Expr::F64Ge(_, _) => todo!(),
+            Expr::I64ShrU(lhs, rhs) => {
+                Expr::I64(try_u64!(lhs).wrapping_shr(try_u64!(rhs) as u32) as i64)
+            }
+
+            Expr::I64Rotl(lhs, rhs) => Expr::I64(try_i64!(lhs).rotate_left(try_u64!(rhs) as u32)),
+            Expr::I64Rotr(lhs, rhs) => Expr::I64(try_i64!(lhs).rotate_right(try_u64!(rhs) as u32)),
+
+            Expr::F32Add(lhs, rhs) => {
+                Expr::F32((try_f32!(lhs).to_f32() + try_f32!(rhs).to_f32()).into())
+            }
+
+            Expr::F32Sub(lhs, rhs) => {
+                Expr::F32((try_f32!(lhs).to_f32() - try_f32!(rhs).to_f32()).into())
+            }
+
+            Expr::F32Mul(lhs, rhs) => {
+                Expr::F32((try_f32!(lhs).to_f32() * try_f32!(rhs).to_f32()).into())
+            }
+
+            Expr::F32Div(lhs, rhs) => {
+                Expr::F32((try_f32!(lhs).to_f32() / try_f32!(rhs).to_f32()).into())
+            }
+
+            Expr::F32Min(lhs, rhs) => {
+                Expr::F32(try_f32!(lhs).to_f32().min(try_f32!(rhs).to_f32()).into())
+            }
+
+            Expr::F32Max(lhs, rhs) => {
+                Expr::F32(try_f32!(lhs).to_f32().max(try_f32!(rhs).to_f32()).into())
+            }
+
+            Expr::F32Copysign(lhs, rhs) => Expr::F32(
+                try_f32!(lhs)
+                    .to_f32()
+                    .copysign(try_f32!(rhs).to_f32())
+                    .into(),
+            ),
+
+            Expr::F64Add(lhs, rhs) => {
+                Expr::F64((try_f64!(lhs).to_f64() + try_f64!(rhs).to_f64()).into())
+            }
+
+            Expr::F64Sub(lhs, rhs) => {
+                Expr::F64((try_f64!(lhs).to_f64() - try_f64!(rhs).to_f64()).into())
+            }
+
+            Expr::F64Mul(lhs, rhs) => {
+                Expr::F64((try_f64!(lhs).to_f64() * try_f64!(rhs).to_f64()).into())
+            }
+
+            Expr::F64Div(lhs, rhs) => {
+                Expr::F64((try_f64!(lhs).to_f64() / try_f64!(rhs).to_f64()).into())
+            }
+
+            Expr::F64Min(lhs, rhs) => {
+                Expr::F64(try_f64!(lhs).to_f64().min(try_f64!(rhs).to_f64()).into())
+            }
+
+            Expr::F64Max(lhs, rhs) => {
+                Expr::F64(try_f64!(lhs).to_f64().max(try_f64!(rhs).to_f64()).into())
+            }
+
+            Expr::F64Copysign(lhs, rhs) => Expr::F64(
+                try_f64!(lhs)
+                    .to_f64()
+                    .copysign(try_f64!(rhs).to_f64())
+                    .into(),
+            ),
+
+            Expr::I32Eqz(inner) => Expr::I32((try_i32!(inner) == 0) as i32),
+            Expr::I64Eqz(inner) => Expr::I32((try_i64!(inner) == 0) as i32),
+
+            Expr::I32Eq(lhs, rhs) => Expr::I32((try_i32!(lhs) == try_i32!(rhs)) as i32),
+            Expr::I32Ne(lhs, rhs) => Expr::I32((try_i32!(lhs) != try_i32!(rhs)) as i32),
+            Expr::I32LtS(lhs, rhs) => Expr::I32((try_i32!(lhs) < try_i32!(rhs)) as i32),
+            Expr::I32LtU(lhs, rhs) => Expr::I32((try_u32!(lhs) < try_u32!(rhs)) as i32),
+            Expr::I32GtS(lhs, rhs) => Expr::I32((try_i32!(lhs) > try_i32!(rhs)) as i32),
+            Expr::I32GtU(lhs, rhs) => Expr::I32((try_u32!(lhs) > try_u32!(rhs)) as i32),
+            Expr::I32LeS(lhs, rhs) => Expr::I32((try_i32!(lhs) <= try_i32!(rhs)) as i32),
+            Expr::I32LeU(lhs, rhs) => Expr::I32((try_u32!(lhs) <= try_u32!(rhs)) as i32),
+            Expr::I32GeS(lhs, rhs) => Expr::I32((try_i32!(lhs) >= try_i32!(rhs)) as i32),
+            Expr::I32GeU(lhs, rhs) => Expr::I32((try_u32!(lhs) >= try_u32!(rhs)) as i32),
+
+            Expr::I64Eq(lhs, rhs) => Expr::I32((try_i64!(lhs) == try_i64!(rhs)) as i32),
+            Expr::I64Ne(lhs, rhs) => Expr::I32((try_i64!(lhs) != try_i64!(rhs)) as i32),
+            Expr::I64LtS(lhs, rhs) => Expr::I32((try_i64!(lhs) < try_i64!(rhs)) as i32),
+            Expr::I64LtU(lhs, rhs) => Expr::I32((try_u64!(lhs) < try_u64!(rhs)) as i32),
+            Expr::I64GtS(lhs, rhs) => Expr::I32((try_i64!(lhs) > try_i64!(rhs)) as i32),
+            Expr::I64GtU(lhs, rhs) => Expr::I32((try_u64!(lhs) > try_u64!(rhs)) as i32),
+            Expr::I64LeS(lhs, rhs) => Expr::I32((try_i64!(lhs) <= try_i64!(rhs)) as i32),
+            Expr::I64LeU(lhs, rhs) => Expr::I32((try_u64!(lhs) <= try_u64!(rhs)) as i32),
+            Expr::I64GeS(lhs, rhs) => Expr::I32((try_i64!(lhs) >= try_i64!(rhs)) as i32),
+            Expr::I64GeU(lhs, rhs) => Expr::I32((try_u64!(lhs) >= try_u64!(rhs)) as i32),
+
+            Expr::F32Eq(lhs, rhs) => Expr::I32((try_f32!(lhs) == try_f32!(rhs)) as i32),
+            Expr::F32Ne(lhs, rhs) => Expr::I32((try_f32!(lhs) != try_f32!(rhs)) as i32),
+            Expr::F32Lt(lhs, rhs) => Expr::I32((try_f32!(lhs) < try_f32!(rhs)) as i32),
+            Expr::F32Gt(lhs, rhs) => Expr::I32((try_f32!(lhs) > try_f32!(rhs)) as i32),
+            Expr::F32Le(lhs, rhs) => Expr::I32((try_f32!(lhs) <= try_f32!(rhs)) as i32),
+            Expr::F32Ge(lhs, rhs) => Expr::I32((try_f32!(lhs) >= try_f32!(rhs)) as i32),
+
+            Expr::F64Eq(lhs, rhs) => Expr::I32((try_f64!(lhs) == try_f64!(rhs)) as i32),
+            Expr::F64Ne(lhs, rhs) => Expr::I32((try_f64!(lhs) != try_f64!(rhs)) as i32),
+            Expr::F64Lt(lhs, rhs) => Expr::I32((try_f64!(lhs) < try_f64!(rhs)) as i32),
+            Expr::F64Gt(lhs, rhs) => Expr::I32((try_f64!(lhs) > try_f64!(rhs)) as i32),
+            Expr::F64Le(lhs, rhs) => Expr::I32((try_f64!(lhs) <= try_f64!(rhs)) as i32),
+            Expr::F64Ge(lhs, rhs) => Expr::I32((try_f64!(lhs) >= try_f64!(rhs)) as i32),
 
             Expr::I32WrapI64(_) => todo!(),
 

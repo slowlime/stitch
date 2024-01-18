@@ -7,7 +7,7 @@ use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
-use crate::ir::expr::{ExprTy, ReturnValueCount};
+use crate::ir::expr::{ExprTy, ReturnValueCount, F32, F64};
 use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, LocalId, MemoryId, TableId, TypeId};
 
 const PAGE_SIZE: usize = 65536;
@@ -487,7 +487,7 @@ impl Parser {
                 .try_into()
                 .unwrap();
             let offset = offset
-                .as_u32()
+                .to_u32()
                 .expect("table offset expr must have type i32");
 
             let table = &mut self.module.tables[self.tables[table_idx as usize]];
@@ -536,7 +536,7 @@ impl Parser {
                 .parse_expr(None, true, offset_expr.get_operators_reader())?
                 .try_into()
                 .unwrap();
-            let offset = offset.as_u32().expect("data segment offset must be an i32") as usize;
+            let offset = offset.to_u32().expect("data segment offset must be an i32") as usize;
             let range = offset..(data.data.len() + offset as usize);
 
             let ir::MemoryDef::Bytes(ref mut bytes) = self.module.mems[self.mems[mem_idx]].def
@@ -1052,8 +1052,8 @@ impl Parser {
 
                 Operator::I32Const { value } => Expr::I32(value),
                 Operator::I64Const { value } => Expr::I64(value),
-                Operator::F32Const { value } => Expr::F32(f32::from_bits(value.bits())),
-                Operator::F64Const { value } => Expr::F64(f64::from_bits(value.bits())),
+                Operator::F32Const { value } => Expr::F32(F32::from_bits(value.bits())),
+                Operator::F64Const { value } => Expr::F64(F64::from_bits(value.bits())),
 
                 Operator::I32Eqz => Expr::I32Eqz(Box::new(ctx.pop_expr())),
                 Operator::I32Eq => ctx.pop_expr2(Expr::I32Eq),

@@ -377,8 +377,8 @@ impl Encoder<'_> {
         Some(match *expr {
             Expr::I32(value) => ConstExpr::i32_const(value),
             Expr::I64(value) => ConstExpr::i64_const(value),
-            Expr::F32(value) => ConstExpr::f32_const(value),
-            Expr::F64(value) => ConstExpr::f64_const(value),
+            Expr::F32(value) => ConstExpr::f32_const(value.to_f32()),
+            Expr::F64(value) => ConstExpr::f64_const(value.to_f64()),
             Expr::GlobalGet(global_id) => ConstExpr::global_get(self.globals[global_id] as u32),
             _ => return None,
         })
@@ -412,8 +412,8 @@ impl<'a> BodyEncoder<'a, '_> {
         match expr {
             Expr::I32(value) => self.nullary(Instruction::I32Const(*value)),
             Expr::I64(value) => self.nullary(Instruction::I64Const(*value)),
-            Expr::F32(value) => self.nullary(Instruction::F32Const(*value)),
-            Expr::F64(value) => self.nullary(Instruction::F64Const(*value)),
+            Expr::F32(value) => self.nullary(Instruction::F32Const(value.to_f32())),
+            Expr::F64(value) => self.nullary(Instruction::F64Const(value.to_f64())),
 
             Expr::I32Clz(inner) => self.unary(inner, Instruction::I32Clz),
             Expr::I32Ctz(inner) => self.unary(inner, Instruction::I32Ctz),
