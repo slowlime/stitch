@@ -3,7 +3,7 @@ use std::mem;
 
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
-use crate::ir::expr::Value;
+use crate::ir::expr::{Value, F32, F64};
 use crate::ir::{Expr, Func, FuncBody, FuncId, LocalId, Module};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -359,44 +359,44 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::F64Le(lhs, rhs) => Expr::I32((try_f64!(lhs) <= try_f64!(rhs)) as i32),
             Expr::F64Ge(lhs, rhs) => Expr::I32((try_f64!(lhs) >= try_f64!(rhs)) as i32),
 
-            Expr::I32WrapI64(_) => todo!(),
+            Expr::I32WrapI64(inner) => Expr::I32(try_i64!(inner) as i32),
 
-            Expr::I64ExtendI32S(_) => todo!(),
-            Expr::I64ExtendI32U(_) => todo!(),
+            Expr::I64ExtendI32S(inner) => Expr::I64(try_i32!(inner) as i64),
+            Expr::I64ExtendI32U(inner) => Expr::I64(try_u32!(inner) as i64),
 
-            Expr::I32TruncF32S(_) => todo!(),
-            Expr::I32TruncF32U(_) => todo!(),
-            Expr::I32TruncF64S(_) => todo!(),
-            Expr::I32TruncF64U(_) => todo!(),
+            Expr::I32TruncF32S(inner) => Expr::I32(try_f32!(inner).to_f32() as i32),
+            Expr::I32TruncF32U(inner) => Expr::I32(try_f32!(inner).to_f32() as u32 as i32),
+            Expr::I32TruncF64S(inner) => Expr::I32(try_f64!(inner).to_f64() as i32),
+            Expr::I32TruncF64U(inner) => Expr::I32(try_f64!(inner).to_f64() as u32 as i32),
 
-            Expr::I64TruncF32S(_) => todo!(),
-            Expr::I64TruncF32U(_) => todo!(),
-            Expr::I64TruncF64S(_) => todo!(),
-            Expr::I64TruncF64U(_) => todo!(),
+            Expr::I64TruncF32S(inner) => Expr::I64(try_f32!(inner).to_f32() as i64),
+            Expr::I64TruncF32U(inner) => Expr::I64(try_f32!(inner).to_f32() as u64 as i64),
+            Expr::I64TruncF64S(inner) => Expr::I64(try_f64!(inner).to_f64() as i64),
+            Expr::I64TruncF64U(inner) => Expr::I64(try_f64!(inner).to_f64() as u64 as i64),
 
-            Expr::F32DemoteF64(_) => todo!(),
-            Expr::F64PromoteF32(_) => todo!(),
+            Expr::F32DemoteF64(inner) => Expr::F32((try_f64!(inner).to_f64() as f32).into()),
+            Expr::F64PromoteF32(inner) => Expr::F64((try_f32!(inner).to_f32() as f64).into()),
 
-            Expr::F32ConvertI32S(_) => todo!(),
-            Expr::F32ConvertI32U(_) => todo!(),
-            Expr::F32ConvertI64S(_) => todo!(),
-            Expr::F32ConvertI64U(_) => todo!(),
+            Expr::F32ConvertI32S(inner) => Expr::F32((try_i32!(inner) as f32).into()),
+            Expr::F32ConvertI32U(inner) => Expr::F32((try_u32!(inner) as f32).into()),
+            Expr::F32ConvertI64S(inner) => Expr::F32((try_i64!(inner) as f32).into()),
+            Expr::F32ConvertI64U(inner) => Expr::F32((try_u64!(inner) as f32).into()),
 
-            Expr::F64ConvertI32S(_) => todo!(),
-            Expr::F64ConvertI32U(_) => todo!(),
-            Expr::F64ConvertI64S(_) => todo!(),
-            Expr::F64ConvertI64U(_) => todo!(),
+            Expr::F64ConvertI32S(inner) => Expr::F64((try_i32!(inner) as f64).into()),
+            Expr::F64ConvertI32U(inner) => Expr::F64((try_u32!(inner) as f64).into()),
+            Expr::F64ConvertI64S(inner) => Expr::F64((try_i64!(inner) as f64).into()),
+            Expr::F64ConvertI64U(inner) => Expr::F64((try_u64!(inner) as f64).into()),
 
-            Expr::F32ReinterpretI32(_) => todo!(),
-            Expr::F64ReinterpretI64(_) => todo!(),
-            Expr::I32ReinterpretF32(_) => todo!(),
-            Expr::I64ReinterpretF64(_) => todo!(),
+            Expr::F32ReinterpretI32(inner) => Expr::F32(F32::from_bits(try_u32!(inner))),
+            Expr::F64ReinterpretI64(inner) => Expr::F64(F64::from_bits(try_u64!(inner))),
+            Expr::I32ReinterpretF32(inner) => Expr::I32(try_f32!(inner).to_bits() as i32),
+            Expr::I64ReinterpretF64(inner) => Expr::I64(try_f64!(inner).to_bits() as i64),
 
-            Expr::I32Extend8S(_) => todo!(),
-            Expr::I32Extend16S(_) => todo!(),
-            Expr::I64Extend8S(_) => todo!(),
-            Expr::I64Extend16S(_) => todo!(),
-            Expr::I64Extend32S(_) => todo!(),
+            Expr::I32Extend8S(inner) => Expr::I32(try_u32!(inner) as i8 as i32),
+            Expr::I32Extend16S(inner) => Expr::I32(try_u32!(inner) as i16 as i32),
+            Expr::I64Extend8S(inner) => Expr::I64(try_u64!(inner) as i8 as i64),
+            Expr::I64Extend16S(inner) => Expr::I64(try_u64!(inner) as i16 as i64),
+            Expr::I64Extend32S(inner) => Expr::I64(try_u64!(inner) as i32 as i64),
 
             Expr::Drop(_) => todo!(),
             Expr::Select(_, _, _) => todo!(),
