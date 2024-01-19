@@ -327,7 +327,308 @@ pub enum Expr {
     CallIndirect(TypeId, BExpr, Vec<Expr>),
 }
 
+pub trait Visitor {
+    fn visit(&mut self, expr: Expr) -> Expr;
+}
+
+impl<F> Visitor for F
+where
+    F: FnMut(Expr) -> Expr,
+{
+    fn visit(&mut self, expr: Expr) -> Expr {
+        self(expr)
+    }
+}
+
 impl Expr {
+    pub fn map<V: Visitor>(&self, v: &mut V) -> Expr {
+        let expr = match self {
+            Self::I32(_) | Self::I64(_) | Self::F32(_) | Self::F64(_) => return v.visit(self.clone()),
+
+            Self::I32Clz(inner) => Self::I32Clz(Box::new(inner.map(v))),
+            Self::I32Ctz(inner) => Self::I32Ctz(Box::new(inner.map(v))),
+            Self::I32Popcnt(inner) => Self::I32Popcnt(Box::new(inner.map(v))),
+
+            Self::I64Clz(inner) => Self::I64Clz(Box::new(inner.map(v))),
+            Self::I64Ctz(inner) => Self::I64Ctz(Box::new(inner.map(v))),
+            Self::I64Popcnt(inner) => Self::I64Popcnt(Box::new(inner.map(v))),
+
+            Self::F32Abs(inner) => Self::F32Abs(Box::new(inner.map(v))),
+            Self::F32Neg(inner) => Self::F32Neg(Box::new(inner.map(v))),
+            Self::F32Sqrt(inner) => Self::F32Sqrt(Box::new(inner.map(v))),
+            Self::F32Ceil(inner) => Self::F32Ceil(Box::new(inner.map(v))),
+            Self::F32Floor(inner) => Self::F32Floor(Box::new(inner.map(v))),
+            Self::F32Trunc(inner) => Self::F32Trunc(Box::new(inner.map(v))),
+            Self::F32Nearest(inner) => Self::F32Nearest(Box::new(inner.map(v))),
+
+            Self::F64Abs(inner) => Self::F64Abs(Box::new(inner.map(v))),
+            Self::F64Neg(inner) => Self::F64Neg(Box::new(inner.map(v))),
+            Self::F64Sqrt(inner) => Self::F64Sqrt(Box::new(inner.map(v))),
+            Self::F64Ceil(inner) => Self::F64Ceil(Box::new(inner.map(v))),
+            Self::F64Floor(inner) => Self::F64Floor(Box::new(inner.map(v))),
+            Self::F64Trunc(inner) => Self::F64Trunc(Box::new(inner.map(v))),
+            Self::F64Nearest(inner) => Self::F64Nearest(Box::new(inner.map(v))),
+
+            Self::I32Add(lhs, rhs) => Self::I32Add(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32Sub(lhs, rhs) => Self::I32Sub(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32Mul(lhs, rhs) => Self::I32Mul(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32DivS(lhs, rhs) => Self::I32DivS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32DivU(lhs, rhs) => Self::I32DivU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32RemS(lhs, rhs) => Self::I32RemS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32RemU(lhs, rhs) => Self::I32RemU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32And(lhs, rhs) => Self::I32And(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32Or(lhs, rhs) => Self::I32Or(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32Xor(lhs, rhs) => Self::I32Xor(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32Shl(lhs, rhs) => Self::I32Shl(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32ShrS(lhs, rhs) => Self::I32ShrS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32ShrU(lhs, rhs) => Self::I32ShrU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32Rotl(lhs, rhs) => Self::I32Rotl(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32Rotr(lhs, rhs) => Self::I32Rotr(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+
+            Self::I64Add(lhs, rhs) => Self::I64Add(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64Sub(lhs, rhs) => Self::I64Sub(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64Mul(lhs, rhs) => Self::I64Mul(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64DivS(lhs, rhs) => Self::I64DivS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64DivU(lhs, rhs) => Self::I64DivU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64RemS(lhs, rhs) => Self::I64RemS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64RemU(lhs, rhs) => Self::I64RemU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64And(lhs, rhs) => Self::I64And(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64Or(lhs, rhs) => Self::I64Or(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64Xor(lhs, rhs) => Self::I64Xor(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64Shl(lhs, rhs) => Self::I64Shl(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64ShrS(lhs, rhs) => Self::I64ShrS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64ShrU(lhs, rhs) => Self::I64ShrU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64Rotl(lhs, rhs) => Self::I64Rotl(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64Rotr(lhs, rhs) => Self::I64Rotr(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+
+            Self::F32Add(lhs, rhs) => Self::F32Add(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Sub(lhs, rhs) => Self::F32Sub(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Mul(lhs, rhs) => Self::F32Mul(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Div(lhs, rhs) => Self::F32Div(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Min(lhs, rhs) => Self::F32Min(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Max(lhs, rhs) => Self::F32Max(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+
+            Self::F32Copysign(lhs, rhs) => {
+                Self::F32Copysign(Box::new(lhs.map(v)), Box::new(rhs.map(v)))
+            }
+
+            Self::F64Add(lhs, rhs) => Self::F64Add(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Sub(lhs, rhs) => Self::F64Sub(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Mul(lhs, rhs) => Self::F64Mul(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Div(lhs, rhs) => Self::F64Div(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Min(lhs, rhs) => Self::F64Min(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Max(lhs, rhs) => Self::F64Max(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+
+            Self::F64Copysign(lhs, rhs) => {
+                Self::F64Copysign(Box::new(lhs.map(v)), Box::new(rhs.map(v)))
+            }
+
+            Self::I32Eqz(inner) => Self::I32Eqz(Box::new(inner.map(v))),
+            Self::I64Eqz(inner) => Self::I64Eqz(Box::new(inner.map(v))),
+
+            Self::I32Eq(lhs, rhs) => Self::I32Eq(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32Ne(lhs, rhs) => Self::I32Ne(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32LtS(lhs, rhs) => Self::I32LtS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32LtU(lhs, rhs) => Self::I32LtU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32GtS(lhs, rhs) => Self::I32GtS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32GtU(lhs, rhs) => Self::I32GtU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32LeS(lhs, rhs) => Self::I32LeS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32LeU(lhs, rhs) => Self::I32LeU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32GeS(lhs, rhs) => Self::I32GeS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I32GeU(lhs, rhs) => Self::I32GeU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+
+            Self::I64Eq(lhs, rhs) => Self::I64Eq(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64Ne(lhs, rhs) => Self::I64Ne(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64LtS(lhs, rhs) => Self::I64LtS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64LtU(lhs, rhs) => Self::I64LtU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64GtS(lhs, rhs) => Self::I64GtS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64GtU(lhs, rhs) => Self::I64GtU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64LeS(lhs, rhs) => Self::I64LeS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64LeU(lhs, rhs) => Self::I64LeU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64GeS(lhs, rhs) => Self::I64GeS(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::I64GeU(lhs, rhs) => Self::I64GeU(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+
+            Self::F32Eq(lhs, rhs) => Self::F32Eq(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Ne(lhs, rhs) => Self::F32Ne(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Lt(lhs, rhs) => Self::F32Lt(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Gt(lhs, rhs) => Self::F32Gt(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Le(lhs, rhs) => Self::F32Le(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F32Ge(lhs, rhs) => Self::F32Ge(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+
+            Self::F64Eq(lhs, rhs) => Self::F64Eq(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Ne(lhs, rhs) => Self::F64Ne(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Lt(lhs, rhs) => Self::F64Lt(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Gt(lhs, rhs) => Self::F64Gt(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Le(lhs, rhs) => Self::F64Le(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+            Self::F64Ge(lhs, rhs) => Self::F64Ge(Box::new(lhs.map(v)), Box::new(rhs.map(v))),
+
+            Self::I32WrapI64(inner) => Self::I32WrapI64(Box::new(inner.map(v))),
+
+            Self::I64ExtendI32S(inner) => Self::I64ExtendI32S(Box::new(inner.map(v))),
+            Self::I64ExtendI32U(inner) => Self::I64ExtendI32U(Box::new(inner.map(v))),
+
+            Self::I32TruncF32S(inner) => Self::I32TruncF32S(Box::new(inner.map(v))),
+            Self::I32TruncF32U(inner) => Self::I32TruncF32U(Box::new(inner.map(v))),
+            Self::I32TruncF64S(inner) => Self::I32TruncF64S(Box::new(inner.map(v))),
+            Self::I32TruncF64U(inner) => Self::I32TruncF64U(Box::new(inner.map(v))),
+
+            Self::I64TruncF32S(inner) => Self::I64TruncF32S(Box::new(inner.map(v))),
+            Self::I64TruncF32U(inner) => Self::I64TruncF32U(Box::new(inner.map(v))),
+            Self::I64TruncF64S(inner) => Self::I64TruncF64S(Box::new(inner.map(v))),
+            Self::I64TruncF64U(inner) => Self::I64TruncF64U(Box::new(inner.map(v))),
+
+            Self::F32DemoteF64(inner) => Self::F32DemoteF64(Box::new(inner.map(v))),
+            Self::F64PromoteF32(inner) => Self::F64PromoteF32(Box::new(inner.map(v))),
+
+            Self::F32ConvertI32S(inner) => Self::F32ConvertI32S(Box::new(inner.map(v))),
+            Self::F32ConvertI32U(inner) => Self::F32ConvertI32U(Box::new(inner.map(v))),
+            Self::F32ConvertI64S(inner) => Self::F32ConvertI64S(Box::new(inner.map(v))),
+            Self::F32ConvertI64U(inner) => Self::F32ConvertI64U(Box::new(inner.map(v))),
+
+            Self::F64ConvertI32S(inner) => Self::F64ConvertI32S(Box::new(inner.map(v))),
+            Self::F64ConvertI32U(inner) => Self::F64ConvertI32U(Box::new(inner.map(v))),
+            Self::F64ConvertI64S(inner) => Self::F64ConvertI64S(Box::new(inner.map(v))),
+            Self::F64ConvertI64U(inner) => Self::F64ConvertI64U(Box::new(inner.map(v))),
+
+            Self::F32ReinterpretI32(inner) => Self::F32ReinterpretI32(Box::new(inner.map(v))),
+            Self::F64ReinterpretI64(inner) => Self::F64ReinterpretI64(Box::new(inner.map(v))),
+            Self::I32ReinterpretF32(inner) => Self::I32ReinterpretF32(Box::new(inner.map(v))),
+            Self::I64ReinterpretF64(inner) => Self::I64ReinterpretF64(Box::new(inner.map(v))),
+
+            Self::I32Extend8S(inner) => Self::I32Extend8S(Box::new(inner.map(v))),
+            Self::I32Extend16S(inner) => Self::I32Extend16S(Box::new(inner.map(v))),
+            Self::I64Extend8S(inner) => Self::I64Extend8S(Box::new(inner.map(v))),
+            Self::I64Extend16S(inner) => Self::I64Extend16S(Box::new(inner.map(v))),
+            Self::I64Extend32S(inner) => Self::I64Extend32S(Box::new(inner.map(v))),
+
+            Self::Drop(inner) => Self::Drop(Box::new(inner.map(v))),
+
+            Self::Select(first, second, condition) => Self::Select(
+                Box::new(first.map(v)),
+                Box::new(second.map(v)),
+                Box::new(condition.map(v)),
+            ),
+
+            Self::LocalGet(_) => return v.visit(self.clone()),
+            Self::LocalSet(local_id, value) => Self::LocalSet(*local_id, Box::new(value.map(v))),
+            Self::LocalTee(local_id, value) => Self::LocalTee(*local_id, Box::new(value.map(v))),
+
+            Self::GlobalGet(_) => return v.visit(self.clone()),
+
+            Self::GlobalSet(global_id, value) => {
+                Self::GlobalSet(*global_id, Box::new(value.map(v)))
+            }
+
+            Self::I32Load(mem_arg, inner) => Self::I32Load(*mem_arg, Box::new(inner.map(v))),
+            Self::I64Load(mem_arg, inner) => Self::I64Load(*mem_arg, Box::new(inner.map(v))),
+            Self::F32Load(mem_arg, inner) => Self::F32Load(*mem_arg, Box::new(inner.map(v))),
+            Self::F64Load(mem_arg, inner) => Self::F64Load(*mem_arg, Box::new(inner.map(v))),
+
+            Self::I32Store(mem_arg, addr, value) => {
+                Self::I32Store(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::I64Store(mem_arg, addr, value) => {
+                Self::I64Store(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::F32Store(mem_arg, addr, value) => {
+                Self::F32Store(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::F64Store(mem_arg, addr, value) => {
+                Self::F64Store(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::I32Load8S(mem_arg, addr) => Self::I32Load8S(*mem_arg, Box::new(addr.map(v))),
+            Self::I32Load8U(mem_arg, addr) => Self::I32Load8U(*mem_arg, Box::new(addr.map(v))),
+            Self::I32Load16S(mem_arg, addr) => Self::I32Load16S(*mem_arg, Box::new(addr.map(v))),
+            Self::I32Load16U(mem_arg, addr) => Self::I32Load16U(*mem_arg, Box::new(addr.map(v))),
+
+            Self::I64Load8S(mem_arg, addr) => Self::I64Load8S(*mem_arg, Box::new(addr.map(v))),
+            Self::I64Load8U(mem_arg, addr) => Self::I64Load8U(*mem_arg, Box::new(addr.map(v))),
+            Self::I64Load16S(mem_arg, addr) => Self::I64Load16S(*mem_arg, Box::new(addr.map(v))),
+            Self::I64Load16U(mem_arg, addr) => Self::I64Load16U(*mem_arg, Box::new(addr.map(v))),
+            Self::I64Load32S(mem_arg, addr) => Self::I64Load32S(*mem_arg, Box::new(addr.map(v))),
+            Self::I64Load32U(mem_arg, addr) => Self::I64Load32U(*mem_arg, Box::new(addr.map(v))),
+
+            Self::I32Store8(mem_arg, addr, value) => {
+                Self::I32Store8(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::I32Store16(mem_arg, addr, value) => {
+                Self::I32Store16(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::I64Store8(mem_arg, addr, value) => {
+                Self::I64Store8(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::I64Store16(mem_arg, addr, value) => {
+                Self::I64Store16(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::I64Store32(mem_arg, addr, value) => {
+                Self::I64Store32(*mem_arg, Box::new(addr.map(v)), Box::new(value.map(v)))
+            }
+
+            Self::MemorySize => return v.visit(self.clone()),
+            Self::MemoryGrow(inner) => Self::MemoryGrow(Box::new(inner.map(v))),
+
+            Self::Nop | Self::Unreachable => return v.visit(self.clone()),
+
+            Self::Block(block_ty, exprs) => Self::Block(
+                block_ty.clone(),
+                exprs.iter().map(|expr| expr.map(v)).collect(),
+            ),
+
+            Self::Loop(block_ty, exprs) => Self::Loop(
+                block_ty.clone(),
+                exprs.iter().map(|expr| expr.map(v)).collect(),
+            ),
+
+            Self::If(block_ty, condition, then_block, else_block) => Self::If(
+                block_ty.clone(),
+                Box::new(condition.map(v)),
+                then_block.iter().map(|expr| expr.map(v)).collect(),
+                else_block.iter().map(|expr| expr.map(v)).collect(),
+            ),
+
+            Self::Br(relative_depth, inner) => Self::Br(
+                *relative_depth,
+                inner.as_ref().map(|expr| Box::new(expr.map(v))),
+            ),
+
+            Self::BrIf(relative_depth, condition, inner) => Self::BrIf(
+                *relative_depth,
+                Box::new(condition.map(v)),
+                inner.as_ref().map(|expr| Box::new(expr.map(v))),
+            ),
+
+            Self::BrTable(labels, default_label, index_expr, inner) => Self::BrTable(
+                labels.clone(),
+                *default_label,
+                Box::new(index_expr.map(v)),
+                inner.as_ref().map(|expr| Box::new(expr.map(v))),
+            ),
+
+            Self::Return(inner) => Self::Return(inner.as_ref().map(|expr| Box::new(expr.map(v)))),
+
+            Self::Call(func_id, args) => Self::Call(
+                *func_id,
+                args.iter().map(|expr| expr.map(v)).collect(),
+            ),
+
+            Self::CallIndirect(ty_id, index_expr, args) => Self::CallIndirect(
+                *ty_id,
+                Box::new(index_expr.map(v)),
+                args.iter().map(|expr| expr.map(v)).collect(),
+            ),
+        };
+
+        v.visit(expr)
+    }
+
     pub fn to_value(&self) -> Option<Value> {
         match *self {
             Self::I32(value) => Some(Value::I32(value)),
@@ -411,10 +712,9 @@ impl Expr {
             Self::BrIf(_, _, Some(_)) => ReturnValueCount::One,
             Self::BrIf(_, _, None) => ReturnValueCount::Zero,
 
-            Self::Br(_, _)
-            | Self::BrTable(_, _, _, _)
-            | Self::Return(_)
-            | Self::Unreachable => ReturnValueCount::Unreachable,
+            Self::Br(_, _) | Self::BrTable(_, _, _, _) | Self::Return(_) | Self::Unreachable => {
+                ReturnValueCount::Unreachable
+            }
 
             _ => ReturnValueCount::One,
         }
@@ -567,7 +867,9 @@ impl Expr {
             Self::I64ReinterpretF64(_) => ValType::I64.into(),
 
             Self::I32Extend8S(_) | Self::I32Extend16S(_) => ValType::I32.into(),
-            Self::I64Extend8S(_) | Self::I64Extend16S(_) | Self::I64Extend32S(_) => ValType::I64.into(),
+            Self::I64Extend8S(_) | Self::I64Extend16S(_) | Self::I64Extend32S(_) => {
+                ValType::I64.into()
+            }
 
             Self::Drop(_) => ExprTy::Empty,
             Self::Select(lhs, _, _) => lhs.ty(),
@@ -619,9 +921,7 @@ impl Expr {
             Self::BrIf(_, _, Some(expr)) => expr.ty(),
             Self::BrIf(_, _, None) => ExprTy::Empty,
 
-            Self::Br(_, _) | Self::BrTable(_, _, _, _) | Self::Return(_) => {
-                ExprTy::Unreachable
-            }
+            Self::Br(_, _) | Self::BrTable(_, _, _, _) | Self::Return(_) => ExprTy::Unreachable,
 
             Self::Call(func, _) => ExprTy::Call(*func),
             Self::CallIndirect(ty, _, _) => ExprTy::CallIndirect(*ty),

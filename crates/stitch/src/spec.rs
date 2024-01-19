@@ -125,26 +125,17 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
     }
 
     fn block(&mut self, exprs: &[Expr]) -> Vec<Expr> {
-        exprs.iter().map(|expr| self.expr(expr)).collect()
+        exprs.iter().map(|expr| expr.map(&mut |expr| self.expr(expr))).collect()
     }
 
-    fn expr(&mut self, expr: &Expr) -> Expr {
-        macro_rules! try_expr {
-            ($expr:expr, $variant:ident) => {{
-                match **$expr {
-                    Expr::$variant(value) => value,
-
-                    ref expr => {
-                        return expr.clone();
-                    }
+    fn expr(&mut self, expr: Expr) -> Expr {
+        macro_rules! try_i32 {
+            ($expr:expr) => {{
+                match $expr.to_i32() {
+                    Some(value) => value,
+                    None => return expr,
                 }
             }};
-        }
-
-        macro_rules! try_i32 {
-            ($expr:expr) => {
-                try_expr!($expr, I32)
-            };
         }
 
         macro_rules! try_u32 {
@@ -154,9 +145,12 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         }
 
         macro_rules! try_i64 {
-            ($expr:expr) => {
-                try_expr!($expr, I64)
-            };
+            ($expr:expr) => {{
+                match $expr.to_i64() {
+                    Some(value) => value,
+                    None => return expr,
+                }
+            }};
         }
 
         macro_rules! try_u64 {
@@ -166,19 +160,25 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         }
 
         macro_rules! try_f32 {
-            ($expr:expr) => {
-                try_expr!($expr, F32)
-            };
+            ($expr:expr) => {{
+                match $expr.to_f32() {
+                    Some(value) => value,
+                    None => return expr,
+                }
+            }};
         }
 
         macro_rules! try_f64 {
-            ($expr:expr) => {
-                try_expr!($expr, F64)
-            };
+            ($expr:expr) => {{
+                match $expr.to_f64() {
+                    Some(value) => value,
+                    None => return expr,
+                }
+            }};
         }
 
-        match expr {
-            Expr::I32(_) | Expr::I64(_) | Expr::F32(_) | Expr::F64(_) => expr.clone(),
+        match &expr {
+            Expr::I32(_) | Expr::I64(_) | Expr::F32(_) | Expr::F64(_) => expr,
 
             Expr::I32Clz(inner) => Expr::I32(try_i32!(inner).leading_zeros() as i32),
             Expr::I32Ctz(inner) => Expr::I32(try_i32!(inner).trailing_zeros() as i32),
@@ -194,7 +194,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::F32Ceil(inner) => Expr::F32(try_f32!(inner).to_f32().ceil().into()),
             Expr::F32Floor(inner) => Expr::F32(try_f32!(inner).to_f32().floor().into()),
             Expr::F32Trunc(inner) => Expr::F32(try_f32!(inner).to_f32().trunc().into()),
-            Expr::F32Nearest(_) => expr.clone(), // TODO
+            Expr::F32Nearest(_) => expr, // TODO
 
             Expr::F64Abs(inner) => Expr::F64(try_f64!(inner).to_f64().abs().into()),
             Expr::F64Neg(inner) => Expr::F64((-try_f64!(inner).to_f64()).into()),
@@ -202,7 +202,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::F64Ceil(inner) => Expr::F64(try_f64!(inner).to_f64().ceil().into()),
             Expr::F64Floor(inner) => Expr::F64(try_f64!(inner).to_f64().floor().into()),
             Expr::F64Trunc(inner) => Expr::F64(try_f64!(inner).to_f64().trunc().into()),
-            Expr::F64Nearest(_) => expr.clone(), // TODO
+            Expr::F64Nearest(_) => expr, // TODO
 
             Expr::I32Add(lhs, rhs) => Expr::I32(try_i32!(lhs).wrapping_add(try_i32!(rhs))),
             Expr::I32Sub(lhs, rhs) => Expr::I32(try_i32!(lhs).wrapping_sub(try_i32!(rhs))),
@@ -211,12 +211,12 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::I32DivU(lhs, rhs) => Expr::I32(try_u32!(lhs).wrapping_div(try_u32!(rhs)) as i32),
 
             Expr::I32RemS(lhs, rhs) => match try_i32!(rhs) {
-                0 => expr.clone(), // undefined
+                0 => expr, // undefined
                 rhs => Expr::I32(try_i32!(lhs).wrapping_rem(rhs)),
             },
 
             Expr::I32RemU(lhs, rhs) => match try_u32!(rhs) {
-                0 => expr.clone(), // undefined
+                0 => expr, // undefined
                 rhs => Expr::I32(try_u32!(lhs).wrapping_rem(rhs) as i32),
             },
 
@@ -236,12 +236,12 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::I64DivU(lhs, rhs) => Expr::I64(try_u64!(lhs).wrapping_div(try_u64!(rhs)) as i64),
 
             Expr::I64RemS(lhs, rhs) => match try_i64!(rhs) {
-                0 => expr.clone(),
+                0 => expr,
                 rhs => Expr::I64(try_i64!(lhs).wrapping_rem(rhs)),
             },
 
             Expr::I64RemU(lhs, rhs) => match try_u64!(rhs) {
-                0 => expr.clone(),
+                0 => expr,
                 rhs => Expr::I64(try_u64!(lhs).wrapping_rem(rhs) as i64),
             },
 
