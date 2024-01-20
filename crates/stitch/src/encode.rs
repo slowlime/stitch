@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 
 use wasm_encoder::{
-    CodeSection, ElementSection, EntityType, ExportSection, FunctionSection, GlobalSection,
-    ImportSection, MemorySection, StartSection, TableSection, TypeSection, DataSection,
+    CodeSection, DataSection, ElementSection, EntityType, ExportSection, FunctionSection,
+    GlobalSection, ImportSection, MemorySection, StartSection, TableSection, TypeSection,
 };
 
-use crate::ir::expr::MemArg;
+use crate::ir::expr::{BinOp, MemArg, NulOp, TernOp, UnOp};
 use crate::ir::ty::{ElemType, GlobalType, MemoryType, TableType, Type, ValType};
 use crate::ir::{
     self, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId, ImportDesc, ImportId,
-    LocalId, MemoryId, Module, TableDef, TableId, TypeId, MemoryDef,
+    LocalId, MemoryDef, MemoryId, Module, TableDef, TableId, TypeId,
 };
 use crate::util::iter::segments;
 use crate::util::slot::SeqSlot;
@@ -323,7 +323,7 @@ impl<'a> Encoder<'a> {
 
                         sec.active(0, &ConstExpr::i32_const(offset as i32), bytes);
                     },
-                )
+                ),
             }
         }
 
@@ -379,7 +379,9 @@ impl Encoder<'_> {
             Expr::I64(value) => ConstExpr::i64_const(value),
             Expr::F32(value) => ConstExpr::f32_const(value.to_f32()),
             Expr::F64(value) => ConstExpr::f64_const(value.to_f64()),
-            Expr::GlobalGet(global_id) => ConstExpr::global_get(self.globals[global_id] as u32),
+            Expr::Nullary(NulOp::GlobalGet(global_id)) => {
+                ConstExpr::global_get(self.globals[global_id] as u32)
+            }
             _ => return None,
         })
     }
@@ -415,298 +417,259 @@ impl<'a> BodyEncoder<'a, '_> {
             Expr::F32(value) => self.nullary(Instruction::F32Const(value.to_f32())),
             Expr::F64(value) => self.nullary(Instruction::F64Const(value.to_f64())),
 
-            Expr::I32Clz(inner) => self.unary(inner, Instruction::I32Clz),
-            Expr::I32Ctz(inner) => self.unary(inner, Instruction::I32Ctz),
-            Expr::I32Popcnt(inner) => self.unary(inner, Instruction::I32Popcnt),
+            Expr::Nullary(op) => self.nullary(match *op {
+                NulOp::Nop => Instruction::Nop,
+                NulOp::Unreachable => Instruction::Unreachable,
+                NulOp::LocalGet(local_id) => Instruction::LocalGet(self.locals[local_id] as u32),
+                NulOp::GlobalGet(global_id) => {
+                    Instruction::GlobalGet(self.encoder.globals[global_id] as u32)
+                }
+                NulOp::MemorySize => Instruction::MemorySize(0),
+            }),
 
-            Expr::I64Clz(inner) => self.unary(inner, Instruction::I64Clz),
-            Expr::I64Ctz(inner) => self.unary(inner, Instruction::I64Ctz),
-            Expr::I64Popcnt(inner) => self.unary(inner, Instruction::I64Popcnt),
+            Expr::Unary(op, inner) => self.unary(
+                inner,
+                match *op {
+                    UnOp::I32Clz => Instruction::I32Clz,
+                    UnOp::I32Ctz => Instruction::I32Ctz,
+                    UnOp::I32Popcnt => Instruction::I32Popcnt,
 
-            Expr::F32Abs(inner) => self.unary(inner, Instruction::F32Abs),
-            Expr::F32Neg(inner) => self.unary(inner, Instruction::F32Neg),
-            Expr::F32Sqrt(inner) => self.unary(inner, Instruction::F32Sqrt),
-            Expr::F32Ceil(inner) => self.unary(inner, Instruction::F32Ceil),
-            Expr::F32Floor(inner) => self.unary(inner, Instruction::F32Floor),
-            Expr::F32Trunc(inner) => self.unary(inner, Instruction::F32Trunc),
-            Expr::F32Nearest(inner) => self.unary(inner, Instruction::F32Nearest),
+                    UnOp::I64Clz => Instruction::I64Clz,
+                    UnOp::I64Ctz => Instruction::I64Ctz,
+                    UnOp::I64Popcnt => Instruction::I64Popcnt,
 
-            Expr::F64Abs(inner) => self.unary(inner, Instruction::F64Abs),
-            Expr::F64Neg(inner) => self.unary(inner, Instruction::F64Neg),
-            Expr::F64Sqrt(inner) => self.unary(inner, Instruction::F64Sqrt),
-            Expr::F64Ceil(inner) => self.unary(inner, Instruction::F64Ceil),
-            Expr::F64Floor(inner) => self.unary(inner, Instruction::F64Floor),
-            Expr::F64Trunc(inner) => self.unary(inner, Instruction::F64Trunc),
-            Expr::F64Nearest(inner) => self.unary(inner, Instruction::F64Nearest),
+                    UnOp::F32Abs => Instruction::F32Abs,
+                    UnOp::F32Neg => Instruction::F32Neg,
+                    UnOp::F32Sqrt => Instruction::F32Sqrt,
+                    UnOp::F32Ceil => Instruction::F32Ceil,
+                    UnOp::F32Floor => Instruction::F32Floor,
+                    UnOp::F32Trunc => Instruction::F32Trunc,
+                    UnOp::F32Nearest => Instruction::F32Nearest,
 
-            Expr::I32Add(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Add),
-            Expr::I32Sub(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Sub),
-            Expr::I32Mul(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Mul),
-            Expr::I32DivS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32DivS),
-            Expr::I32DivU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32DivU),
-            Expr::I32RemS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32RemS),
-            Expr::I32RemU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32RemU),
-            Expr::I32And(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32And),
-            Expr::I32Or(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Or),
-            Expr::I32Xor(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Xor),
-            Expr::I32Shl(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Shl),
-            Expr::I32ShrS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32ShrS),
-            Expr::I32ShrU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32ShrU),
-            Expr::I32Rotl(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Rotl),
-            Expr::I32Rotr(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Rotr),
+                    UnOp::F64Abs => Instruction::F64Abs,
+                    UnOp::F64Neg => Instruction::F64Neg,
+                    UnOp::F64Sqrt => Instruction::F64Sqrt,
+                    UnOp::F64Ceil => Instruction::F64Ceil,
+                    UnOp::F64Floor => Instruction::F64Floor,
+                    UnOp::F64Trunc => Instruction::F64Trunc,
+                    UnOp::F64Nearest => Instruction::F64Nearest,
 
-            Expr::I64Add(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Add),
-            Expr::I64Sub(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Sub),
-            Expr::I64Mul(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Mul),
-            Expr::I64DivS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64DivS),
-            Expr::I64DivU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64DivU),
-            Expr::I64RemS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64RemS),
-            Expr::I64RemU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64RemU),
-            Expr::I64And(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64And),
-            Expr::I64Or(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Or),
-            Expr::I64Xor(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Xor),
-            Expr::I64Shl(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Shl),
-            Expr::I64ShrS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64ShrS),
-            Expr::I64ShrU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64ShrU),
-            Expr::I64Rotl(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Rotl),
-            Expr::I64Rotr(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Rotr),
+                    UnOp::I32Eqz => Instruction::I32Eqz,
+                    UnOp::I64Eqz => Instruction::I64Eqz,
 
-            Expr::F32Add(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Add),
-            Expr::F32Sub(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Sub),
-            Expr::F32Mul(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Mul),
-            Expr::F32Div(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Div),
-            Expr::F32Min(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Min),
-            Expr::F32Max(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Max),
-            Expr::F32Copysign(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Copysign),
+                    UnOp::I32WrapI64 => Instruction::I32WrapI64,
 
-            Expr::F64Add(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Add),
-            Expr::F64Sub(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Sub),
-            Expr::F64Mul(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Mul),
-            Expr::F64Div(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Div),
-            Expr::F64Min(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Min),
-            Expr::F64Max(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Max),
-            Expr::F64Copysign(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Copysign),
+                    UnOp::I64ExtendI32S => Instruction::I64ExtendI32S,
+                    UnOp::I64ExtendI32U => Instruction::I64ExtendI32U,
 
-            Expr::I32Eqz(inner) => self.unary(inner, Instruction::I32Eqz),
-            Expr::I64Eqz(inner) => self.unary(inner, Instruction::I64Eqz),
+                    UnOp::I32TruncF32S => Instruction::I32TruncF32S,
+                    UnOp::I32TruncF32U => Instruction::I32TruncF32U,
+                    UnOp::I32TruncF64S => Instruction::I32TruncF64S,
+                    UnOp::I32TruncF64U => Instruction::I32TruncF64U,
 
-            Expr::I32Eq(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Eq),
-            Expr::I32Ne(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32Ne),
-            Expr::I32LtS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32LtS),
-            Expr::I32LtU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32LtU),
-            Expr::I32GtS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32GtS),
-            Expr::I32GtU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32GtU),
-            Expr::I32LeS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32LeS),
-            Expr::I32LeU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32LeU),
-            Expr::I32GeS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32GeS),
-            Expr::I32GeU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I32GeU),
+                    UnOp::I64TruncF32S => Instruction::I64TruncF32S,
+                    UnOp::I64TruncF32U => Instruction::I64TruncF32U,
+                    UnOp::I64TruncF64S => Instruction::I64TruncF64S,
+                    UnOp::I64TruncF64U => Instruction::I64TruncF64U,
 
-            Expr::I64Eq(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Eq),
-            Expr::I64Ne(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64Ne),
-            Expr::I64LtS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64LtS),
-            Expr::I64LtU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64LtU),
-            Expr::I64GtS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64GtS),
-            Expr::I64GtU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64GtU),
-            Expr::I64LeS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64LeS),
-            Expr::I64LeU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64LeU),
-            Expr::I64GeS(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64GeS),
-            Expr::I64GeU(lhs, rhs) => self.binary(lhs, rhs, Instruction::I64GeU),
+                    UnOp::F32DemoteF64 => Instruction::F32DemoteF64,
+                    UnOp::F64PromoteF32 => Instruction::F64PromoteF32,
 
-            Expr::F32Eq(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Eq),
-            Expr::F32Ne(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Ne),
-            Expr::F32Lt(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Lt),
-            Expr::F32Gt(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Gt),
-            Expr::F32Le(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Le),
-            Expr::F32Ge(lhs, rhs) => self.binary(lhs, rhs, Instruction::F32Ge),
+                    UnOp::F32ConvertI32S => Instruction::F32ConvertI32S,
+                    UnOp::F32ConvertI32U => Instruction::F32ConvertI32U,
+                    UnOp::F32ConvertI64S => Instruction::F32ConvertI64S,
+                    UnOp::F32ConvertI64U => Instruction::F32ConvertI64U,
 
-            Expr::F64Eq(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Eq),
-            Expr::F64Ne(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Ne),
-            Expr::F64Lt(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Lt),
-            Expr::F64Gt(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Gt),
-            Expr::F64Le(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Le),
-            Expr::F64Ge(lhs, rhs) => self.binary(lhs, rhs, Instruction::F64Ge),
+                    UnOp::F64ConvertI32S => Instruction::F64ConvertI32S,
+                    UnOp::F64ConvertI32U => Instruction::F64ConvertI32U,
+                    UnOp::F64ConvertI64S => Instruction::F64ConvertI64S,
+                    UnOp::F64ConvertI64U => Instruction::F64ConvertI64U,
 
-            Expr::I32WrapI64(inner) => self.unary(inner, Instruction::I32WrapI64),
+                    UnOp::F32ReinterpretI32 => Instruction::F32ReinterpretI32,
+                    UnOp::F64ReinterpretI64 => Instruction::F64ReinterpretI64,
+                    UnOp::I32ReinterpretF32 => Instruction::I32ReinterpretF32,
+                    UnOp::I64ReinterpretF64 => Instruction::I64ReinterpretF64,
 
-            Expr::I64ExtendI32S(inner) => self.unary(inner, Instruction::I64ExtendI32S),
-            Expr::I64ExtendI32U(inner) => self.unary(inner, Instruction::I64ExtendI32U),
+                    UnOp::I32Extend8S => Instruction::I32Extend8S,
+                    UnOp::I32Extend16S => Instruction::I32Extend16S,
 
-            Expr::I32TruncF32S(inner) => self.unary(inner, Instruction::I32TruncF32S),
-            Expr::I32TruncF32U(inner) => self.unary(inner, Instruction::I32TruncF32U),
-            Expr::I32TruncF64S(inner) => self.unary(inner, Instruction::I32TruncF64S),
-            Expr::I32TruncF64U(inner) => self.unary(inner, Instruction::I32TruncF64U),
+                    UnOp::I64Extend8S => Instruction::I64Extend8S,
+                    UnOp::I64Extend16S => Instruction::I64Extend16S,
+                    UnOp::I64Extend32S => Instruction::I64Extend32S,
 
-            Expr::I64TruncF32S(inner) => self.unary(inner, Instruction::I64TruncF32S),
-            Expr::I64TruncF32U(inner) => self.unary(inner, Instruction::I64TruncF32U),
-            Expr::I64TruncF64S(inner) => self.unary(inner, Instruction::I64TruncF64S),
-            Expr::I64TruncF64U(inner) => self.unary(inner, Instruction::I64TruncF64U),
+                    UnOp::LocalSet(local_id) => Instruction::LocalSet(self.locals[local_id] as u32),
+                    UnOp::LocalTee(local_id) => Instruction::LocalTee(self.locals[local_id] as u32),
 
-            Expr::F32DemoteF64(inner) => self.unary(inner, Instruction::F32DemoteF64),
-            Expr::F64PromoteF32(inner) => self.unary(inner, Instruction::F64PromoteF32),
+                    UnOp::GlobalSet(global_id) => {
+                        Instruction::GlobalGet(self.encoder.globals[global_id] as u32)
+                    }
 
-            Expr::F32ConvertI32S(inner) => self.unary(inner, Instruction::F32ConvertI32S),
-            Expr::F32ConvertI32U(inner) => self.unary(inner, Instruction::F32ConvertI32U),
-            Expr::F32ConvertI64S(inner) => self.unary(inner, Instruction::F32ConvertI64S),
-            Expr::F32ConvertI64U(inner) => self.unary(inner, Instruction::F32ConvertI64U),
-            Expr::F64ConvertI32S(inner) => self.unary(inner, Instruction::F64ConvertI32S),
-            Expr::F64ConvertI32U(inner) => self.unary(inner, Instruction::F64ConvertI32U),
-            Expr::F64ConvertI64S(inner) => self.unary(inner, Instruction::F64ConvertI64S),
-            Expr::F64ConvertI64U(inner) => self.unary(inner, Instruction::F64ConvertI64U),
+                    UnOp::I32Load(mem_arg) => Instruction::I32Load(self.convert_mem_arg(&mem_arg)),
+                    UnOp::I64Load(mem_arg) => Instruction::I64Load(self.convert_mem_arg(&mem_arg)),
+                    UnOp::F32Load(mem_arg) => Instruction::F32Load(self.convert_mem_arg(&mem_arg)),
+                    UnOp::F64Load(mem_arg) => Instruction::F64Load(self.convert_mem_arg(&mem_arg)),
 
-            Expr::F32ReinterpretI32(inner) => self.unary(inner, Instruction::F32ReinterpretI32),
-            Expr::F64ReinterpretI64(inner) => self.unary(inner, Instruction::F64ReinterpretI64),
-            Expr::I32ReinterpretF32(inner) => self.unary(inner, Instruction::I32ReinterpretF32),
-            Expr::I64ReinterpretF64(inner) => self.unary(inner, Instruction::I64ReinterpretF64),
+                    UnOp::I32Load8S(mem_arg) => {
+                        Instruction::I32Load8S(self.convert_mem_arg(&mem_arg))
+                    }
+                    UnOp::I32Load8U(mem_arg) => {
+                        Instruction::I32Load8U(self.convert_mem_arg(&mem_arg))
+                    }
+                    UnOp::I32Load16S(mem_arg) => {
+                        Instruction::I32Load16S(self.convert_mem_arg(&mem_arg))
+                    }
+                    UnOp::I32Load16U(mem_arg) => {
+                        Instruction::I32Load16U(self.convert_mem_arg(&mem_arg))
+                    }
 
-            Expr::I32Extend8S(inner) => self.unary(inner, Instruction::I32Extend8S),
-            Expr::I32Extend16S(inner) => self.unary(inner, Instruction::I32Extend16S),
+                    UnOp::I64Load8S(mem_arg) => {
+                        Instruction::I64Load8S(self.convert_mem_arg(&mem_arg))
+                    }
+                    UnOp::I64Load8U(mem_arg) => {
+                        Instruction::I64Load8U(self.convert_mem_arg(&mem_arg))
+                    }
+                    UnOp::I64Load16S(mem_arg) => {
+                        Instruction::I64Load16S(self.convert_mem_arg(&mem_arg))
+                    }
+                    UnOp::I64Load16U(mem_arg) => {
+                        Instruction::I64Load16U(self.convert_mem_arg(&mem_arg))
+                    }
+                    UnOp::I64Load32S(mem_arg) => {
+                        Instruction::I64Load32S(self.convert_mem_arg(&mem_arg))
+                    }
+                    UnOp::I64Load32U(mem_arg) => {
+                        Instruction::I64Load32U(self.convert_mem_arg(&mem_arg))
+                    }
 
-            Expr::I64Extend8S(inner) => self.unary(inner, Instruction::I64Extend8S),
-            Expr::I64Extend16S(inner) => self.unary(inner, Instruction::I64Extend16S),
-            Expr::I64Extend32S(inner) => self.unary(inner, Instruction::I64Extend32S),
+                    UnOp::MemoryGrow => Instruction::MemoryGrow(0),
 
-            Expr::Drop(inner) => self.unary(inner, Instruction::Drop),
+                    UnOp::Drop => Instruction::Drop,
+                },
+            ),
 
-            Expr::Select(first, second, condition) => {
+            Expr::Binary(op, lhs, rhs) => self.binary(
+                lhs,
+                rhs,
+                match *op {
+                    BinOp::I32Add => Instruction::I32Add,
+                    BinOp::I32Sub => Instruction::I32Sub,
+                    BinOp::I32Mul => Instruction::I32Mul,
+                    BinOp::I32DivS => Instruction::I32DivS,
+                    BinOp::I32DivU => Instruction::I32DivU,
+                    BinOp::I32RemS => Instruction::I32RemS,
+                    BinOp::I32RemU => Instruction::I32RemU,
+                    BinOp::I32And => Instruction::I32And,
+                    BinOp::I32Or => Instruction::I32Or,
+                    BinOp::I32Xor => Instruction::I32Xor,
+                    BinOp::I32Shl => Instruction::I32Shl,
+                    BinOp::I32ShrS => Instruction::I32ShrS,
+                    BinOp::I32ShrU => Instruction::I32ShrU,
+                    BinOp::I32Rotl => Instruction::I32Rotl,
+                    BinOp::I32Rotr => Instruction::I32Rotr,
+
+                    BinOp::I64Add => Instruction::I64Add,
+                    BinOp::I64Sub => Instruction::I64Sub,
+                    BinOp::I64Mul => Instruction::I64Mul,
+                    BinOp::I64DivS => Instruction::I64DivS,
+                    BinOp::I64DivU => Instruction::I64DivU,
+                    BinOp::I64RemS => Instruction::I64RemS,
+                    BinOp::I64RemU => Instruction::I64RemU,
+                    BinOp::I64And => Instruction::I64And,
+                    BinOp::I64Or => Instruction::I64Or,
+                    BinOp::I64Xor => Instruction::I64Xor,
+                    BinOp::I64Shl => Instruction::I64Shl,
+                    BinOp::I64ShrS => Instruction::I64ShrS,
+                    BinOp::I64ShrU => Instruction::I64ShrU,
+                    BinOp::I64Rotl => Instruction::I64Rotl,
+                    BinOp::I64Rotr => Instruction::I64Rotr,
+
+                    BinOp::F32Add => Instruction::F32Add,
+                    BinOp::F32Sub => Instruction::F32Sub,
+                    BinOp::F32Mul => Instruction::F32Mul,
+                    BinOp::F32Div => Instruction::F32Div,
+                    BinOp::F32Min => Instruction::F32Min,
+                    BinOp::F32Max => Instruction::F32Max,
+                    BinOp::F32Copysign => Instruction::F32Copysign,
+
+                    BinOp::F64Add => Instruction::F64Add,
+                    BinOp::F64Sub => Instruction::F64Sub,
+                    BinOp::F64Mul => Instruction::F64Mul,
+                    BinOp::F64Div => Instruction::F64Div,
+                    BinOp::F64Min => Instruction::F64Min,
+                    BinOp::F64Max => Instruction::F64Max,
+                    BinOp::F64Copysign => Instruction::F64Copysign,
+
+                    BinOp::I32Eq => Instruction::I32Eq,
+                    BinOp::I32Ne => Instruction::I32Ne,
+                    BinOp::I32LtS => Instruction::I32LtS,
+                    BinOp::I32LtU => Instruction::I32LtU,
+                    BinOp::I32GtS => Instruction::I32GtS,
+                    BinOp::I32GtU => Instruction::I32GtU,
+                    BinOp::I32LeS => Instruction::I32LeS,
+                    BinOp::I32LeU => Instruction::I32LeU,
+                    BinOp::I32GeS => Instruction::I32GeS,
+                    BinOp::I32GeU => Instruction::I32GeU,
+
+                    BinOp::I64Eq => Instruction::I64Eq,
+                    BinOp::I64Ne => Instruction::I64Ne,
+                    BinOp::I64LtS => Instruction::I64LtS,
+                    BinOp::I64LtU => Instruction::I64LtU,
+                    BinOp::I64GtS => Instruction::I64GtS,
+                    BinOp::I64GtU => Instruction::I64GtU,
+                    BinOp::I64LeS => Instruction::I64LeS,
+                    BinOp::I64LeU => Instruction::I64LeU,
+                    BinOp::I64GeS => Instruction::I64GeS,
+                    BinOp::I64GeU => Instruction::I64GeU,
+
+                    BinOp::F32Eq => Instruction::F32Eq,
+                    BinOp::F32Ne => Instruction::F32Ne,
+                    BinOp::F32Lt => Instruction::F32Lt,
+                    BinOp::F32Gt => Instruction::F32Gt,
+                    BinOp::F32Le => Instruction::F32Le,
+                    BinOp::F32Ge => Instruction::F32Ge,
+
+                    BinOp::F64Eq => Instruction::F64Eq,
+                    BinOp::F64Ne => Instruction::F64Ne,
+                    BinOp::F64Lt => Instruction::F64Lt,
+                    BinOp::F64Gt => Instruction::F64Gt,
+                    BinOp::F64Le => Instruction::F64Le,
+                    BinOp::F64Ge => Instruction::F64Ge,
+
+                    BinOp::I32Store(mem_arg) => {
+                        Instruction::I32Store(self.convert_mem_arg(&mem_arg))
+                    }
+                    BinOp::I64Store(mem_arg) => {
+                        Instruction::I64Store(self.convert_mem_arg(&mem_arg))
+                    }
+                    BinOp::F32Store(mem_arg) => {
+                        Instruction::F32Store(self.convert_mem_arg(&mem_arg))
+                    }
+                    BinOp::F64Store(mem_arg) => {
+                        Instruction::F64Store(self.convert_mem_arg(&mem_arg))
+                    }
+
+                    BinOp::I32Store8(mem_arg) => {
+                        Instruction::I32Store8(self.convert_mem_arg(&mem_arg))
+                    }
+                    BinOp::I32Store16(mem_arg) => {
+                        Instruction::I32Store16(self.convert_mem_arg(&mem_arg))
+                    }
+
+                    BinOp::I64Store8(mem_arg) => {
+                        Instruction::I64Store8(self.convert_mem_arg(&mem_arg))
+                    }
+                    BinOp::I64Store16(mem_arg) => {
+                        Instruction::I64Store16(self.convert_mem_arg(&mem_arg))
+                    }
+                    BinOp::I64Store32(mem_arg) => {
+                        Instruction::I64Store32(self.convert_mem_arg(&mem_arg))
+                    }
+                },
+            ),
+
+            Expr::Ternary(TernOp::Select, first, second, condition) => {
                 self.ternary(first, second, condition, Instruction::Select)
             }
-
-            Expr::LocalGet(local_id) => {
-                self.nullary(Instruction::LocalGet(self.locals[*local_id] as u32))
-            }
-
-            Expr::LocalSet(local_id, inner) => {
-                self.unary(inner, Instruction::LocalSet(self.locals[*local_id] as u32))
-            }
-
-            Expr::LocalTee(local_id, inner) => {
-                self.unary(inner, Instruction::LocalTee(self.locals[*local_id] as u32))
-            }
-
-            Expr::GlobalGet(global_id) => self.nullary(Instruction::GlobalGet(
-                self.encoder.globals[*global_id] as u32,
-            )),
-
-            Expr::GlobalSet(global_id, inner) => self.unary(
-                inner,
-                Instruction::GlobalSet(self.encoder.globals[*global_id] as u32),
-            ),
-
-            Expr::I32Load(mem_arg, addr) => {
-                self.unary(addr, Instruction::I32Load(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I64Load(mem_arg, addr) => {
-                self.unary(addr, Instruction::I64Load(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::F32Load(mem_arg, addr) => {
-                self.unary(addr, Instruction::F32Load(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::F64Load(mem_arg, addr) => {
-                self.unary(addr, Instruction::F64Load(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I32Store(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::I32Store(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::I64Store(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::I64Store(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::F32Store(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::F32Store(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::F64Store(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::F64Store(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::I32Load8S(mem_arg, addr) => {
-                self.unary(addr, Instruction::I32Load8S(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I32Load8U(mem_arg, addr) => {
-                self.unary(addr, Instruction::I32Load8U(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I32Load16S(mem_arg, addr) => {
-                self.unary(addr, Instruction::I32Load16S(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I32Load16U(mem_arg, addr) => {
-                self.unary(addr, Instruction::I32Load16U(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I64Load8S(mem_arg, addr) => {
-                self.unary(addr, Instruction::I64Load8S(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I64Load8U(mem_arg, addr) => {
-                self.unary(addr, Instruction::I64Load8U(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I64Load16S(mem_arg, addr) => {
-                self.unary(addr, Instruction::I64Load16S(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I64Load16U(mem_arg, addr) => {
-                self.unary(addr, Instruction::I64Load16U(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I64Load32S(mem_arg, addr) => {
-                self.unary(addr, Instruction::I64Load32S(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I64Load32U(mem_arg, addr) => {
-                self.unary(addr, Instruction::I64Load32U(self.convert_mem_arg(mem_arg)))
-            }
-
-            Expr::I32Store8(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::I32Store8(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::I32Store16(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::I32Store16(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::I64Store8(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::I64Store8(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::I64Store16(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::I64Store16(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::I64Store32(mem_arg, addr, inner) => self.binary(
-                addr,
-                inner,
-                Instruction::I64Store32(self.convert_mem_arg(mem_arg)),
-            ),
-
-            Expr::MemorySize => self.nullary(Instruction::MemorySize(0)),
-            Expr::MemoryGrow(size) => self.unary(size, Instruction::MemoryGrow(0)),
-
-            Expr::Nop => self.nullary(Instruction::Nop),
-            Expr::Unreachable => self.nullary(Instruction::Unreachable),
 
             Expr::Block(block_ty, block) => {
                 self.nullary(Instruction::Block(self.convert_block_type(block_ty)));
@@ -750,9 +713,10 @@ impl<'a> BodyEncoder<'a, '_> {
                 Instruction::BrTable(labels.into(), *default_label),
             ),
 
-            Expr::BrTable(labels, default_label, condition, None) => {
-                self.unary(condition, Instruction::BrTable(labels.into(), *default_label))
-            }
+            Expr::BrTable(labels, default_label, condition, None) => self.unary(
+                condition,
+                Instruction::BrTable(labels.into(), *default_label),
+            ),
 
             Expr::Return(Some(inner)) => self.unary(inner, Instruction::Return),
             Expr::Return(None) => self.nullary(Instruction::Return),
@@ -770,10 +734,13 @@ impl<'a> BodyEncoder<'a, '_> {
                     self.expr(expr);
                 }
 
-                self.unary(idx_expr, Instruction::CallIndirect {
-                    ty: self.encoder.types[*ty_id] as u32,
-                    table: 0,
-                });
+                self.unary(
+                    idx_expr,
+                    Instruction::CallIndirect {
+                        ty: self.encoder.types[*ty_id] as u32,
+                        table: 0,
+                    },
+                );
             }
         }
     }
