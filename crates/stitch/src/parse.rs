@@ -7,7 +7,7 @@ use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
-use crate::ir::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, F32, F64};
+use crate::ir::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, F32, F64, Value};
 use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, LocalId, MemoryId, TableId, TypeId};
 
 const PAGE_SIZE: usize = 65536;
@@ -998,10 +998,10 @@ impl Parser {
                 Operator::MemorySize { .. } => NulOp::MemorySize.into(),
                 Operator::MemoryGrow { .. } => ctx.un_expr(UnOp::MemoryGrow),
 
-                Operator::I32Const { value } => Expr::I32(value),
-                Operator::I64Const { value } => Expr::I64(value),
-                Operator::F32Const { value } => Expr::F32(F32::from_bits(value.bits())),
-                Operator::F64Const { value } => Expr::F64(F64::from_bits(value.bits())),
+                Operator::I32Const { value } => Value::I32(value).into(),
+                Operator::I64Const { value } => Value::I64(value).into(),
+                Operator::F32Const { value } => Value::F32(F32::from_bits(value.bits())).into(),
+                Operator::F64Const { value } => Value::F64(F64::from_bits(value.bits())).into(),
 
                 Operator::I32Eqz => ctx.un_expr(UnOp::I32Eqz),
                 Operator::I32Eq => ctx.bin_expr(BinOp::I32Eq),

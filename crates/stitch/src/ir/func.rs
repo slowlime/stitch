@@ -1,5 +1,7 @@
 use slotmap::SlotMap;
 
+use crate::util::try_match;
+
 use super::expr::Expr;
 use super::{LocalId, ImportId};
 use super::ty::{FuncType, ValType};
@@ -23,17 +25,11 @@ impl Func {
     }
 
     pub fn body(&self) -> Option<&FuncBody> {
-        match self {
-            Self::Body(body) => Some(body),
-            _ => None,
-        }
+        try_match!(self, Self::Body(body) => body)
     }
 
     pub fn body_mut(&mut self) -> Option<&mut FuncBody> {
-        match self {
-            Self::Body(body) => Some(body),
-            _ => None,
-        }
+        try_match!(self, Self::Body(body) => body)
     }
 }
 

@@ -5,7 +5,7 @@ use wasm_encoder::{
     GlobalSection, ImportSection, MemorySection, StartSection, TableSection, TypeSection,
 };
 
-use crate::ir::expr::{BinOp, MemArg, NulOp, TernOp, UnOp};
+use crate::ir::expr::{BinOp, MemArg, NulOp, TernOp, UnOp, Value};
 use crate::ir::ty::{ElemType, GlobalType, MemoryType, TableType, Type, ValType};
 use crate::ir::{
     self, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId, ImportDesc, ImportId,
@@ -375,10 +375,10 @@ impl Encoder<'_> {
         use wasm_encoder::ConstExpr;
 
         Some(match *expr {
-            Expr::I32(value) => ConstExpr::i32_const(value),
-            Expr::I64(value) => ConstExpr::i64_const(value),
-            Expr::F32(value) => ConstExpr::f32_const(value.to_f32()),
-            Expr::F64(value) => ConstExpr::f64_const(value.to_f64()),
+            Expr::Value(Value::I32(value), _) => ConstExpr::i32_const(value),
+            Expr::Value(Value::I64(value), _) => ConstExpr::i64_const(value),
+            Expr::Value(Value::F32(value), _) => ConstExpr::f32_const(value.to_f32()),
+            Expr::Value(Value::F64(value), _) => ConstExpr::f64_const(value.to_f64()),
             Expr::Nullary(NulOp::GlobalGet(global_id)) => {
                 ConstExpr::global_get(self.globals[global_id] as u32)
             }
@@ -412,10 +412,12 @@ impl<'a> BodyEncoder<'a, '_> {
         use wasm_encoder::Instruction;
 
         match expr {
-            Expr::I32(value) => self.nullary(Instruction::I32Const(*value)),
-            Expr::I64(value) => self.nullary(Instruction::I64Const(*value)),
-            Expr::F32(value) => self.nullary(Instruction::F32Const(value.to_f32())),
-            Expr::F64(value) => self.nullary(Instruction::F64Const(value.to_f64())),
+            Expr::Value(value, _) => self.nullary(match value {
+                Value::I32(value) => Instruction::I32Const(*value),
+                Value::I64(value) => Instruction::I64Const(*value),
+                Value::F32(value) => Instruction::F32Const(value.to_f32()),
+                Value::F64(value) => Instruction::F64Const(value.to_f64()),
+            }),
 
             Expr::Nullary(op) => self.nullary(match *op {
                 NulOp::Nop => Instruction::Nop,

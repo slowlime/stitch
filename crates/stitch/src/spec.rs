@@ -3,7 +3,7 @@ use std::mem;
 
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
-use crate::ir::expr::{BinOp, NulOp, TernOp, UnOp, Value, F32, F64};
+use crate::ir::expr::{BinOp, NulOp, TernOp, UnOp, Value, ValueAttrs, F32, F64};
 use crate::ir::{Expr, Func, FuncBody, FuncId, LocalId, Module};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -101,7 +101,7 @@ impl<'a> Specializer<'a> {
 struct FuncSpecializer<'a, 'b, 'm> {
     spec: &'a mut Specializer<'m>,
     sig: SpecSignature,
-    locals: SecondaryMap<LocalId, Value>,
+    locals: SecondaryMap<LocalId, (Value, ValueAttrs)>,
     func: &'b FuncBody,
 }
 
@@ -117,7 +117,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
 
         for (idx, arg) in this.sig.args.iter().enumerate() {
             if let &Some(value) = arg {
-                this.locals.insert(func.params[idx], value);
+                this.locals
+                    .insert(func.params[idx], (value, Default::default()));
             }
         }
 
@@ -180,36 +181,42 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             }};
         }
 
+        if let Some((mem_arg, addr, load)) = expr.to_load() {
+            todo!()
+        } else if let Some((mem_arg, addr, value, store)) = expr.to_store() {
+            todo!()
+        }
+
         match expr {
-            Expr::I32(_) | Expr::I64(_) | Expr::F32(_) | Expr::F64(_) => expr,
+            Expr::Value(_, _) => expr,
 
             Expr::Nullary(NulOp::LocalGet(local_id)) => match self.locals.get(local_id) {
-                Some(value) => value.to_expr(),
+                Some(&(value, attrs)) => Expr::Value(value, attrs),
                 None => expr,
             },
 
-            Expr::Unary(UnOp::LocalSet(local_id), ref inner) => match inner.to_value() {
-                Some(value) => {
-                    self.locals.insert(local_id, value);
+            Expr::Unary(UnOp::LocalSet(local_id), ref inner) => match **inner {
+                Expr::Value(value, attrs) => {
+                    self.locals.insert(local_id, (value, attrs));
 
                     NulOp::Nop.into()
                 }
 
-                None => {
+                _ => {
                     self.locals.remove(local_id);
 
                     expr
                 }
             },
 
-            Expr::Unary(UnOp::LocalTee(local_id), ref inner) => match inner.to_value() {
-                Some(value) => {
-                    self.locals.insert(local_id, value);
+            Expr::Unary(UnOp::LocalTee(local_id), ref inner) => match **inner {
+                Expr::Value(value, attrs) => {
+                    self.locals.insert(local_id, (value, attrs));
 
-                    value.to_expr()
+                    expr
                 }
 
-                None => {
+                _ => {
                     self.locals.remove(local_id);
 
                     expr
@@ -227,247 +234,276 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 NulOp::LocalGet(_) | NulOp::GlobalGet(_) => unreachable!(),
             },
 
-            Expr::Unary(op, ref inner) => match op {
-                UnOp::I32Clz => Expr::I32(try_i32!(inner).leading_zeros() as i32),
-                UnOp::I32Ctz => Expr::I32(try_i32!(inner).trailing_zeros() as i32),
-                UnOp::I32Popcnt => Expr::I32(try_i32!(inner).count_ones() as i32),
+            Expr::Unary(op, ref inner) => {
+                let Expr::Value(value, attr) = **inner else {
+                    return expr;
+                };
 
-                UnOp::I64Clz => Expr::I64(try_i64!(inner).leading_zeros() as i64),
-                UnOp::I64Ctz => Expr::I64(try_i64!(inner).trailing_zeros() as i64),
-                UnOp::I64Popcnt => Expr::I64(try_i64!(inner).count_ones() as i64),
+                let result = match op {
+                    UnOp::I32Clz => Value::I32(try_i32!(value).leading_zeros() as i32),
+                    UnOp::I32Ctz => Value::I32(try_i32!(value).trailing_zeros() as i32),
+                    UnOp::I32Popcnt => Value::I32(try_i32!(value).count_ones() as i32),
 
-                UnOp::F32Abs => Expr::F32(try_f32!(inner).to_f32().abs().into()),
-                UnOp::F32Neg => Expr::F32((-try_f32!(inner).to_f32()).into()),
-                UnOp::F32Sqrt => Expr::F32(try_f32!(inner).to_f32().sqrt().into()),
-                UnOp::F32Ceil => Expr::F32(try_f32!(inner).to_f32().ceil().into()),
-                UnOp::F32Floor => Expr::F32(try_f32!(inner).to_f32().floor().into()),
-                UnOp::F32Trunc => Expr::F32(try_f32!(inner).to_f32().trunc().into()),
-                UnOp::F32Nearest => expr, // TODO
+                    UnOp::I64Clz => Value::I64(try_i64!(value).leading_zeros() as i64),
+                    UnOp::I64Ctz => Value::I64(try_i64!(value).trailing_zeros() as i64),
+                    UnOp::I64Popcnt => Value::I64(try_i64!(value).count_ones() as i64),
 
-                UnOp::F64Abs => Expr::F64(try_f64!(inner).to_f64().abs().into()),
-                UnOp::F64Neg => Expr::F64((-try_f64!(inner).to_f64()).into()),
-                UnOp::F64Sqrt => Expr::F64(try_f64!(inner).to_f64().sqrt().into()),
-                UnOp::F64Ceil => Expr::F64(try_f64!(inner).to_f64().ceil().into()),
-                UnOp::F64Floor => Expr::F64(try_f64!(inner).to_f64().floor().into()),
-                UnOp::F64Trunc => Expr::F64(try_f64!(inner).to_f64().trunc().into()),
-                UnOp::F64Nearest => expr, // TODO
+                    UnOp::F32Abs => Value::F32(try_f32!(value).to_f32().abs().into()),
+                    UnOp::F32Neg => Value::F32((-try_f32!(value).to_f32()).into()),
+                    UnOp::F32Sqrt => Value::F32(try_f32!(value).to_f32().sqrt().into()),
+                    UnOp::F32Ceil => Value::F32(try_f32!(value).to_f32().ceil().into()),
+                    UnOp::F32Floor => Value::F32(try_f32!(value).to_f32().floor().into()),
+                    UnOp::F32Trunc => Value::F32(try_f32!(value).to_f32().trunc().into()),
+                    UnOp::F32Nearest => return expr, // TODO
 
-                UnOp::I32Eqz => Expr::I32((try_i32!(inner) == 0) as i32),
-                UnOp::I64Eqz => Expr::I32((try_i64!(inner) == 0) as i32),
+                    UnOp::F64Abs => Value::F64(try_f64!(value).to_f64().abs().into()),
+                    UnOp::F64Neg => Value::F64((-try_f64!(value).to_f64()).into()),
+                    UnOp::F64Sqrt => Value::F64(try_f64!(value).to_f64().sqrt().into()),
+                    UnOp::F64Ceil => Value::F64(try_f64!(value).to_f64().ceil().into()),
+                    UnOp::F64Floor => Value::F64(try_f64!(value).to_f64().floor().into()),
+                    UnOp::F64Trunc => Value::F64(try_f64!(value).to_f64().trunc().into()),
+                    UnOp::F64Nearest => return expr, // TODO
 
-                UnOp::I32WrapI64 => Expr::I32(try_i64!(inner) as i32),
+                    UnOp::I32Eqz => Value::I32((try_i32!(value) == 0) as i32),
+                    UnOp::I64Eqz => Value::I32((try_i64!(value) == 0) as i32),
 
-                UnOp::I64ExtendI32S => Expr::I64(try_i32!(inner) as i64),
-                UnOp::I64ExtendI32U => Expr::I64(try_u32!(inner) as i64),
+                    UnOp::I32WrapI64 => Value::I32(try_i64!(value) as i32),
 
-                UnOp::I32TruncF32S => Expr::I32(try_f32!(inner).to_f32() as i32),
-                UnOp::I32TruncF32U => Expr::I32(try_f32!(inner).to_f32() as u32 as i32),
-                UnOp::I32TruncF64S => Expr::I32(try_f64!(inner).to_f64() as i32),
-                UnOp::I32TruncF64U => Expr::I32(try_f64!(inner).to_f64() as u32 as i32),
+                    UnOp::I64ExtendI32S => Value::I64(try_i32!(value) as i64),
+                    UnOp::I64ExtendI32U => Value::I64(try_u32!(value) as i64),
 
-                UnOp::I64TruncF32S => Expr::I64(try_f32!(inner).to_f32() as i64),
-                UnOp::I64TruncF32U => Expr::I64(try_f32!(inner).to_f32() as u64 as i64),
-                UnOp::I64TruncF64S => Expr::I64(try_f64!(inner).to_f64() as i64),
-                UnOp::I64TruncF64U => Expr::I64(try_f64!(inner).to_f64() as u64 as i64),
+                    UnOp::I32TruncF32S => Value::I32(try_f32!(value).to_f32() as i32),
+                    UnOp::I32TruncF32U => Value::I32(try_f32!(value).to_f32() as u32 as i32),
+                    UnOp::I32TruncF64S => Value::I32(try_f64!(value).to_f64() as i32),
+                    UnOp::I32TruncF64U => Value::I32(try_f64!(value).to_f64() as u32 as i32),
 
-                UnOp::F32DemoteF64 => Expr::F32((try_f64!(inner).to_f64() as f32).into()),
-                UnOp::F64PromoteF32 => Expr::F64((try_f32!(inner).to_f32() as f64).into()),
+                    UnOp::I64TruncF32S => Value::I64(try_f32!(value).to_f32() as i64),
+                    UnOp::I64TruncF32U => Value::I64(try_f32!(value).to_f32() as u64 as i64),
+                    UnOp::I64TruncF64S => Value::I64(try_f64!(value).to_f64() as i64),
+                    UnOp::I64TruncF64U => Value::I64(try_f64!(value).to_f64() as u64 as i64),
 
-                UnOp::F32ConvertI32S => Expr::F32((try_i32!(inner) as f32).into()),
-                UnOp::F32ConvertI32U => Expr::F32((try_u32!(inner) as f32).into()),
-                UnOp::F32ConvertI64S => Expr::F32((try_i64!(inner) as f32).into()),
-                UnOp::F32ConvertI64U => Expr::F32((try_u64!(inner) as f32).into()),
+                    UnOp::F32DemoteF64 => Value::F32((try_f64!(value).to_f64() as f32).into()),
+                    UnOp::F64PromoteF32 => Value::F64((try_f32!(value).to_f32() as f64).into()),
 
-                UnOp::F64ConvertI32S => Expr::F64((try_i32!(inner) as f64).into()),
-                UnOp::F64ConvertI32U => Expr::F64((try_u32!(inner) as f64).into()),
-                UnOp::F64ConvertI64S => Expr::F64((try_i64!(inner) as f64).into()),
-                UnOp::F64ConvertI64U => Expr::F64((try_u64!(inner) as f64).into()),
+                    UnOp::F32ConvertI32S => Value::F32((try_i32!(value) as f32).into()),
+                    UnOp::F32ConvertI32U => Value::F32((try_u32!(value) as f32).into()),
+                    UnOp::F32ConvertI64S => Value::F32((try_i64!(value) as f32).into()),
+                    UnOp::F32ConvertI64U => Value::F32((try_u64!(value) as f32).into()),
 
-                UnOp::F32ReinterpretI32 => Expr::F32(F32::from_bits(try_u32!(inner))),
-                UnOp::F64ReinterpretI64 => Expr::F64(F64::from_bits(try_u64!(inner))),
-                UnOp::I32ReinterpretF32 => Expr::I32(try_f32!(inner).to_bits() as i32),
-                UnOp::I64ReinterpretF64 => Expr::I64(try_f64!(inner).to_bits() as i64),
+                    UnOp::F64ConvertI32S => Value::F64((try_i32!(value) as f64).into()),
+                    UnOp::F64ConvertI32U => Value::F64((try_u32!(value) as f64).into()),
+                    UnOp::F64ConvertI64S => Value::F64((try_i64!(value) as f64).into()),
+                    UnOp::F64ConvertI64U => Value::F64((try_u64!(value) as f64).into()),
 
-                UnOp::I32Extend8S => Expr::I32(try_u32!(inner) as i8 as i32),
-                UnOp::I32Extend16S => Expr::I32(try_u32!(inner) as i16 as i32),
+                    UnOp::F32ReinterpretI32 => Value::F32(F32::from_bits(try_u32!(value))),
+                    UnOp::F64ReinterpretI64 => Value::F64(F64::from_bits(try_u64!(value))),
+                    UnOp::I32ReinterpretF32 => Value::I32(try_f32!(value).to_bits() as i32),
+                    UnOp::I64ReinterpretF64 => Value::I64(try_f64!(value).to_bits() as i64),
 
-                UnOp::I64Extend8S => Expr::I64(try_u64!(inner) as i8 as i64),
-                UnOp::I64Extend16S => Expr::I64(try_u64!(inner) as i16 as i64),
-                UnOp::I64Extend32S => Expr::I64(try_u64!(inner) as i32 as i64),
+                    UnOp::I32Extend8S => Value::I32(try_u32!(value) as i8 as i32),
+                    UnOp::I32Extend16S => Value::I32(try_u32!(value) as i16 as i32),
 
-                UnOp::Drop => expr,
+                    UnOp::I64Extend8S => Value::I64(try_u64!(value) as i8 as i64),
+                    UnOp::I64Extend16S => Value::I64(try_u64!(value) as i16 as i64),
+                    UnOp::I64Extend32S => Value::I64(try_u64!(value) as i32 as i64),
 
-                UnOp::LocalSet(_) | UnOp::LocalTee(_) | UnOp::GlobalSet(_) => unreachable!(),
+                    UnOp::Drop => return expr,
 
-                UnOp::I32Load(_) => todo!(),
-                UnOp::I64Load(_) => todo!(),
-                UnOp::F32Load(_) => todo!(),
-                UnOp::F64Load(_) => todo!(),
+                    UnOp::LocalSet(_) | UnOp::LocalTee(_) | UnOp::GlobalSet(_) => {
+                        unreachable!()
+                    }
 
-                UnOp::I32Load8S(_) => todo!(),
-                UnOp::I32Load8U(_) => todo!(),
-                UnOp::I32Load16S(_) => todo!(),
-                UnOp::I32Load16U(_) => todo!(),
+                    UnOp::I32Load(_) => todo!(),
+                    UnOp::I64Load(_) => todo!(),
+                    UnOp::F32Load(_) => todo!(),
+                    UnOp::F64Load(_) => todo!(),
 
-                UnOp::I64Load8S(_) => todo!(),
-                UnOp::I64Load8U(_) => todo!(),
-                UnOp::I64Load16S(_) => todo!(),
-                UnOp::I64Load16U(_) => todo!(),
-                UnOp::I64Load32S(_) => todo!(),
-                UnOp::I64Load32U(_) => todo!(),
+                    UnOp::I32Load8S(_) => todo!(),
+                    UnOp::I32Load8U(_) => todo!(),
+                    UnOp::I32Load16S(_) => todo!(),
+                    UnOp::I32Load16U(_) => todo!(),
 
-                UnOp::MemoryGrow => todo!(),
-            },
+                    UnOp::I64Load8S(_) => todo!(),
+                    UnOp::I64Load8U(_) => todo!(),
+                    UnOp::I64Load16S(_) => todo!(),
+                    UnOp::I64Load16U(_) => todo!(),
+                    UnOp::I64Load32S(_) => todo!(),
+                    UnOp::I64Load32U(_) => todo!(),
 
-            Expr::Binary(op, ref lhs, ref rhs) => match op {
-                BinOp::I32Add => Expr::I32(try_i32!(lhs).wrapping_add(try_i32!(rhs))),
-                BinOp::I32Sub => Expr::I32(try_i32!(lhs).wrapping_sub(try_i32!(rhs))),
-                BinOp::I32Mul => Expr::I32(try_i32!(lhs).wrapping_mul(try_i32!(rhs))),
-                BinOp::I32DivS => Expr::I32(try_i32!(lhs).wrapping_div(try_i32!(rhs))),
-                BinOp::I32DivU => Expr::I32(try_u32!(lhs).wrapping_div(try_u32!(rhs)) as i32),
-                BinOp::I32RemS => match try_i32!(rhs) {
-                    0 => expr, // undefined
-                    rhs => Expr::I32(try_i32!(lhs).wrapping_rem(rhs)),
-                },
-                BinOp::I32RemU => match try_u32!(rhs) {
-                    0 => expr, // undefined
-                    rhs => Expr::I32(try_u32!(lhs).wrapping_rem(rhs) as i32),
-                },
-                BinOp::I32And => Expr::I32(try_i32!(lhs) & try_i32!(rhs)),
-                BinOp::I32Or => Expr::I32(try_i32!(lhs) | try_i32!(rhs)),
-                BinOp::I32Xor => Expr::I32(try_i32!(lhs) ^ try_i32!(rhs)),
-                BinOp::I32Shl => Expr::I32(try_i32!(lhs).wrapping_shl(try_u32!(rhs))),
-                BinOp::I32ShrS => Expr::I32(try_i32!(lhs).wrapping_shr(try_u32!(rhs))),
-                BinOp::I32ShrU => Expr::I32(try_u32!(lhs).wrapping_shr(try_u32!(rhs)) as i32),
-                BinOp::I32Rotl => Expr::I32(try_i32!(lhs).rotate_left(try_u32!(rhs))),
-                BinOp::I32Rotr => Expr::I32(try_i32!(lhs).rotate_right(try_u32!(rhs))),
+                    UnOp::MemoryGrow => todo!(),
+                };
 
-                BinOp::I64Add => Expr::I64(try_i64!(lhs).wrapping_add(try_i64!(rhs))),
-                BinOp::I64Sub => Expr::I64(try_i64!(lhs).wrapping_sub(try_i64!(rhs))),
-                BinOp::I64Mul => Expr::I64(try_i64!(lhs).wrapping_mul(try_i64!(rhs))),
-                BinOp::I64DivS => Expr::I64(try_i64!(lhs).wrapping_div(try_i64!(rhs))),
-                BinOp::I64DivU => Expr::I64(try_u64!(lhs).wrapping_div(try_u64!(rhs)) as i64),
-                BinOp::I64RemS => match try_i64!(rhs) {
-                    0 => expr,
-                    rhs => Expr::I64(try_i64!(lhs).wrapping_rem(rhs)),
-                },
-                BinOp::I64RemU => match try_u64!(rhs) {
-                    0 => expr,
-                    rhs => Expr::I64(try_u64!(lhs).wrapping_rem(rhs) as i64),
-                },
-                BinOp::I64And => Expr::I64(try_i64!(lhs) & try_i64!(rhs)),
-                BinOp::I64Or => Expr::I64(try_i64!(lhs) | try_i64!(rhs)),
-                BinOp::I64Xor => Expr::I64(try_i64!(lhs) ^ try_i64!(rhs)),
-                BinOp::I64Shl => Expr::I64(try_i64!(lhs).wrapping_shl(try_u64!(rhs) as u32)),
-                BinOp::I64ShrS => Expr::I64(try_i64!(lhs).wrapping_shr(try_u64!(rhs) as u32)),
-                BinOp::I64ShrU => {
-                    Expr::I64(try_u64!(lhs).wrapping_shr(try_u64!(rhs) as u32) as i64)
-                }
-                BinOp::I64Rotl => Expr::I64(try_i64!(lhs).rotate_left(try_u64!(rhs) as u32)),
-                BinOp::I64Rotr => Expr::I64(try_i64!(lhs).rotate_right(try_u64!(rhs) as u32)),
+                Expr::Value(result, attr)
+            }
 
-                BinOp::F32Add => {
-                    Expr::F32((try_f32!(lhs).to_f32() + try_f32!(rhs).to_f32()).into())
-                }
-                BinOp::F32Sub => {
-                    Expr::F32((try_f32!(lhs).to_f32() - try_f32!(rhs).to_f32()).into())
-                }
-                BinOp::F32Mul => {
-                    Expr::F32((try_f32!(lhs).to_f32() * try_f32!(rhs).to_f32()).into())
-                }
-                BinOp::F32Div => {
-                    Expr::F32((try_f32!(lhs).to_f32() / try_f32!(rhs).to_f32()).into())
-                }
-                BinOp::F32Min => {
-                    Expr::F32(try_f32!(lhs).to_f32().min(try_f32!(rhs).to_f32()).into())
-                }
-                BinOp::F32Max => {
-                    Expr::F32(try_f32!(lhs).to_f32().max(try_f32!(rhs).to_f32()).into())
-                }
-                BinOp::F32Copysign => Expr::F32(
-                    try_f32!(lhs)
-                        .to_f32()
-                        .copysign(try_f32!(rhs).to_f32())
-                        .into(),
-                ),
+            Expr::Binary(op, ref lhs, ref rhs) => {
+                let (&Expr::Value(lhs, lhs_attr), &Expr::Value(rhs, rhs_attr)) = (&**lhs, &**rhs)
+                else {
+                    return expr;
+                };
 
-                BinOp::F64Add => {
-                    Expr::F64((try_f64!(lhs).to_f64() + try_f64!(rhs).to_f64()).into())
-                }
-                BinOp::F64Sub => {
-                    Expr::F64((try_f64!(lhs).to_f64() - try_f64!(rhs).to_f64()).into())
-                }
-                BinOp::F64Mul => {
-                    Expr::F64((try_f64!(lhs).to_f64() * try_f64!(rhs).to_f64()).into())
-                }
-                BinOp::F64Div => {
-                    Expr::F64((try_f64!(lhs).to_f64() / try_f64!(rhs).to_f64()).into())
-                }
-                BinOp::F64Min => {
-                    Expr::F64(try_f64!(lhs).to_f64().min(try_f64!(rhs).to_f64()).into())
-                }
-                BinOp::F64Max => {
-                    Expr::F64(try_f64!(lhs).to_f64().max(try_f64!(rhs).to_f64()).into())
-                }
-                BinOp::F64Copysign => Expr::F64(
-                    try_f64!(lhs)
-                        .to_f64()
-                        .copysign(try_f64!(rhs).to_f64())
-                        .into(),
-                ),
+                let attr = match op {
+                    BinOp::I32Add | BinOp::I32Sub => ValueAttrs {
+                        ptr_const: lhs_attr.ptr_const || rhs_attr.ptr_const,
+                        ptr_owned: lhs_attr.ptr_owned || rhs_attr.ptr_owned,
+                        propagate: lhs_attr.propagate && rhs_attr.propagate,
+                    },
 
-                BinOp::I32Eq => Expr::I32((try_i32!(lhs) == try_i32!(rhs)) as i32),
-                BinOp::I32Ne => Expr::I32((try_i32!(lhs) != try_i32!(rhs)) as i32),
-                BinOp::I32LtS => Expr::I32((try_i32!(lhs) < try_i32!(rhs)) as i32),
-                BinOp::I32LtU => Expr::I32((try_u32!(lhs) < try_u32!(rhs)) as i32),
-                BinOp::I32GtS => Expr::I32((try_i32!(lhs) > try_i32!(rhs)) as i32),
-                BinOp::I32GtU => Expr::I32((try_u32!(lhs) > try_u32!(rhs)) as i32),
-                BinOp::I32LeS => Expr::I32((try_i32!(lhs) <= try_i32!(rhs)) as i32),
-                BinOp::I32LeU => Expr::I32((try_u32!(lhs) <= try_u32!(rhs)) as i32),
-                BinOp::I32GeS => Expr::I32((try_i32!(lhs) >= try_i32!(rhs)) as i32),
-                BinOp::I32GeU => Expr::I32((try_u32!(lhs) >= try_u32!(rhs)) as i32),
+                    _ => lhs_attr.meet(&rhs_attr),
+                };
 
-                BinOp::I64Eq => Expr::I32((try_i64!(lhs) == try_i64!(rhs)) as i32),
-                BinOp::I64Ne => Expr::I32((try_i64!(lhs) != try_i64!(rhs)) as i32),
-                BinOp::I64LtS => Expr::I32((try_i64!(lhs) < try_i64!(rhs)) as i32),
-                BinOp::I64LtU => Expr::I32((try_u64!(lhs) < try_u64!(rhs)) as i32),
-                BinOp::I64GtS => Expr::I32((try_i64!(lhs) > try_i64!(rhs)) as i32),
-                BinOp::I64GtU => Expr::I32((try_u64!(lhs) > try_u64!(rhs)) as i32),
-                BinOp::I64LeS => Expr::I32((try_i64!(lhs) <= try_i64!(rhs)) as i32),
-                BinOp::I64LeU => Expr::I32((try_u64!(lhs) <= try_u64!(rhs)) as i32),
-                BinOp::I64GeS => Expr::I32((try_i64!(lhs) >= try_i64!(rhs)) as i32),
-                BinOp::I64GeU => Expr::I32((try_u64!(lhs) >= try_u64!(rhs)) as i32),
+                let result = match op {
+                    BinOp::I32Add => Value::I32(try_i32!(lhs).wrapping_add(try_i32!(rhs))),
+                    BinOp::I32Sub => Value::I32(try_i32!(lhs).wrapping_sub(try_i32!(rhs))),
+                    BinOp::I32Mul => Value::I32(try_i32!(lhs).wrapping_mul(try_i32!(rhs))),
+                    BinOp::I32DivS => Value::I32(try_i32!(lhs).wrapping_div(try_i32!(rhs))),
+                    BinOp::I32DivU => Value::I32(try_u32!(lhs).wrapping_div(try_u32!(rhs)) as i32),
+                    BinOp::I32RemS => match try_i32!(rhs) {
+                        0 => return expr, // undefined
+                        rhs => Value::I32(try_i32!(lhs).wrapping_rem(rhs)),
+                    },
+                    BinOp::I32RemU => match try_u32!(rhs) {
+                        0 => return expr, // undefined
+                        rhs => Value::I32(try_u32!(lhs).wrapping_rem(rhs) as i32),
+                    },
+                    BinOp::I32And => Value::I32(try_i32!(lhs) & try_i32!(rhs)),
+                    BinOp::I32Or => Value::I32(try_i32!(lhs) | try_i32!(rhs)),
+                    BinOp::I32Xor => Value::I32(try_i32!(lhs) ^ try_i32!(rhs)),
+                    BinOp::I32Shl => Value::I32(try_i32!(lhs).wrapping_shl(try_u32!(rhs))),
+                    BinOp::I32ShrS => Value::I32(try_i32!(lhs).wrapping_shr(try_u32!(rhs))),
+                    BinOp::I32ShrU => Value::I32(try_u32!(lhs).wrapping_shr(try_u32!(rhs)) as i32),
+                    BinOp::I32Rotl => Value::I32(try_i32!(lhs).rotate_left(try_u32!(rhs))),
+                    BinOp::I32Rotr => Value::I32(try_i32!(lhs).rotate_right(try_u32!(rhs))),
 
-                BinOp::F32Eq => Expr::I32((try_f32!(lhs) == try_f32!(rhs)) as i32),
-                BinOp::F32Ne => Expr::I32((try_f32!(lhs) != try_f32!(rhs)) as i32),
-                BinOp::F32Lt => Expr::I32((try_f32!(lhs) < try_f32!(rhs)) as i32),
-                BinOp::F32Gt => Expr::I32((try_f32!(lhs) > try_f32!(rhs)) as i32),
-                BinOp::F32Le => Expr::I32((try_f32!(lhs) <= try_f32!(rhs)) as i32),
-                BinOp::F32Ge => Expr::I32((try_f32!(lhs) >= try_f32!(rhs)) as i32),
+                    BinOp::I64Add => Value::I64(try_i64!(lhs).wrapping_add(try_i64!(rhs))),
+                    BinOp::I64Sub => Value::I64(try_i64!(lhs).wrapping_sub(try_i64!(rhs))),
+                    BinOp::I64Mul => Value::I64(try_i64!(lhs).wrapping_mul(try_i64!(rhs))),
+                    BinOp::I64DivS => Value::I64(try_i64!(lhs).wrapping_div(try_i64!(rhs))),
+                    BinOp::I64DivU => Value::I64(try_u64!(lhs).wrapping_div(try_u64!(rhs)) as i64),
+                    BinOp::I64RemS => match try_i64!(rhs) {
+                        0 => return expr,
+                        rhs => Value::I64(try_i64!(lhs).wrapping_rem(rhs)),
+                    },
+                    BinOp::I64RemU => match try_u64!(rhs) {
+                        0 => return expr,
+                        rhs => Value::I64(try_u64!(lhs).wrapping_rem(rhs) as i64),
+                    },
+                    BinOp::I64And => Value::I64(try_i64!(lhs) & try_i64!(rhs)),
+                    BinOp::I64Or => Value::I64(try_i64!(lhs) | try_i64!(rhs)),
+                    BinOp::I64Xor => Value::I64(try_i64!(lhs) ^ try_i64!(rhs)),
+                    BinOp::I64Shl => Value::I64(try_i64!(lhs).wrapping_shl(try_u64!(rhs) as u32)),
+                    BinOp::I64ShrS => Value::I64(try_i64!(lhs).wrapping_shr(try_u64!(rhs) as u32)),
+                    BinOp::I64ShrU => {
+                        Value::I64(try_u64!(lhs).wrapping_shr(try_u64!(rhs) as u32) as i64)
+                    }
+                    BinOp::I64Rotl => Value::I64(try_i64!(lhs).rotate_left(try_u64!(rhs) as u32)),
+                    BinOp::I64Rotr => Value::I64(try_i64!(lhs).rotate_right(try_u64!(rhs) as u32)),
 
-                BinOp::F64Eq => Expr::I32((try_f64!(lhs) == try_f64!(rhs)) as i32),
-                BinOp::F64Ne => Expr::I32((try_f64!(lhs) != try_f64!(rhs)) as i32),
-                BinOp::F64Lt => Expr::I32((try_f64!(lhs) < try_f64!(rhs)) as i32),
-                BinOp::F64Gt => Expr::I32((try_f64!(lhs) > try_f64!(rhs)) as i32),
-                BinOp::F64Le => Expr::I32((try_f64!(lhs) <= try_f64!(rhs)) as i32),
-                BinOp::F64Ge => Expr::I32((try_f64!(lhs) >= try_f64!(rhs)) as i32),
+                    BinOp::F32Add => {
+                        Value::F32((try_f32!(lhs).to_f32() + try_f32!(rhs).to_f32()).into())
+                    }
+                    BinOp::F32Sub => {
+                        Value::F32((try_f32!(lhs).to_f32() - try_f32!(rhs).to_f32()).into())
+                    }
+                    BinOp::F32Mul => {
+                        Value::F32((try_f32!(lhs).to_f32() * try_f32!(rhs).to_f32()).into())
+                    }
+                    BinOp::F32Div => {
+                        Value::F32((try_f32!(lhs).to_f32() / try_f32!(rhs).to_f32()).into())
+                    }
+                    BinOp::F32Min => {
+                        Value::F32(try_f32!(lhs).to_f32().min(try_f32!(rhs).to_f32()).into())
+                    }
+                    BinOp::F32Max => {
+                        Value::F32(try_f32!(lhs).to_f32().max(try_f32!(rhs).to_f32()).into())
+                    }
+                    BinOp::F32Copysign => Value::F32(
+                        try_f32!(lhs)
+                            .to_f32()
+                            .copysign(try_f32!(rhs).to_f32())
+                            .into(),
+                    ),
 
-                BinOp::I32Store(_) => todo!(),
-                BinOp::I64Store(_) => todo!(),
-                BinOp::F32Store(_) => todo!(),
-                BinOp::F64Store(_) => todo!(),
+                    BinOp::F64Add => {
+                        Value::F64((try_f64!(lhs).to_f64() + try_f64!(rhs).to_f64()).into())
+                    }
+                    BinOp::F64Sub => {
+                        Value::F64((try_f64!(lhs).to_f64() - try_f64!(rhs).to_f64()).into())
+                    }
+                    BinOp::F64Mul => {
+                        Value::F64((try_f64!(lhs).to_f64() * try_f64!(rhs).to_f64()).into())
+                    }
+                    BinOp::F64Div => {
+                        Value::F64((try_f64!(lhs).to_f64() / try_f64!(rhs).to_f64()).into())
+                    }
+                    BinOp::F64Min => {
+                        Value::F64(try_f64!(lhs).to_f64().min(try_f64!(rhs).to_f64()).into())
+                    }
+                    BinOp::F64Max => {
+                        Value::F64(try_f64!(lhs).to_f64().max(try_f64!(rhs).to_f64()).into())
+                    }
+                    BinOp::F64Copysign => Value::F64(
+                        try_f64!(lhs)
+                            .to_f64()
+                            .copysign(try_f64!(rhs).to_f64())
+                            .into(),
+                    ),
 
-                BinOp::I32Store8(_) => todo!(),
-                BinOp::I32Store16(_) => todo!(),
+                    BinOp::I32Eq => Value::I32((try_i32!(lhs) == try_i32!(rhs)) as i32),
+                    BinOp::I32Ne => Value::I32((try_i32!(lhs) != try_i32!(rhs)) as i32),
+                    BinOp::I32LtS => Value::I32((try_i32!(lhs) < try_i32!(rhs)) as i32),
+                    BinOp::I32LtU => Value::I32((try_u32!(lhs) < try_u32!(rhs)) as i32),
+                    BinOp::I32GtS => Value::I32((try_i32!(lhs) > try_i32!(rhs)) as i32),
+                    BinOp::I32GtU => Value::I32((try_u32!(lhs) > try_u32!(rhs)) as i32),
+                    BinOp::I32LeS => Value::I32((try_i32!(lhs) <= try_i32!(rhs)) as i32),
+                    BinOp::I32LeU => Value::I32((try_u32!(lhs) <= try_u32!(rhs)) as i32),
+                    BinOp::I32GeS => Value::I32((try_i32!(lhs) >= try_i32!(rhs)) as i32),
+                    BinOp::I32GeU => Value::I32((try_u32!(lhs) >= try_u32!(rhs)) as i32),
 
-                BinOp::I64Store8(_) => todo!(),
-                BinOp::I64Store16(_) => todo!(),
-                BinOp::I64Store32(_) => todo!(),
-            },
+                    BinOp::I64Eq => Value::I32((try_i64!(lhs) == try_i64!(rhs)) as i32),
+                    BinOp::I64Ne => Value::I32((try_i64!(lhs) != try_i64!(rhs)) as i32),
+                    BinOp::I64LtS => Value::I32((try_i64!(lhs) < try_i64!(rhs)) as i32),
+                    BinOp::I64LtU => Value::I32((try_u64!(lhs) < try_u64!(rhs)) as i32),
+                    BinOp::I64GtS => Value::I32((try_i64!(lhs) > try_i64!(rhs)) as i32),
+                    BinOp::I64GtU => Value::I32((try_u64!(lhs) > try_u64!(rhs)) as i32),
+                    BinOp::I64LeS => Value::I32((try_i64!(lhs) <= try_i64!(rhs)) as i32),
+                    BinOp::I64LeU => Value::I32((try_u64!(lhs) <= try_u64!(rhs)) as i32),
+                    BinOp::I64GeS => Value::I32((try_i64!(lhs) >= try_i64!(rhs)) as i32),
+                    BinOp::I64GeU => Value::I32((try_u64!(lhs) >= try_u64!(rhs)) as i32),
 
-            Expr::Ternary(TernOp::Select, first, second, condition) => match *condition {
-                Expr::I32(0) => *second,
-                Expr::I32(_) => *first,
+                    BinOp::F32Eq => Value::I32((try_f32!(lhs) == try_f32!(rhs)) as i32),
+                    BinOp::F32Ne => Value::I32((try_f32!(lhs) != try_f32!(rhs)) as i32),
+                    BinOp::F32Lt => Value::I32((try_f32!(lhs) < try_f32!(rhs)) as i32),
+                    BinOp::F32Gt => Value::I32((try_f32!(lhs) > try_f32!(rhs)) as i32),
+                    BinOp::F32Le => Value::I32((try_f32!(lhs) <= try_f32!(rhs)) as i32),
+                    BinOp::F32Ge => Value::I32((try_f32!(lhs) >= try_f32!(rhs)) as i32),
+
+                    BinOp::F64Eq => Value::I32((try_f64!(lhs) == try_f64!(rhs)) as i32),
+                    BinOp::F64Ne => Value::I32((try_f64!(lhs) != try_f64!(rhs)) as i32),
+                    BinOp::F64Lt => Value::I32((try_f64!(lhs) < try_f64!(rhs)) as i32),
+                    BinOp::F64Gt => Value::I32((try_f64!(lhs) > try_f64!(rhs)) as i32),
+                    BinOp::F64Le => Value::I32((try_f64!(lhs) <= try_f64!(rhs)) as i32),
+                    BinOp::F64Ge => Value::I32((try_f64!(lhs) >= try_f64!(rhs)) as i32),
+
+                    BinOp::I32Store(_) => todo!(),
+                    BinOp::I64Store(_) => todo!(),
+                    BinOp::F32Store(_) => todo!(),
+                    BinOp::F64Store(_) => todo!(),
+
+                    BinOp::I32Store8(_) => todo!(),
+                    BinOp::I32Store16(_) => todo!(),
+
+                    BinOp::I64Store8(_) => todo!(),
+                    BinOp::I64Store16(_) => todo!(),
+                    BinOp::I64Store32(_) => todo!(),
+                };
+
+                Expr::Value(result, attr)
+            }
+
+            Expr::Ternary(TernOp::Select, first, second, condition) => match condition.to_i32() {
+                Some(0) => *second,
+                Some(_) => *first,
                 _ => Expr::Ternary(TernOp::Select, first, second, condition),
             },
 

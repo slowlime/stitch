@@ -1,5 +1,7 @@
 use std::fmt::{self, Debug, Display};
 
+use crate::util::try_match;
+
 use super::ty::ValType;
 use super::{FuncId, GlobalId, LocalId, TypeId};
 
@@ -104,12 +106,49 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn to_expr(&self) -> Expr {
-        match *self {
-            Self::I32(value) => Expr::I32(value),
-            Self::I64(value) => Expr::I64(value),
-            Self::F32(value) => Expr::F32(value),
-            Self::F64(value) => Expr::F64(value),
+    pub fn to_i32(&self) -> Option<i32> {
+        try_match!(*self, Self::I32(value) => value)
+    }
+
+    pub fn to_u32(&self) -> Option<u32> {
+        try_match!(*self, Self::I32(value) => value as u32)
+    }
+
+    pub fn to_i64(&self) -> Option<i64> {
+        try_match!(*self, Self::I64(value) => value)
+    }
+
+    pub fn to_u64(&self) -> Option<u64> {
+        try_match!(*self, Self::I64(value) => value as u64)
+    }
+
+    pub fn to_f32(&self) -> Option<F32> {
+        try_match!(*self, Self::F32(value) => value)
+    }
+
+    pub fn to_f64(&self) -> Option<F64> {
+        try_match!(*self, Self::F64(value) => value)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ValueAttrs {
+    /// Whether the specializer can evaluate loads from addresses derived from this value.
+    pub ptr_const: bool,
+
+    /// Whether the specializer can evaluate stores to addresses derived from this value.
+    pub ptr_owned: bool,
+
+    /// Whether the specializer can propagate these attributes to the value loaded from this address.
+    pub propagate: bool,
+}
+
+impl ValueAttrs {
+    pub fn meet(&self, other: &Self) -> Self {
+        Self {
+            ptr_const: self.ptr_const && other.ptr_const,
+            ptr_owned: self.ptr_owned && other.ptr_owned,
+            propagate: self.propagate && other.propagate,
         }
     }
 }
@@ -369,10 +408,7 @@ impl From<TernOp> for Op {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    I32(i32),
-    I64(i64),
-    F32(F32),
-    F64(F64),
+    Value(Value, ValueAttrs),
 
     Nullary(NulOp),
     Unary(UnOp, Box<Expr>),
@@ -390,10 +426,34 @@ pub enum Expr {
     CallIndirect(TypeId, BExpr, Vec<Expr>),
 }
 
+impl From<Value> for Expr {
+    fn from(value: Value) -> Self {
+        Self::Value(value, ValueAttrs::default())
+    }
+}
+
 impl From<NulOp> for Expr {
     fn from(op: NulOp) -> Self {
         Self::Nullary(op)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Load {
+    I32 { src_size: u8, sign_extend: bool },
+    I64 { src_size: u8, sign_extend: bool },
+    F32,
+    F64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Store {
+    I32 { dst_size: u8 },
+
+    I64 { dst_size: u8 },
+
+    F32,
+    F64,
 }
 
 pub trait Visitor {
@@ -412,10 +472,7 @@ where
 impl Expr {
     pub fn map<V: Visitor>(&self, v: &mut V) -> Expr {
         let expr = match self {
-            Self::I32(_) | Self::I64(_) | Self::F32(_) | Self::F64(_) | Self::Nullary(_) => {
-                return v.visit(self.clone())
-            }
-
+            Self::Value(_, _) | Self::Nullary(_) => return v.visit(self.clone()),
             Self::Unary(op, inner) => Self::Unary(*op, Box::new(inner.map(v))),
             Self::Binary(op, lhs, rhs) => {
                 Self::Binary(*op, Box::new(lhs.map(v)), Box::new(rhs.map(v)))
@@ -480,53 +537,172 @@ impl Expr {
     }
 
     pub fn to_value(&self) -> Option<Value> {
-        match *self {
-            Self::I32(value) => Some(Value::I32(value)),
-            Self::I64(value) => Some(Value::I64(value)),
-            Self::F32(value) => Some(Value::F32(value)),
-            Self::F64(value) => Some(Value::F64(value)),
-            _ => None,
-        }
+        try_match!(*self, Self::Value(value, _) => value)
     }
 
     pub fn to_i32(&self) -> Option<i32> {
-        match *self {
-            Self::I32(value) => Some(value),
-            _ => None,
-        }
+        self.to_value()?.to_i32()
     }
 
     pub fn to_u32(&self) -> Option<u32> {
-        match *self {
-            Self::I32(value) => Some(value as u32),
-            _ => None,
-        }
+        self.to_value()?.to_u32()
     }
 
     pub fn to_i64(&self) -> Option<i64> {
-        match *self {
-            Self::I64(value) => Some(value),
-            _ => None,
-        }
+        self.to_value()?.to_i64()
     }
 
     pub fn to_u64(&self) -> Option<u64> {
-        match *self {
-            Self::I64(value) => Some(value as u64),
-            _ => None,
-        }
+        self.to_value()?.to_u64()
     }
 
     pub fn to_f32(&self) -> Option<F32> {
-        match *self {
-            Self::F32(value) => Some(value),
-            _ => None,
-        }
+        self.to_value()?.to_f32()
     }
 
     pub fn to_f64(&self) -> Option<F64> {
-        match *self {
-            Self::F64(value) => Some(value),
+        self.to_value()?.to_f64()
+    }
+
+    pub fn to_load(&self) -> Option<(MemArg, &Expr, Load)> {
+        Some(match self {
+            Self::Unary(UnOp::I32Load(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I32 {
+                    src_size: 4,
+                    sign_extend: false,
+                },
+            ),
+
+            Self::Unary(UnOp::I64Load(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I64 {
+                    src_size: 8,
+                    sign_extend: false,
+                },
+            ),
+
+            Self::Unary(UnOp::F32Load(mem_arg), addr) => (*mem_arg, addr, Load::F32),
+            Self::Unary(UnOp::F64Load(mem_arg), addr) => (*mem_arg, addr, Load::F64),
+
+            Self::Unary(UnOp::I32Load8S(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I32 {
+                    src_size: 1,
+                    sign_extend: true,
+                },
+            ),
+
+            Self::Unary(UnOp::I32Load8U(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I32 {
+                    src_size: 1,
+                    sign_extend: false,
+                },
+            ),
+
+            Self::Unary(UnOp::I32Load16S(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I32 {
+                    src_size: 2,
+                    sign_extend: true,
+                },
+            ),
+
+            Self::Unary(UnOp::I32Load16U(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I32 {
+                    src_size: 2,
+                    sign_extend: false,
+                },
+            ),
+
+            Self::Unary(UnOp::I64Load8S(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I64 {
+                    src_size: 1,
+                    sign_extend: true,
+                },
+            ),
+
+            Self::Unary(UnOp::I64Load8U(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I64 {
+                    src_size: 1,
+                    sign_extend: false,
+                },
+            ),
+
+            Self::Unary(UnOp::I64Load16S(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I64 {
+                    src_size: 2,
+                    sign_extend: true,
+                },
+            ),
+
+            Self::Unary(UnOp::I64Load16U(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I64 {
+                    src_size: 2,
+                    sign_extend: false,
+                },
+            ),
+
+            Self::Unary(UnOp::I64Load32S(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I64 {
+                    src_size: 4,
+                    sign_extend: true,
+                },
+            ),
+
+            Self::Unary(UnOp::I64Load32U(mem_arg), addr) => (
+                *mem_arg,
+                addr,
+                Load::I64 {
+                    src_size: 4,
+                    sign_extend: false,
+                },
+            ),
+
+            _ => return None,
+        })
+    }
+
+    pub fn to_store(&self) -> Option<(MemArg, &Expr, &Expr, Store)> {
+        match self {
+            Self::Binary(op, addr, value) => {
+                let (mem_arg, store) = match *op {
+                    BinOp::I32Store(mem_arg) => (mem_arg, Store::I32 { dst_size: 4 }),
+                    BinOp::I64Store(mem_arg) => (mem_arg, Store::I64 { dst_size: 8 }),
+                    BinOp::F32Store(mem_arg) => (mem_arg, Store::F32),
+                    BinOp::F64Store(mem_arg) => (mem_arg, Store::F64),
+
+                    BinOp::I32Store8(mem_arg) => (mem_arg, Store::I32 { dst_size: 1 }),
+                    BinOp::I32Store16(mem_arg) => (mem_arg, Store::I32 { dst_size: 2 }),
+
+                    BinOp::I64Store8(mem_arg) => (mem_arg, Store::I64 { dst_size: 1 }),
+                    BinOp::I64Store16(mem_arg) => (mem_arg, Store::I64 { dst_size: 2 }),
+                    BinOp::I64Store32(mem_arg) => (mem_arg, Store::I64 { dst_size: 4 }),
+
+                    _ => return None,
+                };
+
+                Some((mem_arg, addr, value, store))
+            }
+
             _ => None,
         }
     }
@@ -574,10 +750,10 @@ impl Expr {
 
     pub fn ty(&self) -> ExprTy {
         match self {
-            Self::I32(_) => ValType::I32.into(),
-            Self::I64(_) => ValType::I64.into(),
-            Self::F32(_) => ValType::F32.into(),
-            Self::F64(_) => ValType::F64.into(),
+            Self::Value(Value::I32(_), _) => ValType::I32.into(),
+            Self::Value(Value::I64(_), _) => ValType::I64.into(),
+            Self::Value(Value::F32(_), _) => ValType::F32.into(),
+            Self::Value(Value::F64(_), _) => ValType::F64.into(),
 
             Self::Unary(UnOp::I32Clz | UnOp::I32Ctz | UnOp::I32Popcnt, _) => ValType::I32.into(),
             Self::Unary(UnOp::I64Clz | UnOp::I64Ctz | UnOp::I64Popcnt, _) => ValType::I64.into(),
@@ -783,10 +959,7 @@ impl Expr {
             Self::Unary(UnOp::F64Load(_), _) => ValType::F64.into(),
 
             Self::Binary(
-                BinOp::I32Store(_)
-                | BinOp::I64Store(_)
-                | BinOp::F32Store(_)
-                | BinOp::F64Store(_),
+                BinOp::I32Store(_) | BinOp::I64Store(_) | BinOp::F32Store(_) | BinOp::F64Store(_),
                 _,
                 _,
             ) => ExprTy::Empty,
