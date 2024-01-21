@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::mem;
 
+use log::warn;
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
-use crate::ir::expr::{BinOp, NulOp, TernOp, UnOp, Value, ValueAttrs, F32, F64};
-use crate::ir::{Expr, Func, FuncBody, FuncId, LocalId, Module};
+use crate::ir::expr::{
+    BinOp, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs, F32, F64,
+};
+use crate::ir::{Expr, Func, FuncBody, FuncId, LocalId, MemoryDef, Module};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpecSignature {
@@ -128,6 +131,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
     fn block(&mut self, exprs: &[Expr]) -> Vec<Expr> {
         exprs
             .iter()
+            // FIXME: this eagerly evaluates block bodies, which is not a great idea
             .map(|expr| expr.map(&mut |expr| self.expr(expr)))
             .collect()
     }
@@ -181,10 +185,92 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             }};
         }
 
-        if let Some((mem_arg, addr, load)) = expr.to_load() {
-            todo!()
-        } else if let Some((mem_arg, addr, value, store)) = expr.to_store() {
-            todo!()
+        match expr.to_load() {
+            Some((
+                MemArg { mem_id, offset, .. },
+                &Expr::Value(Value::I32(addr), addr_attrs),
+                load,
+            )) if addr_attrs.ptr >= PtrAttr::Const => {
+                match &self.spec.module.mems[mem_id].def {
+                    MemoryDef::Import(_) => {}
+
+                    MemoryDef::Bytes(bytes) => {
+                        let start = (addr as u32 + offset) as usize;
+                        let end = start + load.src_size() as usize;
+
+                        if let Some(src) = bytes.get(start..end) {
+                            debug_assert!(src.len() <= 8);
+
+                            // little-endian
+                            let mut value =
+                                src.iter().rfold(0u64, |acc, &byte| acc << 8 | byte as u64);
+
+                            if load.sign_extend() {
+                                value |= -((value & 1 << 8 * load.src_size() - 1) as i64) as u64;
+                            }
+
+                            let value = match load {
+                                Load::I32 { .. } => Value::I32(value as i32),
+                                Load::I64 { .. } => Value::I64(value as i64),
+                                Load::F32 => Value::F32(F32::from_bits(value as u32)),
+                                Load::F64 => Value::F64(F64::from_bits(value)),
+                            };
+
+                            let attrs = if addr_attrs.propagate {
+                                ValueAttrs {
+                                    propagate: false,
+                                    ..addr_attrs
+                                }
+                            } else {
+                                addr_attrs
+                            };
+
+                            return Expr::Value(value, attrs);
+                        } else {
+                            warn!("Out-of-bounds constant read of {start}..{end}");
+                        }
+                    }
+                }
+            }
+
+            _ => {}
+        }
+
+        match expr.to_store() {
+            Some((
+                MemArg { mem_id, offset, .. },
+                &Expr::Value(Value::I32(addr), addr_attrs),
+                &Expr::Value(value, _),
+                store,
+            )) if addr_attrs.ptr >= PtrAttr::Owned => {
+                match &mut self.spec.module.mems[mem_id].def {
+                    MemoryDef::Import(_) => {}
+
+                    MemoryDef::Bytes(bytes) => {
+                        let start = (addr as u32 + offset) as usize;
+                        let end = start + store.dst_size() as usize;
+
+                        if let Some(dst) = bytes.get_mut(start..end) {
+                            debug_assert!(dst.len() <= 8);
+
+                            let src = match value {
+                                Value::I32(value) => value as u64,
+                                Value::I64(value) => value as u64,
+                                Value::F32(value) => value.to_bits() as u64,
+                                Value::F64(value) => value.to_bits(),
+                            };
+
+                            dst.copy_from_slice(&src.to_le_bytes()[0..store.dst_size() as usize]);
+
+                            return NulOp::Nop.into();
+                        } else {
+                            warn!("Out-of-bounds owned write of {start}..{end}");
+                        }
+                    }
+                }
+            }
+
+            _ => {}
         }
 
         match expr {
@@ -227,7 +313,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::Unary(UnOp::GlobalSet(_), _) => expr, // TODO
 
             Expr::Nullary(op) => match op {
-                NulOp::MemorySize => todo!(),
+                NulOp::MemorySize(mem_id) => todo!(),
                 NulOp::Nop => todo!(),
                 NulOp::Unreachable => todo!(),
 
@@ -313,24 +399,22 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                         unreachable!()
                     }
 
-                    UnOp::I32Load(_) => todo!(),
-                    UnOp::I64Load(_) => todo!(),
-                    UnOp::F32Load(_) => todo!(),
-                    UnOp::F64Load(_) => todo!(),
+                    UnOp::I32Load(_)
+                    | UnOp::I64Load(_)
+                    | UnOp::F32Load(_)
+                    | UnOp::F64Load(_)
+                    | UnOp::I32Load8S(_)
+                    | UnOp::I32Load8U(_)
+                    | UnOp::I32Load16S(_)
+                    | UnOp::I32Load16U(_)
+                    | UnOp::I64Load8S(_)
+                    | UnOp::I64Load8U(_)
+                    | UnOp::I64Load16S(_)
+                    | UnOp::I64Load16U(_)
+                    | UnOp::I64Load32S(_)
+                    | UnOp::I64Load32U(_) => return expr,
 
-                    UnOp::I32Load8S(_) => todo!(),
-                    UnOp::I32Load8U(_) => todo!(),
-                    UnOp::I32Load16S(_) => todo!(),
-                    UnOp::I32Load16U(_) => todo!(),
-
-                    UnOp::I64Load8S(_) => todo!(),
-                    UnOp::I64Load8U(_) => todo!(),
-                    UnOp::I64Load16S(_) => todo!(),
-                    UnOp::I64Load16U(_) => todo!(),
-                    UnOp::I64Load32S(_) => todo!(),
-                    UnOp::I64Load32U(_) => todo!(),
-
-                    UnOp::MemoryGrow => todo!(),
+                    UnOp::MemoryGrow(mem_id) => todo!(),
                 };
 
                 Expr::Value(result, attr)
@@ -344,9 +428,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
 
                 let attr = match op {
                     BinOp::I32Add | BinOp::I32Sub => ValueAttrs {
-                        ptr_const: lhs_attr.ptr_const || rhs_attr.ptr_const,
-                        ptr_owned: lhs_attr.ptr_owned || rhs_attr.ptr_owned,
-                        propagate: lhs_attr.propagate && rhs_attr.propagate,
+                        ptr: lhs_attr.ptr.max(rhs_attr.ptr),
+                        propagate: false,
                     },
 
                     _ => lhs_attr.meet(&rhs_attr),
@@ -485,17 +568,15 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                     BinOp::F64Le => Value::I32((try_f64!(lhs) <= try_f64!(rhs)) as i32),
                     BinOp::F64Ge => Value::I32((try_f64!(lhs) >= try_f64!(rhs)) as i32),
 
-                    BinOp::I32Store(_) => todo!(),
-                    BinOp::I64Store(_) => todo!(),
-                    BinOp::F32Store(_) => todo!(),
-                    BinOp::F64Store(_) => todo!(),
-
-                    BinOp::I32Store8(_) => todo!(),
-                    BinOp::I32Store16(_) => todo!(),
-
-                    BinOp::I64Store8(_) => todo!(),
-                    BinOp::I64Store16(_) => todo!(),
-                    BinOp::I64Store32(_) => todo!(),
+                    BinOp::I32Store(_)
+                    | BinOp::I64Store(_)
+                    | BinOp::F32Store(_)
+                    | BinOp::F64Store(_)
+                    | BinOp::I32Store8(_)
+                    | BinOp::I32Store16(_)
+                    | BinOp::I64Store8(_)
+                    | BinOp::I64Store16(_)
+                    | BinOp::I64Store32(_) => return expr,
                 };
 
                 Expr::Value(result, attr)

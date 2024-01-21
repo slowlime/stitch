@@ -3,7 +3,7 @@ use std::fmt::{self, Debug, Display};
 use crate::util::try_match;
 
 use super::ty::ValType;
-use super::{FuncId, GlobalId, LocalId, TypeId};
+use super::{FuncId, GlobalId, LocalId, MemoryId, TypeId};
 
 type BExpr = Box<Expr>;
 
@@ -131,13 +131,21 @@ impl Value {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PtrAttr {
+    #[default]
+    None,
+
+    /// Allows inlining loads from addresses derived from a value.
+    Const,
+
+    /// Allows inlining stores to addresses derived from a value in addition to loads.
+    Owned,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValueAttrs {
-    /// Whether the specializer can evaluate loads from addresses derived from this value.
-    pub ptr_const: bool,
-
-    /// Whether the specializer can evaluate stores to addresses derived from this value.
-    pub ptr_owned: bool,
+    pub ptr: PtrAttr,
 
     /// Whether the specializer can propagate these attributes to the value loaded from this address.
     pub propagate: bool,
@@ -146,8 +154,7 @@ pub struct ValueAttrs {
 impl ValueAttrs {
     pub fn meet(&self, other: &Self) -> Self {
         Self {
-            ptr_const: self.ptr_const && other.ptr_const,
-            ptr_owned: self.ptr_owned && other.ptr_owned,
+            ptr: self.ptr.min(other.ptr),
             propagate: self.propagate && other.propagate,
         }
     }
@@ -155,6 +162,7 @@ impl ValueAttrs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemArg {
+    pub mem_id: MemoryId,
     pub offset: u32,
     pub align: u32,
 }
@@ -166,7 +174,7 @@ pub enum NulOp {
     Unreachable,
     LocalGet(LocalId),
     GlobalGet(GlobalId),
-    MemorySize,
+    MemorySize(MemoryId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,7 +267,7 @@ pub enum UnOp {
     I64Load32S(MemArg),
     I64Load32U(MemArg),
 
-    MemoryGrow,
+    MemoryGrow(MemoryId),
 
     Drop,
 }
@@ -446,14 +454,39 @@ pub enum Load {
     F64,
 }
 
+impl Load {
+    pub fn src_size(&self) -> u8 {
+        match *self {
+            Self::I32 { src_size, .. } | Self::I64 { src_size, .. } => src_size,
+            Self::F32 => 4,
+            Self::F64 => 8,
+        }
+    }
+
+    pub fn sign_extend(&self) -> bool {
+        match *self {
+            Self::I32 { sign_extend, .. } | Self::I64 { sign_extend, .. } => sign_extend,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Store {
     I32 { dst_size: u8 },
-
     I64 { dst_size: u8 },
-
     F32,
     F64,
+}
+
+impl Store {
+    pub fn dst_size(&self) -> u8 {
+        match *self {
+            Self::I32 { dst_size } | Self::I64 { dst_size } => dst_size,
+            Self::F32 => 4,
+            Self::F64 => 8,
+        }
+    }
 }
 
 pub trait Visitor {
@@ -987,7 +1020,7 @@ impl Expr {
                 _,
             ) => ValType::I64.into(),
 
-            Self::Nullary(NulOp::MemorySize) | Self::Unary(UnOp::MemoryGrow, _) => {
+            Self::Nullary(NulOp::MemorySize(_)) | Self::Unary(UnOp::MemoryGrow(_), _) => {
                 ValType::I32.into()
             }
 

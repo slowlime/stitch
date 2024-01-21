@@ -426,7 +426,9 @@ impl<'a> BodyEncoder<'a, '_> {
                 NulOp::GlobalGet(global_id) => {
                     Instruction::GlobalGet(self.encoder.globals[global_id] as u32)
                 }
-                NulOp::MemorySize => Instruction::MemorySize(0),
+                NulOp::MemorySize(mem_id) => {
+                    Instruction::MemorySize(self.encoder.mems[mem_id] as u32)
+                }
             }),
 
             Expr::Unary(op, inner) => self.unary(
@@ -543,7 +545,9 @@ impl<'a> BodyEncoder<'a, '_> {
                         Instruction::I64Load32U(self.convert_mem_arg(&mem_arg))
                     }
 
-                    UnOp::MemoryGrow => Instruction::MemoryGrow(0),
+                    UnOp::MemoryGrow(mem_id) => {
+                        Instruction::MemoryGrow(self.encoder.mems[mem_id] as u32)
+                    }
 
                     UnOp::Drop => Instruction::Drop,
                 },

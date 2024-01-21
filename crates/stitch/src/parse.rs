@@ -7,7 +7,7 @@ use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
-use crate::ir::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, F32, F64, Value};
+use crate::ir::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64};
 use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, LocalId, MemoryId, TableId, TypeId};
 
 const PAGE_SIZE: usize = 65536;
@@ -124,13 +124,6 @@ fn make_block_type(block_ty: wasmparser::BlockType) -> Option<ir::ty::ValType> {
         wasmparser::BlockType::Empty => None,
         wasmparser::BlockType::Type(ty) => Some(make_val_type(ty)),
         _ => unreachable!("func block types are not supported"),
-    }
-}
-
-fn make_mem_arg(mem_arg: wasmparser::MemArg) -> ir::expr::MemArg {
-    ir::expr::MemArg {
-        offset: mem_arg.offset as u32,
-        align: mem_arg.align as u32,
     }
 }
 
@@ -928,75 +921,87 @@ impl Parser {
                     ctx.un_expr(UnOp::GlobalSet(ctx.parser.globals[global_index as usize]))
                 }
 
-                Operator::I32Load { memarg } => ctx.un_expr(UnOp::I32Load(make_mem_arg(memarg))),
-                Operator::I64Load { memarg } => ctx.un_expr(UnOp::I64Load(make_mem_arg(memarg))),
-                Operator::F32Load { memarg } => ctx.un_expr(UnOp::F32Load(make_mem_arg(memarg))),
-                Operator::F64Load { memarg } => ctx.un_expr(UnOp::F64Load(make_mem_arg(memarg))),
+                Operator::I32Load { memarg } => {
+                    ctx.un_expr(UnOp::I32Load(ctx.parser.make_mem_arg(memarg)))
+                }
+                Operator::I64Load { memarg } => {
+                    ctx.un_expr(UnOp::I64Load(ctx.parser.make_mem_arg(memarg)))
+                }
+                Operator::F32Load { memarg } => {
+                    ctx.un_expr(UnOp::F32Load(ctx.parser.make_mem_arg(memarg)))
+                }
+                Operator::F64Load { memarg } => {
+                    ctx.un_expr(UnOp::F64Load(ctx.parser.make_mem_arg(memarg)))
+                }
 
                 Operator::I32Load8S { memarg } => {
-                    ctx.un_expr(UnOp::I32Load8S(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I32Load8S(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I32Load8U { memarg } => {
-                    ctx.un_expr(UnOp::I32Load8U(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I32Load8U(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I32Load16S { memarg } => {
-                    ctx.un_expr(UnOp::I32Load16S(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I32Load16S(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I32Load16U { memarg } => {
-                    ctx.un_expr(UnOp::I32Load16U(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I32Load16U(ctx.parser.make_mem_arg(memarg)))
                 }
 
                 Operator::I64Load8S { memarg } => {
-                    ctx.un_expr(UnOp::I64Load8S(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I64Load8S(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I64Load8U { memarg } => {
-                    ctx.un_expr(UnOp::I64Load8U(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I64Load8U(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I64Load16S { memarg } => {
-                    ctx.un_expr(UnOp::I64Load16S(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I64Load16S(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I64Load16U { memarg } => {
-                    ctx.un_expr(UnOp::I64Load16U(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I64Load16U(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I64Load32S { memarg } => {
-                    ctx.un_expr(UnOp::I64Load32S(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I64Load32S(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I64Load32U { memarg } => {
-                    ctx.un_expr(UnOp::I64Load32U(make_mem_arg(memarg)))
+                    ctx.un_expr(UnOp::I64Load32U(ctx.parser.make_mem_arg(memarg)))
                 }
 
                 Operator::I32Store { memarg } => {
-                    ctx.bin_expr(BinOp::I32Store(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::I32Store(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I64Store { memarg } => {
-                    ctx.bin_expr(BinOp::I64Store(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::I64Store(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::F32Store { memarg } => {
-                    ctx.bin_expr(BinOp::F32Store(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::F32Store(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::F64Store { memarg } => {
-                    ctx.bin_expr(BinOp::F64Store(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::F64Store(ctx.parser.make_mem_arg(memarg)))
                 }
 
                 Operator::I32Store8 { memarg } => {
-                    ctx.bin_expr(BinOp::I32Store8(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::I32Store8(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I32Store16 { memarg } => {
-                    ctx.bin_expr(BinOp::I32Store16(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::I32Store16(ctx.parser.make_mem_arg(memarg)))
                 }
 
                 Operator::I64Store8 { memarg } => {
-                    ctx.bin_expr(BinOp::I64Store8(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::I64Store8(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I64Store16 { memarg } => {
-                    ctx.bin_expr(BinOp::I64Store16(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::I64Store16(ctx.parser.make_mem_arg(memarg)))
                 }
                 Operator::I64Store32 { memarg } => {
-                    ctx.bin_expr(BinOp::I64Store32(make_mem_arg(memarg)))
+                    ctx.bin_expr(BinOp::I64Store32(ctx.parser.make_mem_arg(memarg)))
                 }
 
-                Operator::MemorySize { .. } => NulOp::MemorySize.into(),
-                Operator::MemoryGrow { .. } => ctx.un_expr(UnOp::MemoryGrow),
+                Operator::MemorySize { mem, .. } => {
+                    NulOp::MemorySize(ctx.parser.mems[mem as usize]).into()
+                }
+                Operator::MemoryGrow { mem, .. } => {
+                    ctx.un_expr(UnOp::MemoryGrow(ctx.parser.mems[mem as usize]))
+                }
 
                 Operator::I32Const { value } => Value::I32(value).into(),
                 Operator::I64Const { value } => Value::I64(value).into(),
@@ -1156,6 +1161,14 @@ impl Parser {
         assert!(ctx.blocks.is_empty());
 
         Ok(ctx.body.unwrap())
+    }
+
+    fn make_mem_arg(&self, mem_arg: wasmparser::MemArg) -> ir::expr::MemArg {
+        ir::expr::MemArg {
+            mem_id: self.mems[mem_arg.memory as usize],
+            offset: mem_arg.offset as u32,
+            align: mem_arg.align as u32,
+        }
     }
 }
 
