@@ -129,14 +129,62 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
     }
 
     fn block(&mut self, exprs: &[Expr]) -> Vec<Expr> {
-        exprs
-            .iter()
-            // FIXME: this eagerly evaluates block bodies, which is not a great idea
-            .map(|expr| expr.map(&mut |expr| self.expr(expr)))
-            .collect()
+        // FIXME: traps should abort specialization
+        exprs.iter().map(|expr| self.expr(expr)).collect()
     }
 
-    fn expr(&mut self, expr: Expr) -> Expr {
+    fn expr(&mut self, expr: &Expr) -> Expr {
+        let expr = match expr {
+            Expr::Value(_, _) | Expr::Nullary(_) => expr.clone(),
+            Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(self.expr(inner))),
+            Expr::Binary(op, lhs, rhs) => {
+                Expr::Binary(*op, Box::new(self.expr(lhs)), Box::new(self.expr(rhs)))
+            }
+            Expr::Ternary(op, first, second, third) => Expr::Ternary(
+                *op,
+                Box::new(self.expr(first)),
+                Box::new(self.expr(second)),
+                Box::new(self.expr(third)),
+            ),
+
+            Expr::Block(block_ty, exprs) => Expr::Block(block_ty.clone(), self.block(exprs)),
+            Expr::Loop(block_ty, exprs) => Expr::Block(block_ty.clone(), self.block(exprs)),
+            Expr::If(block_ty, cond, then_block, else_block) => Expr::If(
+                block_ty.clone(),
+                Box::new(self.expr(cond)),
+                then_block.clone(),
+                else_block.clone(),
+            ),
+
+            Expr::Br(relative_depth, value) => Expr::Br(
+                *relative_depth,
+                value.as_ref().map(|expr| Box::new(self.expr(expr))),
+            ),
+            Expr::BrIf(relative_depth, condition, value) => Expr::BrIf(
+                *relative_depth,
+                Box::new(self.expr(condition)),
+                value.as_ref().map(|expr| Box::new(self.expr(expr))),
+            ),
+            Expr::BrTable(labels, default_label, index, value) => Expr::BrTable(
+                labels.clone(),
+                *default_label,
+                Box::new(self.expr(index)),
+                value.as_ref().map(|expr| Box::new(self.expr(expr))),
+            ),
+            Expr::Return(value) => {
+                Expr::Return(value.as_ref().map(|expr| Box::new(self.expr(expr))))
+            }
+
+            Expr::Call(func_id, args) => {
+                Expr::Call(*func_id, args.iter().map(|expr| self.expr(expr)).collect())
+            }
+            Expr::CallIndirect(ty_id, index, args) => Expr::CallIndirect(
+                *ty_id,
+                Box::new(self.expr(index)),
+                args.iter().map(|expr| self.expr(expr)).collect(),
+            ),
+        };
+
         macro_rules! try_i32 {
             ($expr:expr) => {{
                 match $expr.to_i32() {
@@ -588,13 +636,18 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 _ => Expr::Ternary(TernOp::Select, first, second, condition),
             },
 
-            Expr::Block(_, _) => todo!(),
-            Expr::Loop(_, _) => todo!(),
-            Expr::If(_, _, _, _) => todo!(),
-            Expr::Br(_, _) => todo!(),
-            Expr::BrIf(_, _, _) => todo!(),
-            Expr::BrTable(_, _, _, _) => todo!(),
-            Expr::Return(_) => todo!(),
+            Expr::Block(_, _) | Expr::Loop(_, _) => expr,
+
+            Expr::If(block_ty, condition, then_block, else_block) => match *condition {
+                Expr::Value(Value::I32(0), _) => Expr::Block(block_ty, self.block(&else_block)),
+                Expr::Value(Value::I32(_), _) => Expr::Block(block_ty, self.block(&then_block)),
+                _ => Expr::If(block_ty, condition, then_block, else_block),
+            },
+
+            Expr::Br(_, _) | Expr::BrIf(_, _, _) | Expr::BrTable(_, _, _, _) | Expr::Return(_) => {
+                expr
+            }
+
             Expr::Call(_, _) => todo!(),
             Expr::CallIndirect(_, _, _) => todo!(),
         }
