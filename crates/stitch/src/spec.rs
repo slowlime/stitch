@@ -7,7 +7,7 @@ use slotmap::{SecondaryMap, SparseSecondaryMap};
 use crate::ir::expr::{
     BinOp, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs, F32, F64,
 };
-use crate::ir::{Expr, Func, FuncBody, FuncId, LocalId, MemoryDef, Module};
+use crate::ir::{Expr, Func, FuncBody, FuncId, LocalId, MemoryDef, Module, TableDef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpecSignature {
@@ -148,7 +148,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             return expr.clone();
         }
 
-        let expr = match expr {
+        let mut expr = match expr {
             Expr::Value(_, _) | Expr::Nullary(_) => expr.clone(),
             Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(self.expr(ctx, inner))),
             Expr::Binary(op, lhs, rhs) => Expr::Binary(
@@ -191,11 +191,13 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 Expr::Return(value.as_ref().map(|expr| Box::new(self.expr(ctx, expr))))
             }
 
-            Expr::Call(func_id, args) => {
-                Expr::Call(*func_id, args.iter().map(|expr| self.expr(ctx, expr)).collect())
-            }
-            Expr::CallIndirect(ty_id, args, index) => Expr::CallIndirect(
+            Expr::Call(func_id, args) => Expr::Call(
+                *func_id,
+                args.iter().map(|expr| self.expr(ctx, expr)).collect(),
+            ),
+            Expr::CallIndirect(ty_id, table_id, args, index) => Expr::CallIndirect(
                 *ty_id,
+                *table_id,
                 args.iter().map(|expr| self.expr(ctx, expr)).collect(),
                 Box::new(self.expr(ctx, index)),
             ),
@@ -382,7 +384,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::Unary(UnOp::GlobalSet(_), _) => expr, // TODO
 
             Expr::Nullary(op) => match op {
-                NulOp::MemorySize(mem_id) => todo!(),
+                // might want to make an instrinsic to assume the size stays constant
+                NulOp::MemorySize(_) => expr,
 
                 NulOp::Nop => expr,
 
@@ -488,9 +491,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                     | UnOp::I64Load16S(_)
                     | UnOp::I64Load16U(_)
                     | UnOp::I64Load32S(_)
-                    | UnOp::I64Load32U(_) => return expr,
-
-                    UnOp::MemoryGrow(mem_id) => todo!(),
+                    | UnOp::I64Load32U(_)
+                    | UnOp::MemoryGrow(_) => return expr,
                 };
 
                 Expr::Value(result, attr)
@@ -709,8 +711,12 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::Block(_, _) | Expr::Loop(_, _) => expr,
 
             Expr::If(block_ty, condition, then_block, else_block) => match *condition {
-                Expr::Value(Value::I32(0), _) => Expr::Block(block_ty, self.block(ctx, &else_block)),
-                Expr::Value(Value::I32(_), _) => Expr::Block(block_ty, self.block(ctx, &then_block)),
+                Expr::Value(Value::I32(0), _) => {
+                    Expr::Block(block_ty, self.block(ctx, &else_block))
+                }
+                Expr::Value(Value::I32(_), _) => {
+                    Expr::Block(block_ty, self.block(ctx, &then_block))
+                }
                 _ => Expr::If(block_ty, condition, then_block, else_block),
             },
 
@@ -718,8 +724,78 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 expr
             }
 
-            Expr::Call(_, _) => todo!(),
-            Expr::CallIndirect(_, _, _) => todo!(),
+            Expr::Call(func_id, args) => self.call(ctx, func_id, args),
+
+            Expr::CallIndirect(ty_id, table_id, ref mut args, ref idx) => {
+                match &self.spec.module.tables[table_id].def {
+                    TableDef::Import(_) => expr,
+
+                    TableDef::Elems(elems) => match idx.to_u32() {
+                        Some(idx) => {
+                            let Some(&elem) = elems.get(idx as usize) else {
+                                warn!(
+                                    "aborting specialization: out-of-bounds indirect call (index {idx}, table size {})",
+                                    elems.len(),
+                                );
+                                ctx.abort_specialization();
+
+                                return expr;
+                            };
+
+                            let Some(func_id) = elem else {
+                                warn!("aborting specialization: indirect call to an uninitialized element (index {idx})");
+                                ctx.abort_specialization();
+
+                                return expr;
+                            };
+
+                            self.call(ctx, func_id, mem::take(args))
+                        }
+
+                        None => expr,
+                    },
+                }
+            }
         }
+    }
+
+    fn call(&mut self, ctx: &mut SpecContext, func_id: FuncId, mut args: Vec<Expr>) -> Expr {
+        if ctx.abort_specialization {
+            return Expr::Call(func_id, args);
+        }
+
+        match self.intrinsic(ctx, func_id, args) {
+            Ok(result) => return result,
+            Err(a) => args = a,
+        }
+
+        if let Some(body) = self.spec.module.funcs[func_id].body() {
+            if body.params.len() != args.len() {
+                warn!(
+                    "aborting specialization: call to a function with invalid number of arguments: expected {}, got {}",
+                    body.params.len(),
+                    args.len(),
+                );
+                ctx.abort_specialization();
+
+                return Expr::Call(func_id, args);
+            }
+        }
+
+        let spec_func_id = self.spec.specialize(SpecSignature {
+            orig_func_id: func_id,
+            args: args.iter().map(|expr| expr.to_value()).collect(),
+        });
+
+        Expr::Call(spec_func_id, args)
+    }
+
+    fn intrinsic(
+        &mut self,
+        ctx: &mut SpecContext,
+        func_id: FuncId,
+        args: Vec<Expr>,
+    ) -> Result<Expr, Vec<Expr>> {
+        Err(args)
     }
 }

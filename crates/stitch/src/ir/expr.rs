@@ -3,7 +3,7 @@ use std::fmt::{self, Debug, Display};
 use crate::util::try_match;
 
 use super::ty::ValType;
-use super::{FuncId, GlobalId, LocalId, MemoryId, TypeId};
+use super::{FuncId, GlobalId, LocalId, MemoryId, TableId, TypeId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct F32(u32);
@@ -429,7 +429,7 @@ pub enum Expr {
     BrTable(Vec<u32>, u32, Option<Box<Expr>>, Box<Expr>),
     Return(Option<Box<Expr>>),
     Call(FuncId, Vec<Expr>),
-    CallIndirect(TypeId, Vec<Expr>, Box<Expr>),
+    CallIndirect(TypeId, TableId, Vec<Expr>, Box<Expr>),
 }
 
 impl From<Value> for Expr {
@@ -687,7 +687,7 @@ impl Expr {
             }
 
             Self::Call(func, _) => ReturnValueCount::Call(*func),
-            Self::CallIndirect(ty, _, _) => ReturnValueCount::CallIndirect(*ty),
+            Self::CallIndirect(ty, _, _, _) => ReturnValueCount::CallIndirect(*ty),
 
             Self::BrIf(_, Some(_), _) => ReturnValueCount::One,
             Self::BrIf(_, None, _) => ReturnValueCount::Zero,
@@ -957,7 +957,7 @@ impl Expr {
             Self::Br(_, _) | Self::BrTable(_, _, _, _) | Self::Return(_) => ExprTy::Unreachable,
 
             Self::Call(func, _) => ExprTy::Call(*func),
-            Self::CallIndirect(ty, _, _) => ExprTy::CallIndirect(*ty),
+            Self::CallIndirect(ty, _, _, _) => ExprTy::CallIndirect(*ty),
         }
     }
 }

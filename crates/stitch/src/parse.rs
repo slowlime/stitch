@@ -890,15 +890,16 @@ impl Parser {
                     Expr::Call(func_id, args)
                 }
 
-                Operator::CallIndirect { type_index, .. } => {
+                Operator::CallIndirect { type_index, table_index, .. } => {
                     let type_id = ctx.parser.types[type_index as usize];
+                    let table_id = ctx.parser.tables[table_index as usize] ;
                     let param_count = ctx.parser.module.types[type_id].as_func().params.len();
                     let idx_expr = ctx.pop_expr();
 
                     let mut args = (0..param_count).map(|_| ctx.pop_expr()).collect::<Vec<_>>();
                     args.reverse();
 
-                    Expr::CallIndirect(type_id, args, Box::new(idx_expr))
+                    Expr::CallIndirect(type_id, table_id, args, Box::new(idx_expr))
                 }
 
                 Operator::Drop => ctx.un_expr(UnOp::Drop),

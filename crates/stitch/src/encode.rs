@@ -735,7 +735,7 @@ impl<'a> BodyEncoder<'a, '_> {
                 self.nullary(Instruction::Call(self.encoder.funcs[*func_id] as u32));
             }
 
-            Expr::CallIndirect(ty_id, args, idx_expr) => {
+            Expr::CallIndirect(ty_id, table_id, args, idx_expr) => {
                 for expr in args {
                     self.expr(expr);
                 }
@@ -744,7 +744,7 @@ impl<'a> BodyEncoder<'a, '_> {
                     idx_expr,
                     Instruction::CallIndirect {
                         ty: self.encoder.types[*ty_id] as u32,
-                        table: 0,
+                        table: self.encoder.tables[*table_id] as u32,
                     },
                 );
             }
