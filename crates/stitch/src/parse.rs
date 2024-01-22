@@ -861,7 +861,7 @@ impl Parser {
                     let condition = Box::new(ctx.pop_expr());
                     let ret_expr = ctx.pop_br_expr(relative_depth);
 
-                    Expr::BrIf(relative_depth, condition, ret_expr)
+                    Expr::BrIf(relative_depth, ret_expr, condition)
                 }
 
                 Operator::BrTable { targets } => {
@@ -871,8 +871,8 @@ impl Parser {
                     Expr::BrTable(
                         targets.targets().collect::<Result<Vec<_>, _>>()?,
                         targets.default(),
-                        condition,
                         ret_expr,
+                        condition,
                     )
                 }
 
@@ -898,7 +898,7 @@ impl Parser {
                     let mut args = (0..param_count).map(|_| ctx.pop_expr()).collect::<Vec<_>>();
                     args.reverse();
 
-                    Expr::CallIndirect(type_id, Box::new(idx_expr), args)
+                    Expr::CallIndirect(type_id, args, Box::new(idx_expr))
                 }
 
                 Operator::Drop => ctx.un_expr(UnOp::Drop),

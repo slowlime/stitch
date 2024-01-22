@@ -101,6 +101,17 @@ impl<'a> Specializer<'a> {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct SpecContext {
+    abort_specialization: bool,
+}
+
+impl SpecContext {
+    pub fn abort_specialization(&mut self) {
+        self.abort_specialization = true;
+    }
+}
+
 struct FuncSpecializer<'a, 'b, 'm> {
     spec: &'a mut Specializer<'m>,
     sig: SpecSignature,
@@ -125,65 +136,75 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             }
         }
 
-        func.body = this.block(&body);
+        func.body = this.block(&mut Default::default(), &body);
     }
 
-    fn block(&mut self, exprs: &[Expr]) -> Vec<Expr> {
-        // FIXME: traps should abort specialization
-        exprs.iter().map(|expr| self.expr(expr)).collect()
+    fn block(&mut self, ctx: &mut SpecContext, exprs: &[Expr]) -> Vec<Expr> {
+        exprs.iter().map(|expr| self.expr(ctx, expr)).collect()
     }
 
-    fn expr(&mut self, expr: &Expr) -> Expr {
+    fn expr(&mut self, ctx: &mut SpecContext, expr: &Expr) -> Expr {
+        if ctx.abort_specialization {
+            return expr.clone();
+        }
+
         let expr = match expr {
             Expr::Value(_, _) | Expr::Nullary(_) => expr.clone(),
-            Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(self.expr(inner))),
-            Expr::Binary(op, lhs, rhs) => {
-                Expr::Binary(*op, Box::new(self.expr(lhs)), Box::new(self.expr(rhs)))
-            }
+            Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(self.expr(ctx, inner))),
+            Expr::Binary(op, lhs, rhs) => Expr::Binary(
+                *op,
+                Box::new(self.expr(ctx, lhs)),
+                Box::new(self.expr(ctx, rhs)),
+            ),
             Expr::Ternary(op, first, second, third) => Expr::Ternary(
                 *op,
-                Box::new(self.expr(first)),
-                Box::new(self.expr(second)),
-                Box::new(self.expr(third)),
+                Box::new(self.expr(ctx, first)),
+                Box::new(self.expr(ctx, second)),
+                Box::new(self.expr(ctx, third)),
             ),
 
-            Expr::Block(block_ty, exprs) => Expr::Block(block_ty.clone(), self.block(exprs)),
-            Expr::Loop(block_ty, exprs) => Expr::Block(block_ty.clone(), self.block(exprs)),
+            Expr::Block(block_ty, exprs) => Expr::Block(block_ty.clone(), self.block(ctx, exprs)),
+            Expr::Loop(block_ty, exprs) => Expr::Block(block_ty.clone(), self.block(ctx, exprs)),
             Expr::If(block_ty, cond, then_block, else_block) => Expr::If(
                 block_ty.clone(),
-                Box::new(self.expr(cond)),
+                Box::new(self.expr(ctx, cond)),
                 then_block.clone(),
                 else_block.clone(),
             ),
 
             Expr::Br(relative_depth, value) => Expr::Br(
                 *relative_depth,
-                value.as_ref().map(|expr| Box::new(self.expr(expr))),
+                value.as_ref().map(|expr| Box::new(self.expr(ctx, expr))),
             ),
-            Expr::BrIf(relative_depth, condition, value) => Expr::BrIf(
+            Expr::BrIf(relative_depth, value, condition) => Expr::BrIf(
                 *relative_depth,
-                Box::new(self.expr(condition)),
-                value.as_ref().map(|expr| Box::new(self.expr(expr))),
+                value.as_ref().map(|expr| Box::new(self.expr(ctx, expr))),
+                Box::new(self.expr(ctx, condition)),
             ),
-            Expr::BrTable(labels, default_label, index, value) => Expr::BrTable(
+            Expr::BrTable(labels, default_label, value, index) => Expr::BrTable(
                 labels.clone(),
                 *default_label,
-                Box::new(self.expr(index)),
-                value.as_ref().map(|expr| Box::new(self.expr(expr))),
+                value.as_ref().map(|expr| Box::new(self.expr(ctx, expr))),
+                Box::new(self.expr(ctx, index)),
             ),
             Expr::Return(value) => {
-                Expr::Return(value.as_ref().map(|expr| Box::new(self.expr(expr))))
+                Expr::Return(value.as_ref().map(|expr| Box::new(self.expr(ctx, expr))))
             }
 
             Expr::Call(func_id, args) => {
-                Expr::Call(*func_id, args.iter().map(|expr| self.expr(expr)).collect())
+                Expr::Call(*func_id, args.iter().map(|expr| self.expr(ctx, expr)).collect())
             }
-            Expr::CallIndirect(ty_id, index, args) => Expr::CallIndirect(
+            Expr::CallIndirect(ty_id, args, index) => Expr::CallIndirect(
                 *ty_id,
-                Box::new(self.expr(index)),
-                args.iter().map(|expr| self.expr(expr)).collect(),
+                args.iter().map(|expr| self.expr(ctx, expr)).collect(),
+                Box::new(self.expr(ctx, index)),
             ),
         };
+
+        // could've changed while evaluting subexpressions
+        if ctx.abort_specialization {
+            return expr;
+        }
 
         macro_rules! try_i32 {
             ($expr:expr) => {{
@@ -362,8 +383,15 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
 
             Expr::Nullary(op) => match op {
                 NulOp::MemorySize(mem_id) => todo!(),
-                NulOp::Nop => todo!(),
-                NulOp::Unreachable => todo!(),
+
+                NulOp::Nop => expr,
+
+                NulOp::Unreachable => {
+                    warn!("aborting specialization: encountered `unreachable`");
+                    ctx.abort_specialization();
+
+                    expr
+                }
 
                 NulOp::LocalGet(_) | NulOp::GlobalGet(_) => unreachable!(),
             },
@@ -487,8 +515,29 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                     BinOp::I32Add => Value::I32(try_i32!(lhs).wrapping_add(try_i32!(rhs))),
                     BinOp::I32Sub => Value::I32(try_i32!(lhs).wrapping_sub(try_i32!(rhs))),
                     BinOp::I32Mul => Value::I32(try_i32!(lhs).wrapping_mul(try_i32!(rhs))),
-                    BinOp::I32DivS => Value::I32(try_i32!(lhs).wrapping_div(try_i32!(rhs))),
-                    BinOp::I32DivU => Value::I32(try_u32!(lhs).wrapping_div(try_u32!(rhs)) as i32),
+
+                    BinOp::I32DivS => match try_i32!(rhs) {
+                        0 => {
+                            warn!("aborting specialization due to division by zero");
+                            ctx.abort_specialization();
+
+                            return expr;
+                        }
+
+                        rhs => Value::I32(try_i32!(lhs).wrapping_div(rhs)),
+                    },
+
+                    BinOp::I32DivU => match try_u32!(rhs) {
+                        0 => {
+                            warn!("aborting specialization due to division by zero");
+                            ctx.abort_specialization();
+
+                            return expr;
+                        }
+
+                        rhs => Value::I32(try_u32!(lhs).wrapping_div(rhs) as i32),
+                    },
+
                     BinOp::I32RemS => match try_i32!(rhs) {
                         0 => return expr, // undefined
                         rhs => Value::I32(try_i32!(lhs).wrapping_rem(rhs)),
@@ -509,8 +558,29 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                     BinOp::I64Add => Value::I64(try_i64!(lhs).wrapping_add(try_i64!(rhs))),
                     BinOp::I64Sub => Value::I64(try_i64!(lhs).wrapping_sub(try_i64!(rhs))),
                     BinOp::I64Mul => Value::I64(try_i64!(lhs).wrapping_mul(try_i64!(rhs))),
-                    BinOp::I64DivS => Value::I64(try_i64!(lhs).wrapping_div(try_i64!(rhs))),
-                    BinOp::I64DivU => Value::I64(try_u64!(lhs).wrapping_div(try_u64!(rhs)) as i64),
+
+                    BinOp::I64DivS => match try_i64!(rhs) {
+                        0 => {
+                            warn!("aborting specialization due to division by zero");
+                            ctx.abort_specialization();
+
+                            return expr;
+                        }
+
+                        rhs => Value::I64(try_i64!(lhs).wrapping_div(rhs)),
+                    },
+
+                    BinOp::I64DivU => match try_u64!(rhs) {
+                        0 => {
+                            warn!("aborting specialization due to division by zero");
+                            ctx.abort_specialization();
+
+                            return expr;
+                        }
+
+                        rhs => Value::I64(try_u64!(lhs).wrapping_div(rhs) as i64),
+                    },
+
                     BinOp::I64RemS => match try_i64!(rhs) {
                         0 => return expr,
                         rhs => Value::I64(try_i64!(lhs).wrapping_rem(rhs)),
@@ -639,8 +709,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::Block(_, _) | Expr::Loop(_, _) => expr,
 
             Expr::If(block_ty, condition, then_block, else_block) => match *condition {
-                Expr::Value(Value::I32(0), _) => Expr::Block(block_ty, self.block(&else_block)),
-                Expr::Value(Value::I32(_), _) => Expr::Block(block_ty, self.block(&then_block)),
+                Expr::Value(Value::I32(0), _) => Expr::Block(block_ty, self.block(ctx, &else_block)),
+                Expr::Value(Value::I32(_), _) => Expr::Block(block_ty, self.block(ctx, &then_block)),
                 _ => Expr::If(block_ty, condition, then_block, else_block),
             },
 

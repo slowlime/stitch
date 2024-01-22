@@ -5,8 +5,6 @@ use crate::util::try_match;
 use super::ty::ValType;
 use super::{FuncId, GlobalId, LocalId, MemoryId, TypeId};
 
-type BExpr = Box<Expr>;
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct F32(u32);
 
@@ -425,13 +423,13 @@ pub enum Expr {
 
     Block(Option<ValType>, Vec<Expr>),
     Loop(Option<ValType>, Vec<Expr>),
-    If(Option<ValType>, BExpr, Vec<Expr>, Vec<Expr>),
-    Br(u32, Option<BExpr>),
-    BrIf(u32, BExpr, Option<BExpr>),
-    BrTable(Vec<u32>, u32, BExpr, Option<BExpr>),
-    Return(Option<BExpr>),
+    If(Option<ValType>, Box<Expr>, Vec<Expr>, Vec<Expr>),
+    Br(u32, Option<Box<Expr>>),
+    BrIf(u32, Option<Box<Expr>>, Box<Expr>),
+    BrTable(Vec<u32>, u32, Option<Box<Expr>>, Box<Expr>),
+    Return(Option<Box<Expr>>),
     Call(FuncId, Vec<Expr>),
-    CallIndirect(TypeId, BExpr, Vec<Expr>),
+    CallIndirect(TypeId, Vec<Expr>, Box<Expr>),
 }
 
 impl From<Value> for Expr {
@@ -691,8 +689,8 @@ impl Expr {
             Self::Call(func, _) => ReturnValueCount::Call(*func),
             Self::CallIndirect(ty, _, _) => ReturnValueCount::CallIndirect(*ty),
 
-            Self::BrIf(_, _, Some(_)) => ReturnValueCount::One,
-            Self::BrIf(_, _, None) => ReturnValueCount::Zero,
+            Self::BrIf(_, Some(_), _) => ReturnValueCount::One,
+            Self::BrIf(_, None, _) => ReturnValueCount::Zero,
 
             Self::Br(_, _) | Self::BrTable(_, _, _, _) | Self::Return(_) => {
                 ReturnValueCount::Unreachable
@@ -953,8 +951,8 @@ impl Expr {
                 None => ExprTy::Empty,
             },
 
-            Self::BrIf(_, _, Some(expr)) => expr.ty(),
-            Self::BrIf(_, _, None) => ExprTy::Empty,
+            Self::BrIf(_, Some(expr), _) => expr.ty(),
+            Self::BrIf(_, None, _) => ExprTy::Empty,
 
             Self::Br(_, _) | Self::BrTable(_, _, _, _) | Self::Return(_) => ExprTy::Unreachable,
 

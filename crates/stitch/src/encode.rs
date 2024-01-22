@@ -707,19 +707,19 @@ impl<'a> BodyEncoder<'a, '_> {
             Expr::Br(label, Some(inner)) => self.unary(inner, Instruction::Br(*label)),
             Expr::Br(label, None) => self.nullary(Instruction::Br(*label)),
 
-            Expr::BrIf(label, condition, Some(inner)) => {
-                self.binary(condition, inner, Instruction::BrIf(*label))
+            Expr::BrIf(label, Some(inner), condition) => {
+                self.binary(inner, condition, Instruction::BrIf(*label))
             }
 
-            Expr::BrIf(label, condition, None) => self.unary(condition, Instruction::BrIf(*label)),
+            Expr::BrIf(label, None, condition) => self.unary(condition, Instruction::BrIf(*label)),
 
-            Expr::BrTable(labels, default_label, condition, Some(inner)) => self.binary(
-                condition,
+            Expr::BrTable(labels, default_label, Some(inner), condition) => self.binary(
                 inner,
+                condition,
                 Instruction::BrTable(labels.into(), *default_label),
             ),
 
-            Expr::BrTable(labels, default_label, condition, None) => self.unary(
+            Expr::BrTable(labels, default_label, None, condition) => self.unary(
                 condition,
                 Instruction::BrTable(labels.into(), *default_label),
             ),
@@ -735,7 +735,7 @@ impl<'a> BodyEncoder<'a, '_> {
                 self.nullary(Instruction::Call(self.encoder.funcs[*func_id] as u32));
             }
 
-            Expr::CallIndirect(ty_id, idx_expr, args) => {
+            Expr::CallIndirect(ty_id, args, idx_expr) => {
                 for expr in args {
                     self.expr(expr);
                 }
