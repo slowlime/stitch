@@ -5,8 +5,10 @@ pub mod func;
 pub mod ty;
 
 use std::fmt::{self, Display};
+use std::ops::Range;
 
 use slotmap::{new_key_type, SlotMap};
+use thiserror::Error;
 
 use crate::util::slot::BiSlotMap;
 
@@ -24,6 +26,15 @@ new_key_type! {
     pub struct ImportId;
     pub struct ExportId;
     pub struct LocalId;
+}
+
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum MemError {
+    #[error("cannot access an imported memory")]
+    Import,
+
+    #[error("range 0x{:x}..0x{:x} is out of bounds for a memory of size {size}", .range.start, .range.end)]
+    OutOfBounds { range: Range<usize>, size: usize },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -45,6 +56,17 @@ impl Module {
             let Func::Body(body) = func else { continue };
 
             self.types.insert(Type::Func(body.ty.clone()));
+        }
+    }
+
+    pub fn read_mem(&self, mem_id: MemoryId, range: Range<usize>) -> Result<&[u8], MemError> {
+        match &self.mems[mem_id].def {
+            MemoryDef::Import(_) => Err(MemError::Import),
+
+            MemoryDef::Bytes(bytes) => bytes.get(range.clone()).ok_or(MemError::OutOfBounds {
+                range,
+                size: bytes.len(),
+            }),
         }
     }
 }

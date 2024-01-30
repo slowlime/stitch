@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 
+use log::warn;
 use wasm_encoder::{
     CodeSection, DataSection, ElementSection, EntityType, ExportSection, FunctionSection,
     GlobalSection, ImportSection, MemorySection, StartSection, TableSection, TypeSection,
 };
 
-use crate::ir::expr::{BinOp, MemArg, NulOp, TernOp, UnOp, Value};
+use crate::ir::expr::{BinOp, Id, MemArg, NulOp, TernOp, UnOp, Value};
 use crate::ir::ty::{ElemType, GlobalType, MemoryType, TableType, Type, ValType};
 use crate::ir::{
     self, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId, ImportDesc, ImportId,
@@ -418,6 +419,15 @@ impl<'a> BodyEncoder<'a, '_> {
                 Value::F32(value) => Instruction::F32Const(value.to_f32()),
                 Value::F64(value) => Instruction::F64Const(value.to_f64()),
             }),
+
+            Expr::Index(id) => self.nullary(Instruction::I32Const(match *id {
+                Id::Func(func_id) => self.encoder.funcs[func_id],
+            } as i32)),
+
+            Expr::Intrinsic(_) => {
+                warn!("the module contains an intrinsic: replacing with `unreachable`");
+                self.nullary(Instruction::Unreachable);
+            }
 
             Expr::Nullary(op) => self.nullary(match *op {
                 NulOp::Nop => Instruction::Nop,

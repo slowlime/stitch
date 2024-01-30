@@ -5,9 +5,11 @@ use log::warn;
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
 use crate::ir::expr::{
-    BinOp, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs, F32, F64,
+    BinOp, Intrinsic, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs, F32, F64,
 };
-use crate::ir::{Expr, Func, FuncBody, FuncId, LocalId, MemoryDef, Module, TableDef};
+use crate::ir::{
+    Export, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, LocalId, MemError, MemoryDef, MemoryId, Module, TableDef, TableId
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpecSignature {
@@ -149,7 +151,9 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         }
 
         let mut expr = match expr {
-            Expr::Value(_, _) | Expr::Nullary(_) => expr.clone(),
+            Expr::Value(_, _) | Expr::Index(_) | Expr::Intrinsic(_) | Expr::Nullary(_) => {
+                expr.clone()
+            }
             Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(self.expr(ctx, inner))),
             Expr::Binary(op, lhs, rhs) => Expr::Binary(
                 *op,
@@ -262,44 +266,43 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 &Expr::Value(Value::I32(addr), addr_attrs),
                 load,
             )) if addr_attrs.ptr >= PtrAttr::Const => {
-                match &self.spec.module.mems[mem_id].def {
-                    MemoryDef::Import(_) => {}
+                let start = (addr as u32 + offset) as usize;
+                let end = start + load.src_size() as usize;
 
-                    MemoryDef::Bytes(bytes) => {
-                        let start = (addr as u32 + offset) as usize;
-                        let end = start + load.src_size() as usize;
+                match self.spec.module.read_mem(mem_id, start..end) {
+                    Ok(src) => {
+                        debug_assert!(src.len() <= 8);
 
-                        if let Some(src) = bytes.get(start..end) {
-                            debug_assert!(src.len() <= 8);
+                        // little-endian
+                        let mut value = src.iter().rfold(0u64, |acc, &byte| acc << 8 | byte as u64);
 
-                            // little-endian
-                            let mut value =
-                                src.iter().rfold(0u64, |acc, &byte| acc << 8 | byte as u64);
-
-                            if load.sign_extend() {
-                                value |= -((value & 1 << 8 * load.src_size() - 1) as i64) as u64;
-                            }
-
-                            let value = match load {
-                                Load::I32 { .. } => Value::I32(value as i32),
-                                Load::I64 { .. } => Value::I64(value as i64),
-                                Load::F32 => Value::F32(F32::from_bits(value as u32)),
-                                Load::F64 => Value::F64(F64::from_bits(value)),
-                            };
-
-                            let attrs = if addr_attrs.propagate {
-                                ValueAttrs {
-                                    propagate: false,
-                                    ..addr_attrs
-                                }
-                            } else {
-                                addr_attrs
-                            };
-
-                            return Expr::Value(value, attrs);
-                        } else {
-                            warn!("Out-of-bounds constant read of {start}..{end}");
+                        if load.sign_extend() {
+                            value |= -((value & 1 << 8 * load.src_size() - 1) as i64) as u64;
                         }
+
+                        let value = match load {
+                            Load::I32 { .. } => Value::I32(value as i32),
+                            Load::I64 { .. } => Value::I64(value as i64),
+                            Load::F32 => Value::F32(F32::from_bits(value as u32)),
+                            Load::F64 => Value::F64(F64::from_bits(value)),
+                        };
+
+                        let attrs = if addr_attrs.propagate {
+                            ValueAttrs {
+                                propagate: false,
+                                ..addr_attrs
+                            }
+                        } else {
+                            addr_attrs
+                        };
+
+                        return Expr::Value(value, attrs);
+                    }
+
+                    Err(MemError::Import) => {}
+
+                    Err(MemError::OutOfBounds { .. }) => {
+                        warn!("Out-of-bounds constant read of {start}..{end}");
                     }
                 }
             }
@@ -345,7 +348,25 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         }
 
         match expr {
-            Expr::Value(_, _) => expr,
+            Expr::Value(_, _) | Expr::Index(_) => expr,
+
+            Expr::Intrinsic(ref mut intr) => {
+                let result = match *intr {
+                    Intrinsic::Specialize {
+                        table_id,
+                        elem_idx,
+                        mem_id,
+                        name_addr,
+                        name_len,
+                        ref mut args,
+                    } => self.intr_specialize(
+                        ctx, table_id, elem_idx, mem_id, name_addr, name_len, args,
+                    ),
+                    Intrinsic::Unknown(_) => todo!(),
+                };
+
+                result.unwrap_or(expr)
+            }
 
             Expr::Nullary(NulOp::LocalGet(local_id)) => match self.locals.get(local_id) {
                 Some(&(value, attrs)) => Expr::Value(value, attrs),
@@ -380,7 +401,15 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 }
             },
 
-            Expr::Nullary(NulOp::GlobalGet(_)) => expr, // TODO
+            Expr::Nullary(NulOp::GlobalGet(global_id)) => {
+                let global = &self.spec.module.globals[global_id];
+
+                match &global.def {
+                    GlobalDef::Value(expr) if !global.ty.mutable => self.expr(ctx, &expr.clone()),
+                    _ => expr,
+                }
+            }
+
             Expr::Unary(UnOp::GlobalSet(_), _) => expr, // TODO
 
             Expr::Nullary(op) => match op {
@@ -759,14 +788,9 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         }
     }
 
-    fn call(&mut self, ctx: &mut SpecContext, func_id: FuncId, mut args: Vec<Expr>) -> Expr {
+    fn call(&mut self, ctx: &mut SpecContext, func_id: FuncId, args: Vec<Expr>) -> Expr {
         if ctx.abort_specialization {
             return Expr::Call(func_id, args);
-        }
-
-        match self.intrinsic(ctx, func_id, args) {
-            Ok(result) => return result,
-            Err(a) => args = a,
         }
 
         if let Some(body) = self.spec.module.funcs[func_id].body() {
@@ -790,12 +814,59 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         Expr::Call(spec_func_id, args)
     }
 
-    fn intrinsic(
+    fn intr_specialize(
         &mut self,
         ctx: &mut SpecContext,
-        func_id: FuncId,
-        args: Vec<Expr>,
-    ) -> Result<Expr, Vec<Expr>> {
-        Err(args)
+        table_id: TableId,
+        elem_idx: u32,
+        mem_id: MemoryId,
+        name_addr: u32,
+        name_len: u32,
+        args: &mut Vec<Option<Value>>,
+    ) -> Result<Expr, ()> {
+        let table = &self.spec.module.tables[table_id];
+
+        let elems = match &table.def {
+            TableDef::Import(_) => {
+                warn!("stitch/specialize references an imported table");
+                ctx.abort_specialization();
+                return Err(());
+            }
+
+            TableDef::Elems(elems) => elems,
+        };
+
+        let &func_id = elems.get(elem_idx as usize).ok_or_else(|| {
+            warn!("stitch/specialize references an out-of-bounds table entry ({elem_idx})");
+        })?;
+        let func_id = func_id.ok_or_else(|| {
+            warn!("stitch/specialize references an uninitialized table entry ({elem_idx})");
+        })?;
+
+        let range = (name_addr as usize)..(name_addr.saturating_add(name_len) as usize);
+
+        let name = match name_len {
+            0 => None,
+            _ => Some(String::from_utf8_lossy(
+                self.spec
+                    .module
+                    .read_mem(mem_id, range)
+                    .map_err(|e| warn!("stitch/specialize does not provide a valid name: {e}"))?,
+            ).into_owned()),
+        };
+
+        let spec_func_id = self.spec.specialize(SpecSignature {
+            orig_func_id: func_id,
+            args: mem::take(args),
+        });
+
+        if let Some(name) = name {
+            self.spec.module.exports.insert(Export {
+                name,
+                def: ExportDef::Func(spec_func_id),
+            });
+        }
+
+        Ok(Expr::Index(spec_func_id.into()))
     }
 }

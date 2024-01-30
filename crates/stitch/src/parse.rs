@@ -1,15 +1,18 @@
-use std::mem;
 use std::ops::Range;
+use std::{fmt, mem};
 
-use log::{log_enabled, trace};
+use log::{log_enabled, trace, warn};
 use thiserror::Error;
 use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
-use crate::ir::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64};
+use crate::ir::expr::{
+    BinOp, ExprTy, Intrinsic, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64,
+};
 use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, LocalId, MemoryId, TableId, TypeId};
 
+const MODULE_NAME: &str = "stitch";
 const PAGE_SIZE: usize = 65536;
 
 const FEATURES: WasmFeatures = WasmFeatures {
@@ -204,8 +207,15 @@ impl Parser {
             ir::ImportDesc::Func(ty_idx) => {
                 self.add_func(ir::Func::Import(ir::func::FuncImport {
                     ty: self.module.types[*ty_idx].as_func().clone(),
-                    import: id,
+                    import_id: id,
                 }));
+            }
+
+            ir::ImportDesc::Global(global_ty) => {
+                self.add_global(ir::Global {
+                    ty: global_ty.clone(),
+                    def: ir::GlobalDef::Import(id),
+                });
             }
 
             desc => {
@@ -878,7 +888,7 @@ impl Parser {
 
                 Operator::Return => Expr::Return(ctx.capture_br_expr(ctx.blocks.len() as u32 - 1)),
 
-                Operator::Call { function_index } => {
+                Operator::Call { function_index } => 'out: {
                     let func_id = ctx.parser.funcs[function_index as usize];
                     let func_ty = ctx.parser.module.funcs[func_id].ty();
 
@@ -887,12 +897,120 @@ impl Parser {
                         .collect::<Vec<_>>();
                     args.reverse();
 
+                    'intrinsic: {
+                        let ir::Func::Import(ir::func::FuncImport { import_id, .. }) =
+                            ctx.parser.module.funcs[func_id]
+                        else {
+                            break 'intrinsic;
+                        };
+
+                        let name = match &ctx.parser.module.imports[import_id] {
+                            ir::Import { module, name, .. } if module == MODULE_NAME => {
+                                name.as_str()
+                            }
+                            _ => break 'intrinsic,
+                        };
+
+                        break 'out Expr::Intrinsic(match name {
+                            "specialize" => match args.as_slice() {
+                                [table_idx, elem_idx, name_addr, name_len, args @ ..] => {
+                                    let parse = || -> Result<_, ()> {
+                                        fn invalid_argument(
+                                            idx: usize,
+                                            reason: fmt::Arguments<'_>,
+                                        ) {
+                                            warn!("invalid argument {idx} to stitch/specialize: {reason}")
+                                        }
+                                        fn wrong_type(idx: usize, expected: &str) {
+                                            invalid_argument(
+                                                idx,
+                                                format_args!("expected {expected}"),
+                                            )
+                                        }
+                                        fn table_not_exists(table_idx: u32) {
+                                            invalid_argument(
+                                                1,
+                                                format_args!("table {table_idx} does not exist"),
+                                            )
+                                        }
+
+                                        let table_idx = table_idx
+                                            .to_u32()
+                                            .ok_or_else(|| wrong_type(1, "a constant i32"))?;
+                                        let &table_id =
+                                            ctx.parser
+                                                .tables
+                                                .get(table_idx as usize)
+                                                .ok_or_else(|| table_not_exists(table_idx))?;
+                                        let elem_idx = elem_idx
+                                            .to_u32()
+                                            .ok_or_else(|| wrong_type(2, "a constant i32"))?;
+                                        let name_addr = name_addr
+                                            .to_u32()
+                                            .ok_or_else(|| wrong_type(3, "a constant i32"))?;
+                                        let name_len = name_len
+                                            .to_u32()
+                                            .ok_or_else(|| wrong_type(4, "a constant i32"))?;
+
+                                        let args = args
+                                            .iter()
+                                            .map(|arg| match arg {
+                                                &Expr::Value(value, _) => Some(Some(value)),
+                                                &Expr::Intrinsic(Intrinsic::Unknown(_)) => {
+                                                    Some(None)
+                                                }
+                                                _ => None,
+                                            })
+                                            .enumerate()
+                                            .map(|(idx, arg)| {
+                                                arg.ok_or_else(|| {
+                                                    wrong_type(idx + 5, "a value or stitch/unknown")
+                                                })
+                                            })
+                                            .collect::<Result<Vec<_>, _>>()?;
+
+                                        Ok(Intrinsic::Specialize {
+                                            table_id,
+                                            elem_idx,
+                                            mem_id: ctx.parser.mems[0],
+                                            name_addr,
+                                            name_len,
+                                            args,
+                                        })
+                                    };
+
+                                    match parse() {
+                                        Ok(intrinsic) => intrinsic,
+                                        _ => break 'intrinsic,
+                                    }
+                                }
+
+                                _ => {
+                                    warn!(
+                                        "too few arguments to stitch/specialize: expected at least 4, got {}",
+                                        args.len(),
+                                    );
+                                    break 'intrinsic;
+                                }
+                            },
+
+                            _ => {
+                                warn!("unknown intrinsic: {name}");
+                                break 'intrinsic;
+                            }
+                        });
+                    }
+
                     Expr::Call(func_id, args)
                 }
 
-                Operator::CallIndirect { type_index, table_index, .. } => {
+                Operator::CallIndirect {
+                    type_index,
+                    table_index,
+                    ..
+                } => {
                     let type_id = ctx.parser.types[type_index as usize];
-                    let table_id = ctx.parser.tables[table_index as usize] ;
+                    let table_id = ctx.parser.tables[table_index as usize];
                     let param_count = ctx.parser.module.types[type_id].as_func().params.len();
                     let idx_expr = ctx.pop_expr();
 
@@ -915,9 +1033,35 @@ impl Parser {
                     ctx.un_expr(UnOp::LocalTee(ctx.local(local_index)))
                 }
 
-                Operator::GlobalGet { global_index } => {
+                Operator::GlobalGet { global_index } => 'out: {
+                    let global_id = ctx.parser.globals[global_index as usize];
+
+                    'intrinsic: {
+                        let global = &ctx.parser.module.globals[global_id];
+                        let ir::GlobalDef::Import(import_id) = global.def else {
+                            break 'intrinsic;
+                        };
+
+                        let name = match &ctx.parser.module.imports[import_id] {
+                            ir::Import { module, name, .. } if module == MODULE_NAME => {
+                                name.as_str()
+                            }
+                            _ => break 'intrinsic,
+                        };
+
+                        break 'out Expr::Intrinsic(match name {
+                            "unknown" => Intrinsic::Unknown(global.ty.val_type.clone()),
+
+                            _ => {
+                                warn!("unknown intrinsic: {name}");
+                                break 'intrinsic;
+                            }
+                        });
+                    }
+
                     NulOp::GlobalGet(ctx.parser.globals[global_index as usize]).into()
                 }
+
                 Operator::GlobalSet { global_index } => {
                     ctx.un_expr(UnOp::GlobalSet(ctx.parser.globals[global_index as usize]))
                 }

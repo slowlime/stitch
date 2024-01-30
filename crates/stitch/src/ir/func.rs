@@ -36,7 +36,7 @@ impl Func {
 #[derive(Debug, Clone)]
 pub struct FuncImport {
     pub ty: FuncType,
-    pub import: ImportId,
+    pub import_id: ImportId,
 }
 
 #[derive(Debug, Clone)]

@@ -413,8 +413,36 @@ impl From<TernOp> for Op {
 }
 
 #[derive(Debug, Clone)]
+pub enum Intrinsic {
+    Specialize {
+        table_id: TableId,
+        elem_idx: u32,
+        mem_id: MemoryId,
+        name_addr: u32,
+        name_len: u32,
+        args: Vec<Option<Value>>,
+    },
+
+    Unknown(ValType),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Id {
+    Func(FuncId),
+}
+
+impl From<FuncId> for Id {
+    fn from(func_id: FuncId) -> Self {
+        Self::Func(func_id)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     Value(Value, ValueAttrs),
+
+    Intrinsic(Intrinsic),
+    Index(Id),
 
     Nullary(NulOp),
     Unary(UnOp, Box<Expr>),
@@ -706,6 +734,11 @@ impl Expr {
             Self::Value(Value::I64(_), _) => ValType::I64.into(),
             Self::Value(Value::F32(_), _) => ValType::F32.into(),
             Self::Value(Value::F64(_), _) => ValType::F64.into(),
+
+            Self::Index(_) => ValType::I32.into(),
+
+            Self::Intrinsic(Intrinsic::Specialize { .. }) => ValType::I32.into(),
+            Self::Intrinsic(Intrinsic::Unknown(val_ty)) => val_ty.clone().into(),
 
             Self::Unary(UnOp::I32Clz | UnOp::I32Ctz | UnOp::I32Popcnt, _) => ValType::I32.into(),
             Self::Unary(UnOp::I64Clz | UnOp::I64Ctz | UnOp::I64Popcnt, _) => ValType::I64.into(),
