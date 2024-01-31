@@ -113,7 +113,7 @@ impl<'a> PostProc<'a> {
             .retain(|import_id, _| !import_ids.contains(&import_id));
     }
 
-    pub fn insert_func_types(&mut self) {
+    fn insert_func_types(&mut self) {
         for func in self.module.funcs.values() {
             let Some(body) = func.body() else { continue };
             self.module.types.insert(Type::Func(body.ty.clone()));

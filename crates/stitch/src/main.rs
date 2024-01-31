@@ -25,6 +25,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     PostProc::new(&mut module).process();
     let module = encode::encode(&mut module);
 
+    if cfg!(debug_assertions) {
+        parse::parse(&module).unwrap();
+    }
+
     fs::write(&output_path, &module)?;
 
     Ok(())

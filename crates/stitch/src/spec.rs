@@ -172,7 +172,15 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             }
         }
 
-        func.body = this.block(&mut Default::default(), &body);
+        let body = this.block(&mut Default::default(), &body);
+        let sig = this.sig;
+        func.body = body;
+
+        func.params.retain({
+            let mut iter = sig.args.iter();
+
+            move |_| iter.next().unwrap().is_some()
+        });
     }
 
     fn block(&mut self, ctx: &mut SpecContext, exprs: &[Expr]) -> Vec<Expr> {
@@ -822,7 +830,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         }
     }
 
-    fn call(&mut self, ctx: &mut SpecContext, func_id: FuncId, args: Vec<Expr>) -> Expr {
+    fn call(&mut self, ctx: &mut SpecContext, func_id: FuncId, mut args: Vec<Expr>) -> Expr {
         if ctx.abort_specialization {
             return Expr::Call(func_id, args);
         }
@@ -844,6 +852,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             orig_func_id: func_id,
             args: args.iter().map(|expr| expr.to_value()).collect(),
         });
+
+        args.retain(|expr| expr.to_value().is_none());
 
         Expr::Call(spec_func_id, args)
     }
