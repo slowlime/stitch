@@ -516,6 +516,37 @@ impl Store {
 }
 
 impl Expr {
+    pub fn all(&self, predicate: &mut impl FnMut(&Expr) -> bool) -> bool {
+        (match self {
+            Expr::Value(_, _) | Expr::Intrinsic(_) | Expr::Index(_) | Expr::Nullary(_) => true,
+            Expr::Unary(_, inner) => inner.all(predicate),
+            Expr::Binary(_, lhs, rhs) => lhs.all(predicate) && rhs.all(predicate),
+            Expr::Ternary(_, first, second, third) => {
+                first.all(predicate) && second.all(predicate) && third.all(predicate)
+            }
+            Expr::Block(_, block) | Expr::Loop(_, block) => block.iter().all(&mut *predicate),
+            Expr::If(_, condition, then_block, else_block) => {
+                condition.all(predicate)
+                    && then_block.iter().all(&mut *predicate)
+                    && else_block.iter().all(&mut *predicate)
+            }
+            Expr::Br(_, inner) | Expr::Return(inner) => {
+                inner.as_ref().map(|inner| predicate(inner)).unwrap_or(true)
+            }
+            Expr::BrIf(_, inner, condition) => {
+                inner.as_ref().map(|inner| predicate(inner)).unwrap_or(true)
+                    && condition.all(predicate)
+            }
+            Expr::BrTable(_, _, inner, index) => {
+                inner.as_ref().map(|inner| predicate(inner)).unwrap_or(true) && index.all(predicate)
+            }
+            Expr::Call(_, args) => args.iter().all(&mut *predicate),
+            Expr::CallIndirect(_, _, args, index) => {
+                args.iter().all(&mut *predicate) && index.all(&mut *predicate)
+            }
+        }) && predicate(self)
+    }
+
     pub fn to_value(&self) -> Option<Value> {
         try_match!(*self, Self::Value(value, _) => value)
     }

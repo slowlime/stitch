@@ -10,9 +10,10 @@ use wasmparser::{
 use crate::ir::expr::{
     BinOp, ExprTy, Intrinsic, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64,
 };
-use crate::ir::{self, ExportId, FuncId, GlobalId, ImportId, LocalId, MemoryId, TableId, TypeId};
+use crate::ir::{
+    self, ExportId, FuncId, GlobalId, ImportId, IntrinsicDecl, LocalId, MemoryId, TableId, TypeId,
+};
 
-const MODULE_NAME: &str = "stitch";
 const PAGE_SIZE: usize = 65536;
 
 const FEATURES: WasmFeatures = WasmFeatures {
@@ -898,42 +899,26 @@ impl Parser {
                     args.reverse();
 
                     'intrinsic: {
-                        let ir::Func::Import(ir::func::FuncImport { import_id, .. }) =
-                            ctx.parser.module.funcs[func_id]
+                        let Some(intrinsic) =
+                            ctx.parser.module.funcs[func_id].get_intrinsic(&ctx.parser.module)
                         else {
                             break 'intrinsic;
                         };
 
-                        let name = match &ctx.parser.module.imports[import_id] {
-                            ir::Import { module, name, .. } if module == MODULE_NAME => {
-                                name.as_str()
-                            }
-                            _ => break 'intrinsic,
+                        let invalid_argument = |idx: usize, reason: fmt::Arguments<'_>| {
+                            warn!("invalid argument {idx} to {intrinsic}: {reason}")
+                        };
+                        let wrong_type = |idx: usize, expected: &str| {
+                            invalid_argument(idx, format_args!("expected {expected}"))
+                        };
+                        let table_not_exists = |table_idx: u32| {
+                            invalid_argument(1, format_args!("table {table_idx} does not exist"))
                         };
 
-                        break 'out Expr::Intrinsic(match name {
-                            "specialize" => match args.as_slice() {
+                        break 'out Expr::Intrinsic(match intrinsic {
+                            IntrinsicDecl::Specialize => match args.as_slice() {
                                 [table_idx, elem_idx, name_addr, name_len, args @ ..] => {
                                     let parse = || -> Result<_, ()> {
-                                        fn invalid_argument(
-                                            idx: usize,
-                                            reason: fmt::Arguments<'_>,
-                                        ) {
-                                            warn!("invalid argument {idx} to stitch/specialize: {reason}")
-                                        }
-                                        fn wrong_type(idx: usize, expected: &str) {
-                                            invalid_argument(
-                                                idx,
-                                                format_args!("expected {expected}"),
-                                            )
-                                        }
-                                        fn table_not_exists(table_idx: u32) {
-                                            invalid_argument(
-                                                1,
-                                                format_args!("table {table_idx} does not exist"),
-                                            )
-                                        }
-
                                         let table_idx = table_idx
                                             .to_u32()
                                             .ok_or_else(|| wrong_type(1, "a constant i32"))?;
@@ -994,10 +979,7 @@ impl Parser {
                                 }
                             },
 
-                            _ => {
-                                warn!("unknown intrinsic: {name}");
-                                break 'intrinsic;
-                            }
+                            IntrinsicDecl::Unknown => unreachable!(),
                         });
                     }
 
@@ -1038,24 +1020,15 @@ impl Parser {
 
                     'intrinsic: {
                         let global = &ctx.parser.module.globals[global_id];
-                        let ir::GlobalDef::Import(import_id) = global.def else {
+                        let Some(intrinsic) = global.def.get_intrinsic(&ctx.parser.module) else {
                             break 'intrinsic;
                         };
 
-                        let name = match &ctx.parser.module.imports[import_id] {
-                            ir::Import { module, name, .. } if module == MODULE_NAME => {
-                                name.as_str()
+                        break 'out Expr::Intrinsic(match intrinsic {
+                            IntrinsicDecl::Unknown => {
+                                Intrinsic::Unknown(global.ty.val_type.clone())
                             }
-                            _ => break 'intrinsic,
-                        };
-
-                        break 'out Expr::Intrinsic(match name {
-                            "unknown" => Intrinsic::Unknown(global.ty.val_type.clone()),
-
-                            _ => {
-                                warn!("unknown intrinsic: {name}");
-                                break 'intrinsic;
-                            }
+                            IntrinsicDecl::Specialize => unreachable!(),
                         });
                     }
 

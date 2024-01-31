@@ -8,7 +8,8 @@ use crate::ir::expr::{
     BinOp, Intrinsic, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs, F32, F64,
 };
 use crate::ir::{
-    Export, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, LocalId, MemError, MemoryDef, MemoryId, Module, TableDef, TableId
+    Export, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, LocalId, MemError, MemoryDef,
+    MemoryId, Module, TableDef, TableId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,6 +45,39 @@ impl<'a> Specializer<'a> {
             spec_sigs: Default::default(),
             spec_funcs: Default::default(),
         }
+    }
+
+    pub fn process(mut self) -> Option<FuncId> {
+        let export = self
+            .module
+            .exports
+            .values()
+            .find(|export| export.name == "stitch-start")?;
+
+        let ExportDef::Func(func_id) = export.def else {
+            warn!("stitch-start is not a function");
+            return None;
+        };
+
+        let func_ty = self.module.funcs[func_id].ty();
+
+        if !func_ty.params.is_empty() || func_ty.ret.is_some() {
+            warn!("stitch-start has a wrong type: expected [] -> []");
+            return None;
+        }
+
+        let spec_func_id = self.specialize(SpecSignature {
+            orig_func_id: func_id,
+            args: vec![],
+        });
+
+        self.module.funcs.remove(func_id);
+        self.module.exports.retain(|_, export| match export.def {
+            ExportDef::Func(export_func_id) if func_id == export_func_id => false,
+            _ => true,
+        });
+
+        Some(spec_func_id)
     }
 
     pub fn specialize(&mut self, sig: SpecSignature) -> FuncId {
@@ -845,15 +879,16 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
 
         let range = (name_addr as usize)..(name_addr.saturating_add(name_len) as usize);
 
-        let name = match name_len {
-            0 => None,
-            _ => Some(String::from_utf8_lossy(
-                self.spec
-                    .module
-                    .read_mem(mem_id, range)
-                    .map_err(|e| warn!("stitch/specialize does not provide a valid name: {e}"))?,
-            ).into_owned()),
-        };
+        let name =
+            match name_len {
+                0 => None,
+                _ => Some(
+                    String::from_utf8_lossy(self.spec.module.read_mem(mem_id, range).map_err(
+                        |e| warn!("stitch/specialize does not provide a valid name: {e}"),
+                    )?)
+                    .into_owned(),
+                ),
+            };
 
         let spec_func_id = self.spec.specialize(SpecSignature {
             orig_func_id: func_id,

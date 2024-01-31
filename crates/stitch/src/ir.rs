@@ -17,6 +17,8 @@ use self::ty::{GlobalType, MemoryType, TableType, Type};
 pub use self::expr::Expr;
 pub use self::func::{Func, FuncBody};
 
+const STITCH_MODULE_NAME: &str = "stitch";
+
 new_key_type! {
     pub struct TypeId;
     pub struct FuncId;
@@ -26,6 +28,25 @@ new_key_type! {
     pub struct ImportId;
     pub struct ExportId;
     pub struct LocalId;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntrinsicDecl {
+    Specialize,
+    Unknown,
+}
+
+impl Display for IntrinsicDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{STITCH_MODULE_NAME}/{}",
+            match self {
+                Self::Specialize => "specialize",
+                Self::Unknown => "unknown",
+            }
+        )
+    }
 }
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
@@ -50,13 +71,17 @@ pub struct Module {
 }
 
 impl Module {
-    /// Inserts the types of the signatures of the module's functions.
-    pub fn insert_func_types(&mut self) {
-        for func in self.funcs.values() {
-            let Func::Body(body) = func else { continue };
+    pub fn get_intrinsic(&self, import_id: ImportId) -> Option<IntrinsicDecl> {
+        let (name, desc) = match &self.imports[import_id] {
+            Import { module, name, desc } if module == STITCH_MODULE_NAME => (name, desc),
+            _ => return None,
+        };
 
-            self.types.insert(Type::Func(body.ty.clone()));
-        }
+        Some(match (name.as_str(), desc) {
+            ("specialize", ImportDesc::Func(_)) => IntrinsicDecl::Specialize,
+            ("unknown", ImportDesc::Global(_)) => IntrinsicDecl::Unknown,
+            _ => return None,
+        })
     }
 
     pub fn read_mem(&self, mem_id: MemoryId, range: Range<usize>) -> Result<&[u8], MemError> {
@@ -133,6 +158,13 @@ pub enum GlobalDef {
 impl GlobalDef {
     pub fn is_import(&self) -> bool {
         matches!(self, Self::Import(_))
+    }
+
+    pub fn get_intrinsic(&self, module: &Module) -> Option<IntrinsicDecl> {
+        match *self {
+            Self::Import(import_id) => module.get_intrinsic(import_id),
+            _ => None,
+        }
     }
 }
 

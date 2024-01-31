@@ -41,7 +41,6 @@ impl<'a> Encoder<'a> {
     }
 
     pub fn encode(mut self) -> Vec<u8> {
-        self.module.insert_func_types();
         self.encode_types();
         self.encode_imports();
         self.encode_funcs();

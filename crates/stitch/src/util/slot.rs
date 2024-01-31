@@ -239,7 +239,10 @@ pub mod bi {
             }
         }
 
-        fn from_slot_map(values: SlotMap<K, V>, fail_on_duplicate: bool) -> Result<Self, DuplicateValueError<V>> {
+        fn from_slot_map(
+            values: SlotMap<K, V>,
+            fail_on_duplicate: bool,
+        ) -> Result<Self, DuplicateValueError<V>> {
             use hashbrown::hash_table::Entry;
 
             let mut result = Self {

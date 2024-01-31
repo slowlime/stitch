@@ -3,8 +3,8 @@ use slotmap::SlotMap;
 use crate::util::try_match;
 
 use super::expr::Expr;
-use super::{LocalId, ImportId};
 use super::ty::{FuncType, ValType};
+use super::{ImportId, IntrinsicDecl, LocalId, Module};
 
 #[derive(Debug, Clone)]
 pub enum Func {
@@ -13,6 +13,13 @@ pub enum Func {
 }
 
 impl Func {
+    pub fn get_intrinsic(&self, module: &Module) -> Option<IntrinsicDecl> {
+        match *self {
+            Self::Import(FuncImport { import_id, .. }) => module.get_intrinsic(import_id),
+            _ => None,
+        }
+    }
+
     pub fn is_import(&self) -> bool {
         matches!(self, Self::Import(_))
     }
