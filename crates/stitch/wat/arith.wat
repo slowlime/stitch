@@ -21,10 +21,10 @@
                 i32)
 
         (table $func-table (export "func-table") funcref
-               (elem $add $fact))
+               (elem $add $fact $fact-or))
 
         (memory $mem
-                (data "add-2add-2-4fact-10"))
+                (data "add-2add-2-4fact-10fact-or-1"))
 
         (func $stitch-start (export "stitch-start")
               (drop
@@ -57,7 +57,18 @@
                   (i32.const 12) ;; "fact-10"
                   (i32.const 7)
 
-                  (i32.const 10))))
+                  (i32.const 10)))
+
+              (drop
+                (call
+                  $stitch-specialize-i32-i32
+                  (i32.const 0) ;; $func-table
+                  (i32.const 2) ;; $fact-or
+                  (i32.const 19) ;; "fact-or-1"
+                  (i32.const 9)
+
+                  (global.get $stitch-unknown-i32)
+                  (i32.const 1))))
 
         (func $add (export "add") (param $lhs i32) (param $rhs i32) (result i32)
               (return
@@ -69,4 +80,12 @@
                   (i32.le_s (local.get $n) (i32.const 0))
                   (then (i32.const 1))
                   (else (i32.mul (local.get $n)
-                                 (call $fact (i32.sub (local.get $n) (i32.const 1)))))))))
+                                 (call $fact (i32.sub (local.get $n) (i32.const 1))))))))
+
+        (func $fact-or (export "fact-or") (param $n i32) (param $default i32) (result i32)
+              (return
+                (if (result i32)
+                  (i32.le_s (local.get $n) (i32.const 0))
+                  (then (local.get $default))
+                  (else (i32.mul (local.get $n)
+                                 (call $fact-or (i32.sub (local.get $n) (i32.const 1)) (local.get $default))))))))

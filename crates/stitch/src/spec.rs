@@ -5,8 +5,10 @@ use log::warn;
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
 use crate::ir::expr::{
-    BinOp, Intrinsic, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs, F32, F64,
+    BinOp, Intrinsic, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs, VisitContext,
+    F32, F64,
 };
+use crate::ir::ty::Type;
 use crate::ir::{
     Export, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, LocalId, MemError, MemoryDef,
     MemoryId, Module, TableDef, TableId,
@@ -152,7 +154,7 @@ struct FuncSpecializer<'a, 'b, 'm> {
     spec: &'a mut Specializer<'m>,
     sig: SpecSignature,
     locals: SecondaryMap<LocalId, (Value, ValueAttrs)>,
-    func: &'b FuncBody,
+    func: &'b mut FuncBody,
 }
 
 impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
@@ -168,7 +170,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         for (idx, arg) in this.sig.args.iter().enumerate() {
             if let &Some(value) = arg {
                 this.locals
-                    .insert(func.params[idx], (value, Default::default()));
+                    .insert(this.func.params[idx], (value, Default::default()));
             }
         }
 
@@ -805,7 +807,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                         Some(idx) => {
                             let Some(&elem) = elems.get(idx as usize) else {
                                 warn!(
-                                    "aborting specialization: out-of-bounds indirect call (index {idx}, table size {})",
+                                    "aborting specialization: an out-of-bounds indirect call (index {idx}, table size {})",
                                     elems.len(),
                                 );
                                 ctx.abort_specialization();
@@ -814,11 +816,27 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                             };
 
                             let Some(func_id) = elem else {
-                                warn!("aborting specialization: indirect call to an uninitialized element (index {idx})");
+                                warn!("aborting specialization: an indirect call to an uninitialized element (index {idx})");
                                 ctx.abort_specialization();
 
                                 return expr;
                             };
+
+                            let func_ty = self.spec.module.funcs[func_id].ty();
+
+                            match &self.spec.module.types[ty_id] {
+                                Type::Func(annotation_ty) if func_ty == annotation_ty => {}
+
+                                annotation_ty => {
+                                    warn!(
+                                        "aborting specialization: an indirect call is annotated with a wrong type \
+                                        (index {idx}, annotated as {annotation_ty}, actual type is {func_ty})",
+                                    );
+                                    ctx.abort_specialization();
+
+                                    return expr;
+                                }
+                            }
 
                             self.call(ctx, func_id, mem::take(args))
                         }
@@ -855,7 +873,55 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
 
         args.retain(|expr| expr.to_value().is_none());
 
-        Expr::Call(spec_func_id, args)
+        self.inline(spec_func_id, args)
+    }
+
+    fn inline(&mut self, func_id: FuncId, args: Vec<Expr>) -> Expr {
+        if matches!(
+            self.spec
+                .spec_funcs
+                .get(func_id)
+                .and_then(|sig| self.spec.spec_sigs.get(sig)),
+            Some(SpecializedFunc::Pending(_))
+        ) {
+            return Expr::Call(func_id, args);
+        }
+
+        let Some(body) = self.spec.module.funcs[func_id].body() else {
+            return Expr::Call(func_id, args);
+        };
+
+        let mut locals = SparseSecondaryMap::<LocalId, LocalId>::new();
+
+        for (local_id, val_ty) in &body.locals {
+            locals.insert(local_id, self.func.locals.insert(val_ty.clone()));
+        }
+
+        Expr::Block(
+            body.ty.ret.clone(),
+            args.into_iter()
+                .enumerate()
+                .map(|(idx, expr)| {
+                    Expr::Unary(UnOp::LocalSet(locals[body.params[idx]]), Box::new(expr))
+                })
+                .chain(body.body.iter().map(|expr| {
+                    expr.map(&mut |mut expr: Expr, ctx: &mut VisitContext| match expr {
+                        Expr::Nullary(NulOp::LocalGet(ref mut local_id))
+                        | Expr::Unary(
+                            UnOp::LocalSet(ref mut local_id) | UnOp::LocalTee(ref mut local_id),
+                            _,
+                        ) => {
+                            *local_id = locals[*local_id];
+                            expr
+                        }
+
+                        Expr::Return(inner) => Expr::Br(ctx.relative_depth() as u32, inner),
+
+                        _ => expr,
+                    })
+                }))
+                .collect(),
+        )
     }
 
     fn intr_specialize(

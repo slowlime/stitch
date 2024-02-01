@@ -515,7 +515,116 @@ impl Store {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct VisitContext {
+    relative_depth: usize,
+}
+
+impl VisitContext {
+    pub fn relative_depth(&self) -> usize {
+        self.relative_depth
+    }
+}
+
+pub trait Visitor {
+    fn pre(&mut self, ctx: &mut VisitContext, expr: &Expr) {}
+    fn post(&mut self, ctx: &mut VisitContext, expr: Expr) -> Expr;
+}
+
+impl<F> Visitor for F
+where
+    F: FnMut(Expr, &mut VisitContext) -> Expr,
+{
+    fn post(&mut self, ctx: &mut VisitContext, expr: Expr) -> Expr {
+        self(expr, ctx)
+    }
+}
+
 impl Expr {
+    pub fn map(&self, v: &mut impl Visitor) -> Self {
+        fn visit_block(v: &mut impl Visitor, ctx: &mut VisitContext, exprs: &[Expr]) -> Vec<Expr> {
+            ctx.relative_depth += 1;
+            let exprs = exprs.iter().map(|expr| visit(v, ctx, expr)).collect();
+            ctx.relative_depth -= 1;
+
+            exprs
+        }
+
+        fn visit(v: &mut impl Visitor, ctx: &mut VisitContext, expr: &Expr) -> Expr {
+            v.pre(ctx, expr);
+
+            let result = match expr {
+                Expr::Value(_, _) | Expr::Intrinsic(_) | Expr::Index(_) | Expr::Nullary(_) => {
+                    expr.clone()
+                }
+
+                Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(visit(v, ctx, inner))),
+                Expr::Binary(op, lhs, rhs) => Expr::Binary(
+                    *op,
+                    Box::new(visit(v, ctx, lhs)),
+                    Box::new(visit(v, ctx, rhs)),
+                ),
+                Expr::Ternary(op, first, second, third) => Expr::Ternary(
+                    *op,
+                    Box::new(visit(v, ctx, first)),
+                    Box::new(visit(v, ctx, second)),
+                    Box::new(visit(v, ctx, third)),
+                ),
+
+                Expr::Block(val_ty, block) => {
+                    Expr::Block(val_ty.clone(), visit_block(v, ctx, block))
+                }
+
+                Expr::Loop(val_ty, block) => Expr::Loop(val_ty.clone(), visit_block(v, ctx, block)),
+
+                Expr::If(val_ty, condition, then_block, else_block) => Expr::If(
+                    val_ty.clone(),
+                    Box::new(visit(v, ctx, condition)),
+                    visit_block(v, ctx, then_block),
+                    visit_block(v, ctx, else_block),
+                ),
+
+                Expr::Br(relative_depth, inner) => Expr::Br(
+                    *relative_depth,
+                    inner.as_ref().map(|inner| Box::new(visit(v, ctx, inner))),
+                ),
+
+                Expr::BrIf(relative_depth, inner, condition) => Expr::BrIf(
+                    *relative_depth,
+                    inner.as_ref().map(|inner| Box::new(visit(v, ctx, inner))),
+                    Box::new(visit(v, ctx, condition)),
+                ),
+
+                Expr::BrTable(labels, default_label, inner, index) => Expr::BrTable(
+                    labels.clone(),
+                    *default_label,
+                    inner.as_ref().map(|inner| Box::new(visit(v, ctx, inner))),
+                    Box::new(visit(v, ctx, index)),
+                ),
+
+                Expr::Return(inner) => {
+                    Expr::Return(inner.as_ref().map(|inner| Box::new(visit(v, ctx, inner))))
+                }
+
+                Expr::Call(func_id, args) => Expr::Call(
+                    *func_id,
+                    args.iter().map(|arg| visit(v, ctx, arg)).collect(),
+                ),
+
+                Expr::CallIndirect(ty_id, table_id, args, index) => Expr::CallIndirect(
+                    *ty_id,
+                    *table_id,
+                    args.iter().map(|arg| visit(v, ctx, arg)).collect(),
+                    Box::new(index.map(v)),
+                ),
+            };
+
+            v.post(ctx, result)
+        }
+
+        visit(v, &mut Default::default(), self)
+    }
+
     pub fn all(&self, predicate: &mut impl FnMut(&Expr) -> bool) -> bool {
         (match self {
             Expr::Value(_, _) | Expr::Intrinsic(_) | Expr::Index(_) | Expr::Nullary(_) => true,
