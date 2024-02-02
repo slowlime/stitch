@@ -127,6 +127,11 @@ impl<'a> Specializer<'a> {
             .module
             .funcs
             .insert(Func::Body(FuncBody::new(body.ty.clone())));
+        trace!(
+            "specializing {:?} as {func_id:?}: {:?}",
+            sig.orig_func_id,
+            &sig.args
+        );
         self.spec_sigs
             .insert(sig.clone(), SpecializedFunc::Pending(func_id));
         self.spec_funcs.insert(func_id, sig.clone());
@@ -355,6 +360,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             _ => {}
         }
 
+        /* FIXME: this is absolutely wrong.
         match expr.to_store() {
             Some((
                 MemArg { mem_id, offset, .. },
@@ -391,6 +397,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
 
             _ => {}
         }
+        */
 
         match expr {
             Expr::Value(_, _) | Expr::Index(_) => expr,
@@ -788,10 +795,17 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 Expr::Value(Value::I32(0), _) => {
                     Expr::Block(block_ty, self.block(ctx, &else_block))
                 }
+
                 Expr::Value(Value::I32(_), _) => {
                     Expr::Block(block_ty, self.block(ctx, &then_block))
                 }
-                _ => Expr::If(block_ty, condition, then_block, else_block),
+
+                _ => Expr::If(
+                    block_ty,
+                    condition,
+                    self.block(ctx, &then_block),
+                    self.block(ctx, &else_block),
+                ),
             },
 
             Expr::Br(_, _) | Expr::BrIf(_, _, _) | Expr::BrTable(_, _, _, _) | Expr::Return(_) => {
@@ -872,7 +886,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             args: args.iter().map(|expr| expr.to_value()).collect(),
         });
 
-        trace!("specializing Expr::Call({func_id:?}, {args:?}) -> {spec_func_id:?}");
+        trace!("specialized Expr::Call({func_id:?}, {args:?}) -> {spec_func_id:?}");
 
         args.retain(|expr| expr.to_value().is_none());
 
