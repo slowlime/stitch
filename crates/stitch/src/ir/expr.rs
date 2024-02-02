@@ -528,7 +528,10 @@ impl VisitContext {
 
 pub trait Visitor {
     fn pre(&mut self, ctx: &mut VisitContext, expr: &Expr) {}
-    fn post(&mut self, ctx: &mut VisitContext, expr: Expr) -> Expr;
+
+    fn post(&mut self, ctx: &mut VisitContext, expr: Expr) -> Expr {
+        expr
+    }
 }
 
 impl<F> Visitor for F
@@ -538,6 +541,18 @@ where
     fn post(&mut self, ctx: &mut VisitContext, expr: Expr) -> Expr {
         self(expr, ctx)
     }
+}
+
+pub fn make_visitor(f: impl FnMut(&Expr, &mut VisitContext)) -> impl Visitor {
+    struct V<F>(F);
+
+    impl<F: FnMut(&Expr, &mut VisitContext)> Visitor for V<F> {
+        fn pre(&mut self, ctx: &mut VisitContext, expr: &Expr) {
+            (self.0)(expr, ctx);
+        }
+    }
+
+    V(f)
 }
 
 impl Expr {

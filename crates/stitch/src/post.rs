@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use log::warn;
 
-use crate::ir::expr::{Id, NulOp, UnOp};
+use crate::ir::expr::{make_visitor, Id, NulOp, UnOp};
 use crate::ir::ty::Type;
 use crate::ir::{Expr, FuncId, GlobalDef, GlobalId, Module, TableDef};
 
@@ -18,6 +18,7 @@ impl<'a> PostProc<'a> {
     pub fn process(mut self) {
         self.remove_intrinsics();
         self.insert_func_types();
+        self.remove_unused_locals();
     }
 
     fn remove_intrinsics(&mut self) {
@@ -117,6 +118,29 @@ impl<'a> PostProc<'a> {
         for func in self.module.funcs.values() {
             let Some(body) = func.body() else { continue };
             self.module.types.insert(Type::Func(body.ty.clone()));
+        }
+    }
+
+    fn remove_unused_locals(&mut self) {
+        for func in self.module.funcs.values_mut() {
+            let Some(body) = func.body_mut() else {
+                continue;
+            };
+            let mut unused_locals = body.locals.keys().collect::<HashSet<_>>();
+
+            for expr in &body.body {
+                expr.map(&mut make_visitor(|expr, _| match expr {
+                    Expr::Nullary(NulOp::LocalGet(local_id))
+                    | Expr::Unary(UnOp::LocalSet(local_id) | UnOp::LocalTee(local_id), _) => {
+                        unused_locals.remove(local_id);
+                    }
+
+                    _ => {}
+                }));
+            }
+
+            body.locals
+                .retain(|local_id, _| !unused_locals.contains(&local_id));
         }
     }
 }

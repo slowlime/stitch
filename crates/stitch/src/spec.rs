@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::mem;
 
-use log::warn;
+use log::{trace, warn};
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
 use crate::ir::expr::{
@@ -131,9 +131,10 @@ impl<'a> Specializer<'a> {
             .insert(sig.clone(), SpecializedFunc::Pending(func_id));
         self.spec_funcs.insert(func_id, sig.clone());
 
-        FuncSpecializer::specialize(self, sig, &mut body);
+        FuncSpecializer::specialize(self, sig.clone(), &mut body);
 
         *self.module.funcs[func_id].body_mut().unwrap() = body;
+        *self.spec_sigs.get_mut(&sig).unwrap() = SpecializedFunc::Finished(func_id);
 
         func_id
     }
@@ -181,7 +182,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         func.params.retain({
             let mut iter = sig.args.iter();
 
-            move |_| iter.next().unwrap().is_some()
+            move |_| iter.next().unwrap().is_none()
         });
     }
 
@@ -871,6 +872,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             args: args.iter().map(|expr| expr.to_value()).collect(),
         });
 
+        trace!("specializing Expr::Call({func_id:?}, {args:?}) -> {spec_func_id:?}");
+
         args.retain(|expr| expr.to_value().is_none());
 
         self.inline(spec_func_id, args)
@@ -884,10 +887,12 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 .and_then(|sig| self.spec.spec_sigs.get(sig)),
             Some(SpecializedFunc::Pending(_))
         ) {
+            trace!("aborting inlining {func_id:?}: this is a pending-specialization function");
             return Expr::Call(func_id, args);
         }
 
         let Some(body) = self.spec.module.funcs[func_id].body() else {
+            trace!("aborting inlining {func_id:?}: this is an import");
             return Expr::Call(func_id, args);
         };
 
