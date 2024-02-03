@@ -1,16 +1,17 @@
 use std::collections::HashSet;
 
 use log::warn;
+use slotmap::SecondaryMap;
 use wasm_encoder::{
     CodeSection, DataSection, ElementSection, EntityType, ExportSection, FunctionSection,
     GlobalSection, ImportSection, MemorySection, StartSection, TableSection, TypeSection,
 };
 
-use crate::ir::expr::{BinOp, Id, MemArg, NulOp, TernOp, UnOp, Value};
-use crate::ir::ty::{ElemType, GlobalType, MemoryType, TableType, Type, ValType};
+use crate::ir::expr::{BinOp, Block, Id, MemArg, NulOp, TernOp, UnOp, Value};
+use crate::ir::ty::{BlockType, ElemType, GlobalType, MemoryType, TableType, Type, ValType};
 use crate::ir::{
-    self, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId, ImportDesc, ImportId,
-    LocalId, MemoryDef, MemoryId, Module, TableDef, TableId, TypeId,
+    self, BlockId, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId, ImportDesc,
+    ImportId, LocalId, MemoryDef, MemoryId, Module, TableDef, TableId, TypeId,
 };
 use crate::util::iter::segments;
 use crate::util::slot::SeqSlot;
@@ -295,6 +296,8 @@ impl<'a> Encoder<'a> {
                 func_encoder: wasm_encoder::Function::new(grouped_locals),
                 locals: &locals,
                 body,
+                block_stack: Default::default(),
+                block_depths: Default::default(),
             };
             sec.function(&encoder.encode());
         }
@@ -392,20 +395,33 @@ struct BodyEncoder<'a, 'b> {
     func_encoder: wasm_encoder::Function,
     locals: &'a SeqSlot<LocalId>,
     body: &'a FuncBody,
+    block_stack: Vec<BlockId>,
+    block_depths: SecondaryMap<BlockId, u32>,
 }
 
 impl<'a> BodyEncoder<'a, '_> {
     fn encode(mut self) -> wasm_encoder::Function {
-        self.block(&self.body.body);
+        self.block(&self.body.main_block);
         self.nullary(wasm_encoder::Instruction::End);
 
         self.func_encoder
     }
 
-    fn block(&mut self, exprs: &[Expr]) {
-        for expr in exprs {
+    fn get_relative_depth(&self, block_id: BlockId) -> u32 {
+        self.block_stack.len() as u32 - self.block_depths[block_id] - 1
+    }
+
+    fn block(&mut self, block: &Block) {
+        self.block_depths
+            .insert(block.id, self.block_stack.len() as u32);
+        self.block_stack.push(block.id);
+
+        for expr in &block.body {
             self.expr(expr);
         }
+
+        assert_eq!(self.block_stack.pop(), Some(block.id));
+        self.block_depths.remove(block.id);
     }
 
     fn expr(&mut self, expr: &Expr) {
@@ -705,7 +721,7 @@ impl<'a> BodyEncoder<'a, '_> {
                 );
                 self.block(then_block);
 
-                if !else_block.is_empty() {
+                if !else_block.body.is_empty() {
                     self.nullary(Instruction::Else);
                     self.block(else_block);
                 }
@@ -713,24 +729,45 @@ impl<'a> BodyEncoder<'a, '_> {
                 self.nullary(Instruction::End);
             }
 
-            Expr::Br(label, Some(inner)) => self.unary(inner, Instruction::Br(*label)),
-            Expr::Br(label, None) => self.nullary(Instruction::Br(*label)),
-
-            Expr::BrIf(label, Some(inner), condition) => {
-                self.binary(inner, condition, Instruction::BrIf(*label))
+            Expr::Br(block_id, Some(inner)) => {
+                self.unary(inner, Instruction::Br(self.get_relative_depth(*block_id)))
+            }
+            Expr::Br(block_id, None) => {
+                self.nullary(Instruction::Br(self.get_relative_depth(*block_id)))
             }
 
-            Expr::BrIf(label, None, condition) => self.unary(condition, Instruction::BrIf(*label)),
-
-            Expr::BrTable(labels, default_label, Some(inner), condition) => self.binary(
+            Expr::BrIf(block_id, Some(inner), condition) => self.binary(
                 inner,
                 condition,
-                Instruction::BrTable(labels.into(), *default_label),
+                Instruction::BrIf(self.get_relative_depth(*block_id)),
             ),
 
-            Expr::BrTable(labels, default_label, None, condition) => self.unary(
+            Expr::BrIf(block_id, None, condition) => self.unary(
                 condition,
-                Instruction::BrTable(labels.into(), *default_label),
+                Instruction::BrIf(self.get_relative_depth(*block_id)),
+            ),
+
+            Expr::BrTable(block_ids, default_block_id, Some(inner), condition) => self.binary(
+                inner,
+                condition,
+                Instruction::BrTable(
+                    block_ids
+                        .iter()
+                        .map(|&block_id| self.get_relative_depth(block_id))
+                        .collect(),
+                    self.get_relative_depth(*default_block_id),
+                ),
+            ),
+
+            Expr::BrTable(block_ids, default_block_id, None, condition) => self.unary(
+                condition,
+                Instruction::BrTable(
+                    block_ids
+                        .iter()
+                        .map(|&block_id| self.get_relative_depth(block_id))
+                        .collect(),
+                    self.get_relative_depth(*default_block_id),
+                ),
             ),
 
             Expr::Return(Some(inner)) => self.unary(inner, Instruction::Return),
@@ -796,10 +833,12 @@ impl<'a> BodyEncoder<'a, '_> {
         }
     }
 
-    fn convert_block_type(&self, block_ty: &Option<ValType>) -> wasm_encoder::BlockType {
+    fn convert_block_type(&self, block_ty: &BlockType) -> wasm_encoder::BlockType {
         match block_ty {
-            Some(val_ty) => wasm_encoder::BlockType::Result(self.encoder.convert_val_type(val_ty)),
-            None => wasm_encoder::BlockType::Empty,
+            BlockType::Empty => wasm_encoder::BlockType::Empty,
+            BlockType::Result(val_ty) => {
+                wasm_encoder::BlockType::Result(self.encoder.convert_val_type(val_ty))
+            }
         }
     }
 }

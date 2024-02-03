@@ -5,12 +5,12 @@ use log::{trace, warn};
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
 use crate::ir::expr::{
-    BinOp, Intrinsic, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs, VisitContext,
-    F32, F64,
+    BinOp, Block, Intrinsic, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs,
+    VisitContext, F32, F64,
 };
 use crate::ir::ty::Type;
 use crate::ir::{
-    Export, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, LocalId, MemError, MemoryDef,
+    BlockId, Export, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, LocalId, MemError,
     MemoryId, Module, TableDef, TableId,
 };
 
@@ -165,7 +165,7 @@ struct FuncSpecializer<'a, 'b, 'm> {
 
 impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
     fn specialize(spec: &'a mut Specializer<'m>, sig: SpecSignature, func: &'b mut FuncBody) {
-        let body = mem::take(&mut func.body);
+        let body = mem::take(&mut func.main_block);
         let mut this = FuncSpecializer {
             spec,
             sig,
@@ -182,7 +182,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
 
         let body = this.block(&mut Default::default(), &body);
         let sig = this.sig;
-        func.body = body;
+        func.main_block = body;
 
         func.params.retain({
             let mut iter = sig.args.iter();
@@ -191,8 +191,11 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         });
     }
 
-    fn block(&mut self, ctx: &mut SpecContext, exprs: &[Expr]) -> Vec<Expr> {
-        exprs.iter().map(|expr| self.expr(ctx, expr)).collect()
+    fn block(&mut self, ctx: &mut SpecContext, block: &Block) -> Block {
+        Block {
+            body: block.body.iter().map(|expr| self.expr(ctx, expr)).collect(),
+            id: block.id,
+        }
     }
 
     fn expr(&mut self, ctx: &mut SpecContext, expr: &Expr) -> Expr {
@@ -890,10 +893,10 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
 
         args.retain(|expr| expr.to_value().is_none());
 
-        self.inline(spec_func_id, args)
+        self.inline(ctx, spec_func_id, args)
     }
 
-    fn inline(&mut self, func_id: FuncId, args: Vec<Expr>) -> Expr {
+    fn inline(&mut self, ctx: &mut SpecContext, func_id: FuncId, args: Vec<Expr>) -> Expr {
         if matches!(
             self.spec
                 .spec_funcs
@@ -916,31 +919,67 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             locals.insert(local_id, self.func.locals.insert(val_ty.clone()));
         }
 
-        Expr::Block(
-            body.ty.ret.clone(),
-            args.into_iter()
-                .enumerate()
-                .map(|(idx, expr)| {
-                    Expr::Unary(UnOp::LocalSet(locals[body.params[idx]]), Box::new(expr))
-                })
-                .chain(body.body.iter().map(|expr| {
-                    expr.map(&mut |mut expr: Expr, ctx: &mut VisitContext| match expr {
-                        Expr::Nullary(NulOp::LocalGet(ref mut local_id))
-                        | Expr::Unary(
-                            UnOp::LocalSet(ref mut local_id) | UnOp::LocalTee(ref mut local_id),
-                            _,
-                        ) => {
-                            *local_id = locals[*local_id];
-                            expr
-                        }
+        let mut blocks = SecondaryMap::<BlockId, BlockId>::new();
 
-                        Expr::Return(inner) => Expr::Br(ctx.relative_depth() as u32, inner),
+        for block_id in body.blocks.keys() {
+            blocks.insert(block_id, self.func.blocks.insert(()));
+        }
 
-                        _ => expr,
+        self.expr(ctx, &Expr::Block(
+            body.ty.ret.clone().into(),
+            Block {
+                body: args
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, expr)| {
+                        Expr::Unary(UnOp::LocalSet(locals[body.params[idx]]), Box::new(expr))
                     })
-                }))
-                .collect(),
-        )
+                    .chain(body.main_block.body.iter().map(|expr| {
+                        expr.map(&mut |mut expr: Expr, _: &mut VisitContext| match expr {
+                            Expr::Nullary(NulOp::LocalGet(ref mut local_id))
+                            | Expr::Unary(
+                                UnOp::LocalSet(ref mut local_id) | UnOp::LocalTee(ref mut local_id),
+                                _,
+                            ) => {
+                                *local_id = locals[*local_id];
+                                expr
+                            }
+
+                            Expr::Block(_, ref mut block) | Expr::Loop(_, ref mut block) => {
+                                block.id = blocks[block.id];
+                                expr
+                            }
+
+                            Expr::If(_, _, ref mut then_block, ref mut else_block) => {
+                                then_block.id = blocks[then_block.id];
+                                else_block.id = blocks[else_block.id];
+                                expr
+                            }
+
+                            Expr::Br(ref mut block_id, _) | Expr::BrIf(ref mut block_id, _, _) => {
+                                *block_id = blocks[*block_id];
+                                expr
+                            }
+
+                            Expr::BrTable(ref mut block_ids, ref mut block_id, _, _) => {
+                                for block_id in block_ids {
+                                    *block_id = blocks[*block_id];
+                                }
+
+                                *block_id = blocks[*block_id];
+
+                                expr
+                            }
+
+                            Expr::Return(inner) => Expr::Br(blocks[body.main_block.id], inner),
+
+                            _ => expr,
+                        })
+                    }))
+                    .collect(),
+                id: blocks[body.main_block.id],
+            },
+        ))
     }
 
     fn intr_specialize(

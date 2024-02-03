@@ -2,6 +2,7 @@ use std::ops::Range;
 use std::{fmt, mem};
 
 use log::{log_enabled, trace, warn};
+use slotmap::SlotMap;
 use thiserror::Error;
 use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
@@ -11,7 +12,8 @@ use crate::ir::expr::{
     BinOp, ExprTy, Intrinsic, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64,
 };
 use crate::ir::{
-    self, ExportId, FuncId, GlobalId, ImportId, IntrinsicDecl, LocalId, MemoryId, TableId, TypeId,
+    self, BlockId, ExportId, FuncId, GlobalId, ImportId, IntrinsicDecl, LocalId, MemoryId, TableId,
+    TypeId,
 };
 
 const PAGE_SIZE: usize = 65536;
@@ -123,10 +125,10 @@ fn make_global_type(global_ty: wasmparser::GlobalType) -> ir::ty::GlobalType {
     }
 }
 
-fn make_block_type(block_ty: wasmparser::BlockType) -> Option<ir::ty::ValType> {
+fn make_block_type(block_ty: wasmparser::BlockType) -> ir::ty::BlockType {
     match block_ty {
-        wasmparser::BlockType::Empty => None,
-        wasmparser::BlockType::Type(ty) => Some(make_val_type(ty)),
+        wasmparser::BlockType::Empty => ir::ty::BlockType::Empty,
+        wasmparser::BlockType::Type(ty) => ir::ty::BlockType::Result(make_val_type(ty)),
         _ => unreachable!("func block types are not supported"),
     }
 }
@@ -435,7 +437,13 @@ impl Parser {
             let global = global?;
             let ty = make_global_type(global.ty);
             let [expr] = self
-                .parse_expr(None, true, global.init_expr.get_operators_reader())?
+                .parse_expr(
+                    None,
+                    &mut Default::default(),
+                    true,
+                    global.init_expr.get_operators_reader(),
+                )?
+                .body
                 .try_into()
                 .unwrap();
             let def = ir::GlobalDef::Value(expr);
@@ -487,7 +495,13 @@ impl Parser {
             };
             let table_idx = table_index.unwrap_or(0);
             let [offset] = self
-                .parse_expr(None, true, offset_expr.get_operators_reader())?
+                .parse_expr(
+                    None,
+                    &mut Default::default(),
+                    true,
+                    offset_expr.get_operators_reader(),
+                )?
+                .body
                 .try_into()
                 .unwrap();
             let offset = offset
@@ -537,7 +551,13 @@ impl Parser {
 
             let mem_idx = mem_idx as usize;
             let [offset] = self
-                .parse_expr(None, true, offset_expr.get_operators_reader())?
+                .parse_expr(
+                    None,
+                    &mut Default::default(),
+                    true,
+                    offset_expr.get_operators_reader(),
+                )?
+                .body
                 .try_into()
                 .unwrap();
             let offset = offset.to_u32().expect("data segment offset must be an i32") as usize;
@@ -585,8 +605,16 @@ impl Parser {
         }
 
         let has_return = body.ty.ret.is_some();
-        let body = self.parse_expr(Some((&locals, func_id)), has_return, ops_reader)?;
-        self.module.funcs[func_id].body_mut().unwrap().body = body;
+        let mut blocks = Default::default();
+        let body = self.parse_expr(
+            Some((&locals, func_id)),
+            &mut blocks,
+            has_return,
+            ops_reader,
+        )?;
+        let func_body = self.module.funcs[func_id].body_mut().unwrap();
+        func_body.main_block = body;
+        func_body.blocks = blocks;
 
         Ok(())
     }
@@ -594,31 +622,35 @@ impl Parser {
     fn parse_expr(
         &mut self,
         func: Option<(&[LocalId], FuncId)>,
+        blocks: &mut SlotMap<BlockId, ()>,
         has_return: bool,
         reader: wasmparser::OperatorsReader<'_>,
-    ) -> Result<Vec<ir::Expr>> {
+    ) -> Result<ir::expr::Block> {
         use ir::Expr;
 
         #[derive(Debug)]
         struct Block {
             branch: u8,
             br_captures_expr: bool,
+            block_id: BlockId,
             exprs: Vec<Expr>,
         }
 
         impl Block {
-            fn main(br_captures_expr: bool) -> Self {
+            fn main(block_id: BlockId, br_captures_expr: bool) -> Block {
                 Self {
                     branch: 0,
                     br_captures_expr,
+                    block_id,
                     exprs: vec![],
                 }
             }
 
-            fn branch(branch: u8, br_captures_expr: bool) -> Self {
+            fn branch(block_id: BlockId, branch: u8, br_captures_expr: bool) -> Block {
                 Self {
                     branch,
                     br_captures_expr,
+                    block_id,
                     exprs: vec![],
                 }
             }
@@ -626,7 +658,8 @@ impl Parser {
 
         struct Context<'a> {
             parser: &'a mut Parser,
-            blocks: Vec<Block>,
+            blocks: &'a mut SlotMap<BlockId, ()>,
+            block_stack: Vec<Block>,
             func: Option<(&'a [LocalId], FuncId)>,
             body: Option<Vec<Expr>>,
         }
@@ -641,7 +674,7 @@ impl Parser {
             }
 
             fn push_expr(&mut self, expr: ir::Expr) {
-                exprs(&mut self.blocks).push(expr);
+                exprs(&mut self.block_stack).push(expr);
             }
 
             fn drop_all(&mut self) {
@@ -656,8 +689,12 @@ impl Parser {
                 }
             }
 
+            fn get_block_id(&self, relative_depth: u32) -> BlockId {
+                self.block_stack[self.block_stack.len() - relative_depth as usize - 1].block_id
+            }
+
             fn pop_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
-                self.blocks[self.blocks.len() - relative_depth as usize - 1]
+                self.block_stack[self.block_stack.len() - relative_depth as usize - 1]
                     .br_captures_expr
                     .then(|| Box::new(self.pop_expr()))
             }
@@ -670,7 +707,7 @@ impl Parser {
             }
 
             fn maybe_pop_expr(&mut self) -> Option<ir::Expr> {
-                let start_idx = exprs(&mut self.blocks)
+                let start_idx = exprs(&mut self.block_stack)
                     .iter()
                     .enumerate()
                     .rfind(|(_, expr)| match expr.ret_value_count() {
@@ -691,10 +728,10 @@ impl Parser {
                     })
                     .map(|(idx, _)| idx)?;
 
-                if start_idx + 1 == exprs(&mut self.blocks).len() {
-                    Some(exprs(&mut self.blocks).pop().unwrap())
+                if start_idx + 1 == exprs(&mut self.block_stack).len() {
+                    Some(exprs(&mut self.block_stack).pop().unwrap())
                 } else {
-                    let ty = match exprs(&mut self.blocks)[start_idx].ty() {
+                    let ty = match exprs(&mut self.block_stack)[start_idx].ty() {
                         ExprTy::Concrete(ty) => ty,
                         ExprTy::Local(local) => self.parser.module.funcs[self.func.unwrap().1]
                             .body()
@@ -717,9 +754,14 @@ impl Parser {
                         ExprTy::Unreachable | ExprTy::Empty => unreachable!(),
                     };
 
+                    let block_id = self.blocks.insert(());
+
                     Some(Expr::Block(
-                        Some(ty),
-                        exprs(&mut self.blocks).split_off(start_idx),
+                        ir::ty::BlockType::Result(ty),
+                        ir::expr::Block {
+                            body: exprs(&mut self.block_stack).split_off(start_idx),
+                            id: block_id,
+                        },
                     ))
                 }
             }
@@ -749,35 +791,38 @@ impl Parser {
             }
 
             fn push_block(&mut self, expr: Expr, block: Block) {
-                exprs(&mut self.blocks).push(expr);
-                self.blocks.push(block);
+                exprs(&mut self.block_stack).push(expr);
+                self.block_stack.push(block);
             }
 
             fn pop_block(&mut self) -> Block {
-                let mut block = self.blocks.pop().unwrap();
+                let mut block = self.block_stack.pop().unwrap();
 
-                if self.blocks.is_empty() {
+                if self.block_stack.is_empty() {
                     self.body = Some(mem::take(&mut block.exprs));
 
                     return block;
                 }
 
-                let exprs = match exprs(&mut self.blocks).last_mut().unwrap() {
-                    Expr::Block(_, exprs) => exprs,
-                    Expr::Loop(_, exprs) => exprs,
-                    Expr::If(_, _, exprs, _) if block.branch == 0 => exprs,
-                    Expr::If(_, _, _, exprs) => exprs,
+                let parent_block = match exprs(&mut self.block_stack).last_mut().unwrap() {
+                    Expr::Block(_, parent_block) => parent_block,
+                    Expr::Loop(_, parent_block) => parent_block,
+                    Expr::If(_, _, parent_block, _) if block.branch == 0 => parent_block,
+                    Expr::If(_, _, _, parent_block) => parent_block,
                     _ => unreachable!(),
                 };
-                *exprs = mem::take(&mut block.exprs);
+                parent_block.body = mem::take(&mut block.exprs);
 
                 block
             }
         }
 
+        let root_block_id = blocks.insert(());
+
         let mut ctx = Context {
             parser: self,
-            blocks: vec![Block::main(has_return)],
+            blocks,
+            block_stack: vec![Block::main(root_block_id, has_return)],
             func,
             body: None,
         };
@@ -788,11 +833,11 @@ impl Parser {
             let (op, offset) = op_offset?;
 
             if log_enabled!(log::Level::Trace) {
-                let indent = ":   ".repeat(ctx.blocks.len());
+                let indent = ":   ".repeat(ctx.block_stack.len());
 
                 trace!(
                     "{indent}{:<2} {op:?} [{unreachable_level}] @ {offset}",
-                    ctx.blocks.len()
+                    ctx.block_stack.len()
                 );
 
                 if let Operator::Call { function_index } = op {
@@ -809,7 +854,15 @@ impl Parser {
                     let block = ctx.pop_block();
 
                     if matches!(op, Operator::Else) {
-                        ctx.blocks.push(Block::branch(1, block.br_captures_expr));
+                        let else_block_id = match exprs(&mut ctx.block_stack).last().unwrap() {
+                            Expr::If(_, _, _, else_block) => else_block.id,
+                            _ => unreachable!(),
+                        };
+                        ctx.block_stack.push(Block::branch(
+                            else_block_id,
+                            1,
+                            block.br_captures_expr,
+                        ));
                     }
 
                     continue;
@@ -827,19 +880,39 @@ impl Parser {
 
                 Operator::Block { blockty } => {
                     let ty = make_block_type(blockty);
-                    let br_captures_expr = ty.is_some();
-                    ctx.push_block(Expr::Block(ty, vec![]), Block::main(br_captures_expr));
+                    let br_captures_expr = !ty.is_empty();
+                    let block_id = ctx.blocks.insert(());
+                    ctx.push_block(
+                        Expr::Block(
+                            ty,
+                            ir::expr::Block {
+                                body: vec![],
+                                id: block_id,
+                            },
+                        ),
+                        Block::main(block_id, br_captures_expr),
+                    );
 
                     continue;
                 }
 
                 Operator::Loop { blockty } => {
                     let ty = make_block_type(blockty);
+                    let block_id = ctx.blocks.insert(());
 
                     // a branch to a loop restarts the loop without popping any values off the stack
                     let br_captures_expr = false;
 
-                    ctx.push_block(Expr::Loop(ty, vec![]), Block::main(br_captures_expr));
+                    ctx.push_block(
+                        Expr::Loop(
+                            ty,
+                            ir::expr::Block {
+                                body: vec![],
+                                id: block_id,
+                            },
+                        ),
+                        Block::main(block_id, br_captures_expr),
+                    );
 
                     continue;
                 }
@@ -847,10 +920,23 @@ impl Parser {
                 Operator::If { blockty } => {
                     let condition = Box::new(ctx.pop_expr());
                     let ty = make_block_type(blockty);
-                    let br_captures_expr = ty.is_some();
+                    let br_captures_expr = !ty.is_empty();
+                    let then_block_id = ctx.blocks.insert(());
+                    let else_block_id = ctx.blocks.insert(());
                     ctx.push_block(
-                        Expr::If(ty, condition, vec![], vec![]),
-                        Block::main(br_captures_expr),
+                        Expr::If(
+                            ty,
+                            condition,
+                            ir::expr::Block {
+                                body: vec![],
+                                id: then_block_id,
+                            },
+                            ir::expr::Block {
+                                body: vec![],
+                                id: else_block_id,
+                            },
+                        ),
+                        Block::main(then_block_id, br_captures_expr),
                     );
 
                     continue;
@@ -864,15 +950,16 @@ impl Parser {
 
                 Operator::Nop => NulOp::Nop.into(),
 
-                Operator::Br { relative_depth } => {
-                    Expr::Br(relative_depth, ctx.capture_br_expr(relative_depth))
-                }
+                Operator::Br { relative_depth } => Expr::Br(
+                    ctx.get_block_id(relative_depth),
+                    ctx.capture_br_expr(relative_depth),
+                ),
 
                 Operator::BrIf { relative_depth } => {
                     let condition = Box::new(ctx.pop_expr());
                     let ret_expr = ctx.pop_br_expr(relative_depth);
 
-                    Expr::BrIf(relative_depth, ret_expr, condition)
+                    Expr::BrIf(ctx.get_block_id(relative_depth), ret_expr, condition)
                 }
 
                 Operator::BrTable { targets } => {
@@ -880,14 +967,22 @@ impl Parser {
                     let ret_expr = ctx.capture_br_expr(targets.default());
 
                     Expr::BrTable(
-                        targets.targets().collect::<Result<Vec<_>, _>>()?,
-                        targets.default(),
+                        targets
+                            .targets()
+                            .map(|relative_depth| {
+                                relative_depth
+                                    .map(|relative_depth| ctx.get_block_id(relative_depth))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        ctx.get_block_id(targets.default()),
                         ret_expr,
                         condition,
                     )
                 }
 
-                Operator::Return => Expr::Return(ctx.capture_br_expr(ctx.blocks.len() as u32 - 1)),
+                Operator::Return => {
+                    Expr::Return(ctx.capture_br_expr(ctx.block_stack.len() as u32 - 1))
+                }
 
                 Operator::Call { function_index } => 'out: {
                     let func_id = ctx.parser.funcs[function_index as usize];
@@ -1276,9 +1371,12 @@ impl Parser {
             ctx.push_expr(expr);
         }
 
-        assert!(ctx.blocks.is_empty());
+        assert!(ctx.block_stack.is_empty());
 
-        Ok(ctx.body.unwrap())
+        Ok(ir::expr::Block {
+            body: ctx.body.unwrap(),
+            id: root_block_id,
+        })
     }
 
     fn make_mem_arg(&self, mem_arg: wasmparser::MemArg) -> ir::expr::MemArg {

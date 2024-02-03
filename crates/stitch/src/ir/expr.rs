@@ -2,8 +2,8 @@ use std::fmt::{self, Debug, Display};
 
 use crate::util::try_match;
 
-use super::ty::ValType;
-use super::{FuncId, GlobalId, LocalId, MemoryId, TableId, TypeId};
+use super::ty::{BlockType, ValType};
+use super::{BlockId, FuncId, GlobalId, LocalId, MemoryId, TableId, TypeId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct F32(u32);
@@ -437,6 +437,12 @@ impl From<FuncId> for Id {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct Block {
+    pub body: Vec<Expr>,
+    pub id: BlockId,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Value(Value, ValueAttrs),
@@ -449,12 +455,12 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Ternary(TernOp, Box<Expr>, Box<Expr>, Box<Expr>),
 
-    Block(Option<ValType>, Vec<Expr>),
-    Loop(Option<ValType>, Vec<Expr>),
-    If(Option<ValType>, Box<Expr>, Vec<Expr>, Vec<Expr>),
-    Br(u32, Option<Box<Expr>>),
-    BrIf(u32, Option<Box<Expr>>, Box<Expr>),
-    BrTable(Vec<u32>, u32, Option<Box<Expr>>, Box<Expr>),
+    Block(BlockType, Block),
+    Loop(BlockType, Block),
+    If(BlockType, Box<Expr>, Block, Block),
+    Br(BlockId, Option<Box<Expr>>),
+    BrIf(BlockId, Option<Box<Expr>>, Box<Expr>),
+    BrTable(Vec<BlockId>, BlockId, Option<Box<Expr>>, Box<Expr>),
     Return(Option<Box<Expr>>),
     Call(FuncId, Vec<Expr>),
     CallIndirect(TypeId, TableId, Vec<Expr>, Box<Expr>),
@@ -557,12 +563,12 @@ pub fn make_visitor(f: impl FnMut(&Expr, &mut VisitContext)) -> impl Visitor {
 
 impl Expr {
     pub fn map(&self, v: &mut impl Visitor) -> Self {
-        fn visit_block(v: &mut impl Visitor, ctx: &mut VisitContext, exprs: &[Expr]) -> Vec<Expr> {
+        fn visit_block(v: &mut impl Visitor, ctx: &mut VisitContext, block: &Block) -> Block {
             ctx.relative_depth += 1;
-            let exprs = exprs.iter().map(|expr| visit(v, ctx, expr)).collect();
+            let body = block.body.iter().map(|expr| visit(v, ctx, expr)).collect();
             ctx.relative_depth -= 1;
 
-            exprs
+            Block { body, id: block.id }
         }
 
         fn visit(v: &mut impl Visitor, ctx: &mut VisitContext, expr: &Expr) -> Expr {
@@ -586,33 +592,34 @@ impl Expr {
                     Box::new(visit(v, ctx, third)),
                 ),
 
-                Expr::Block(val_ty, block) => {
-                    Expr::Block(val_ty.clone(), visit_block(v, ctx, block))
+                Expr::Block(block_ty, block) => {
+                    Expr::Block(block_ty.clone(), visit_block(v, ctx, block))
+                }
+                Expr::Loop(block_ty, block) => {
+                    Expr::Loop(block_ty.clone(), visit_block(v, ctx, block))
                 }
 
-                Expr::Loop(val_ty, block) => Expr::Loop(val_ty.clone(), visit_block(v, ctx, block)),
-
-                Expr::If(val_ty, condition, then_block, else_block) => Expr::If(
-                    val_ty.clone(),
+                Expr::If(block_ty, condition, then_block, else_block) => Expr::If(
+                    block_ty.clone(),
                     Box::new(visit(v, ctx, condition)),
                     visit_block(v, ctx, then_block),
                     visit_block(v, ctx, else_block),
                 ),
 
-                Expr::Br(relative_depth, inner) => Expr::Br(
-                    *relative_depth,
+                Expr::Br(block_id, inner) => Expr::Br(
+                    *block_id,
                     inner.as_ref().map(|inner| Box::new(visit(v, ctx, inner))),
                 ),
 
-                Expr::BrIf(relative_depth, inner, condition) => Expr::BrIf(
-                    *relative_depth,
+                Expr::BrIf(block_id, inner, condition) => Expr::BrIf(
+                    *block_id,
                     inner.as_ref().map(|inner| Box::new(visit(v, ctx, inner))),
                     Box::new(visit(v, ctx, condition)),
                 ),
 
-                Expr::BrTable(labels, default_label, inner, index) => Expr::BrTable(
-                    labels.clone(),
-                    *default_label,
+                Expr::BrTable(block_ids, default_block_id, inner, index) => Expr::BrTable(
+                    block_ids.clone(),
+                    *default_block_id,
                     inner.as_ref().map(|inner| Box::new(visit(v, ctx, inner))),
                     Box::new(visit(v, ctx, index)),
                 ),
@@ -648,11 +655,11 @@ impl Expr {
             Expr::Ternary(_, first, second, third) => {
                 first.all(predicate) && second.all(predicate) && third.all(predicate)
             }
-            Expr::Block(_, block) | Expr::Loop(_, block) => block.iter().all(&mut *predicate),
+            Expr::Block(_, block) | Expr::Loop(_, block) => block.body.iter().all(&mut *predicate),
             Expr::If(_, condition, then_block, else_block) => {
                 condition.all(predicate)
-                    && then_block.iter().all(&mut *predicate)
-                    && else_block.iter().all(&mut *predicate)
+                    && then_block.body.iter().all(&mut *predicate)
+                    && else_block.body.iter().all(&mut *predicate)
             }
             Expr::Br(_, inner) | Expr::Return(inner) => {
                 inner.as_ref().map(|inner| predicate(inner)).unwrap_or(true)
@@ -861,11 +868,11 @@ impl Expr {
                 _,
             ) => ReturnValueCount::Zero,
 
-            Self::Block(ty, _) | Self::Loop(ty, _) | Self::If(ty, _, _, _) => {
-                if ty.is_some() {
-                    ReturnValueCount::One
-                } else {
+            Self::Block(block_ty, _) | Self::Loop(block_ty, _) | Self::If(block_ty, _, _, _) => {
+                if block_ty.is_empty() {
                     ReturnValueCount::Zero
+                } else {
+                    ReturnValueCount::One
                 }
             }
 
@@ -1134,10 +1141,12 @@ impl Expr {
             Self::Nullary(NulOp::Nop) => ExprTy::Empty,
             Self::Nullary(NulOp::Unreachable) => ExprTy::Unreachable,
 
-            Self::Block(ty, _) | Self::Loop(ty, _) | Self::If(ty, _, _, _) => match ty {
-                Some(ty) => ExprTy::Concrete(ty.clone()),
-                None => ExprTy::Empty,
-            },
+            Self::Block(block_ty, _) | Self::Loop(block_ty, _) | Self::If(block_ty, _, _, _) => {
+                match block_ty {
+                    BlockType::Empty => ExprTy::Empty,
+                    BlockType::Result(ty) => ExprTy::Concrete(ty.clone()),
+                }
+            }
 
             Self::BrIf(_, Some(expr), _) => expr.ty(),
             Self::BrIf(_, None, _) => ExprTy::Empty,

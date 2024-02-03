@@ -78,7 +78,7 @@ impl<'a> PostProc<'a> {
         for func in self.module.funcs.values() {
             let Some(body) = func.body() else { continue };
 
-            for expr in &body.body {
+            for expr in &body.main_block.body {
                 expr.all(&mut check_expr(&mut func_ids, &mut global_ids));
             }
         }
@@ -128,7 +128,7 @@ impl<'a> PostProc<'a> {
             };
             let mut unused_locals = body.locals.keys().collect::<HashSet<_>>();
 
-            for expr in &body.body {
+            for expr in &body.main_block.body {
                 expr.map(&mut make_visitor(|expr, _| match expr {
                     Expr::Nullary(NulOp::LocalGet(local_id))
                     | Expr::Unary(UnOp::LocalSet(local_id) | UnOp::LocalTee(local_id), _) => {

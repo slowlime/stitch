@@ -28,6 +28,7 @@ new_key_type! {
     pub struct ImportId;
     pub struct ExportId;
     pub struct LocalId;
+    pub struct BlockId;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

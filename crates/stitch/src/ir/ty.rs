@@ -10,12 +10,16 @@ pub enum ValType {
 
 impl Display for ValType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", match self {
-            Self::I32 => "i32",
-            Self::I64 => "i64",
-            Self::F32 => "f32",
-            Self::F64 => "f64",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::I32 => "i32",
+                Self::I64 => "i64",
+                Self::F32 => "f32",
+                Self::F64 => "f64",
+            }
+        )
     }
 }
 
@@ -100,4 +104,34 @@ pub struct MemoryType {
 pub struct GlobalType {
     pub val_type: ValType,
     pub mutable: bool,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub enum BlockType {
+    #[default]
+    Empty,
+
+    Result(ValType),
+}
+
+impl BlockType {
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    pub fn to_val_ty(&self) -> Option<ValType> {
+        match self {
+            Self::Empty => None,
+            Self::Result(val_ty) => Some(val_ty.clone()),
+        }
+    }
+}
+
+impl From<Option<ValType>> for BlockType {
+    fn from(val_ty: Option<ValType>) -> Self {
+        match val_ty {
+            None => BlockType::Empty,
+            Some(val_ty) => BlockType::Result(val_ty),
+        }
+    }
 }

@@ -2,9 +2,9 @@ use slotmap::SlotMap;
 
 use crate::util::try_match;
 
-use super::expr::Expr;
+use super::expr::Block;
 use super::ty::{FuncType, ValType};
-use super::{ImportId, IntrinsicDecl, LocalId, Module};
+use super::{BlockId, ImportId, IntrinsicDecl, LocalId, Module};
 
 #[derive(Debug, Clone)]
 pub enum Func {
@@ -51,16 +51,24 @@ pub struct FuncBody {
     pub ty: FuncType,
     pub locals: SlotMap<LocalId, ValType>,
     pub params: Vec<LocalId>,
-    pub body: Vec<Expr>,
+    pub blocks: SlotMap<BlockId, ()>,
+    pub main_block: Block,
 }
 
 impl FuncBody {
     pub fn new(ty: FuncType) -> Self {
+        let mut blocks = SlotMap::with_key();
+        let body = Block {
+            body: vec![],
+            id: blocks.insert(()),
+        };
+
         Self {
             ty,
             locals: Default::default(),
             params: Default::default(),
-            body: Default::default(),
+            blocks,
+            main_block: body,
         }
     }
 }
