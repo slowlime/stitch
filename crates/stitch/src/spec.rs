@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::mem;
 
 use log::{trace, warn};
@@ -192,10 +192,45 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
     }
 
     fn block(&mut self, ctx: &mut SpecContext, block: &Block) -> Block {
-        Block {
-            body: block.body.iter().map(|expr| self.expr(ctx, expr)).collect(),
-            id: block.id,
+        let mut body = vec![];
+
+        'outer: for expr in &block.body {
+            let mut exprs = VecDeque::new();
+            exprs.push_back(self.expr(ctx, expr));
+
+            while let Some(expr) = exprs.pop_front() {
+                match expr {
+                    Expr::Nullary(NulOp::Nop) => continue,
+
+                    Expr::Unary(UnOp::Drop, inner) if !inner.has_side_effect() => {
+                        continue;
+                    }
+
+                    Expr::Block(_, block)
+                        if block.body.iter().all(|expr| !expr.branches_to(block.id)) =>
+                    {
+                        for expr in block.body.into_iter().rev() {
+                            exprs.push_front(expr);
+                        }
+
+                        self.func.blocks.remove(block.id);
+
+                        continue;
+                    }
+
+                    _ => {}
+                }
+
+                let diverges = expr.diverges();
+                body.push(expr);
+
+                if diverges {
+                    break 'outer;
+                }
+            }
         }
+
+        Block { body, id: block.id }
     }
 
     fn expr(&mut self, ctx: &mut SpecContext, expr: &Expr) -> Expr {
@@ -792,15 +827,50 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 _ => Expr::Ternary(TernOp::Select, first, second, condition),
             },
 
-            Expr::Block(_, _) | Expr::Loop(_, _) => expr,
+            Expr::Block(_, block) | Expr::Loop(_, block) if block.body.is_empty() => {
+                NulOp::Nop.into()
+            }
+
+            Expr::Block(_, ref mut block) | Expr::Loop(_, ref mut block)
+                if block.body.len() == 1 =>
+            {
+                let mut nop = Expr::Nullary(NulOp::Nop);
+                let mut inner = &mut block.body[0];
+
+                loop {
+                    inner = match inner {
+                        Expr::Br(br_block_id, _) if *br_block_id == block.id => {
+                            let Expr::Br(_, inner) = inner else {
+                                unreachable!()
+                            };
+
+                            match inner {
+                                None => &mut nop,
+                                Some(inner) => &mut **inner,
+                            }
+                        }
+
+                        _ => {
+                            if inner.branches_to(block.id) {
+                                break expr;
+                            } else {
+                                self.func.blocks.remove(block.id);
+                                break mem::take(inner);
+                            }
+                        }
+                    };
+                }
+            }
+
+            Expr::Block(..) | Expr::Loop(..) => expr,
 
             Expr::If(block_ty, condition, then_block, else_block) => match *condition {
                 Expr::Value(Value::I32(0), _) => {
-                    Expr::Block(block_ty, self.block(ctx, &else_block))
+                    self.expr(ctx, &Expr::Block(block_ty, else_block))
                 }
 
                 Expr::Value(Value::I32(_), _) => {
-                    Expr::Block(block_ty, self.block(ctx, &then_block))
+                    self.expr(ctx, &Expr::Block(block_ty, then_block))
                 }
 
                 _ => Expr::If(
@@ -811,9 +881,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 ),
             },
 
-            Expr::Br(_, _) | Expr::BrIf(_, _, _) | Expr::BrTable(_, _, _, _) | Expr::Return(_) => {
-                expr
-            }
+            Expr::Br(..) | Expr::BrIf(..) | Expr::BrTable(..) | Expr::Return(_) => expr,
 
             Expr::Call(func_id, args) => self.call(ctx, func_id, args),
 
@@ -925,61 +993,66 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             blocks.insert(block_id, self.func.blocks.insert(()));
         }
 
-        self.expr(ctx, &Expr::Block(
-            body.ty.ret.clone().into(),
-            Block {
-                body: args
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, expr)| {
-                        Expr::Unary(UnOp::LocalSet(locals[body.params[idx]]), Box::new(expr))
-                    })
-                    .chain(body.main_block.body.iter().map(|expr| {
-                        expr.map(&mut |mut expr: Expr, _: &mut VisitContext| match expr {
-                            Expr::Nullary(NulOp::LocalGet(ref mut local_id))
-                            | Expr::Unary(
-                                UnOp::LocalSet(ref mut local_id) | UnOp::LocalTee(ref mut local_id),
-                                _,
-                            ) => {
-                                *local_id = locals[*local_id];
-                                expr
-                            }
-
-                            Expr::Block(_, ref mut block) | Expr::Loop(_, ref mut block) => {
-                                block.id = blocks[block.id];
-                                expr
-                            }
-
-                            Expr::If(_, _, ref mut then_block, ref mut else_block) => {
-                                then_block.id = blocks[then_block.id];
-                                else_block.id = blocks[else_block.id];
-                                expr
-                            }
-
-                            Expr::Br(ref mut block_id, _) | Expr::BrIf(ref mut block_id, _, _) => {
-                                *block_id = blocks[*block_id];
-                                expr
-                            }
-
-                            Expr::BrTable(ref mut block_ids, ref mut block_id, _, _) => {
-                                for block_id in block_ids {
-                                    *block_id = blocks[*block_id];
+        self.expr(
+            ctx,
+            &Expr::Block(
+                body.ty.ret.clone().into(),
+                Block {
+                    body: args
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, expr)| {
+                            Expr::Unary(UnOp::LocalSet(locals[body.params[idx]]), Box::new(expr))
+                        })
+                        .chain(body.main_block.body.iter().map(|expr| {
+                            expr.map(&mut |mut expr: Expr, _: &mut VisitContext| match expr {
+                                Expr::Nullary(NulOp::LocalGet(ref mut local_id))
+                                | Expr::Unary(
+                                    UnOp::LocalSet(ref mut local_id)
+                                    | UnOp::LocalTee(ref mut local_id),
+                                    _,
+                                ) => {
+                                    *local_id = locals[*local_id];
+                                    expr
                                 }
 
-                                *block_id = blocks[*block_id];
+                                Expr::Block(_, ref mut block) | Expr::Loop(_, ref mut block) => {
+                                    block.id = blocks[block.id];
+                                    expr
+                                }
 
-                                expr
-                            }
+                                Expr::If(_, _, ref mut then_block, ref mut else_block) => {
+                                    then_block.id = blocks[then_block.id];
+                                    else_block.id = blocks[else_block.id];
+                                    expr
+                                }
 
-                            Expr::Return(inner) => Expr::Br(blocks[body.main_block.id], inner),
+                                Expr::Br(ref mut block_id, _)
+                                | Expr::BrIf(ref mut block_id, _, _) => {
+                                    *block_id = blocks[*block_id];
+                                    expr
+                                }
 
-                            _ => expr,
-                        })
-                    }))
-                    .collect(),
-                id: blocks[body.main_block.id],
-            },
-        ))
+                                Expr::BrTable(ref mut block_ids, ref mut block_id, _, _) => {
+                                    for block_id in block_ids {
+                                        *block_id = blocks[*block_id];
+                                    }
+
+                                    *block_id = blocks[*block_id];
+
+                                    expr
+                                }
+
+                                Expr::Return(inner) => Expr::Br(blocks[body.main_block.id], inner),
+
+                                _ => expr,
+                            })
+                        }))
+                        .collect(),
+                    id: blocks[body.main_block.id],
+                },
+            ),
+        )
     }
 
     fn intr_specialize(

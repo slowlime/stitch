@@ -478,6 +478,12 @@ impl From<NulOp> for Expr {
     }
 }
 
+impl Default for Expr {
+    fn default() -> Self {
+        NulOp::Nop.into()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Load {
     I32 { src_size: u8, sign_extend: bool },
@@ -533,8 +539,10 @@ impl VisitContext {
 }
 
 pub trait Visitor {
+    #[allow(unused_variables)]
     fn pre(&mut self, ctx: &mut VisitContext, expr: &Expr) {}
 
+    #[allow(unused_variables)]
     fn post(&mut self, ctx: &mut VisitContext, expr: Expr) -> Expr {
         expr
     }
@@ -676,6 +684,10 @@ impl Expr {
                 args.iter().all(&mut *predicate) && index.all(&mut *predicate)
             }
         }) && predicate(self)
+    }
+
+    pub fn any(&self, predicate: &mut impl FnMut(&Expr) -> bool) -> bool {
+        !self.all(&mut |expr| !predicate(expr))
     }
 
     pub fn to_value(&self) -> Option<Value> {
@@ -852,7 +864,7 @@ impl Expr {
     /// Returns the number of values the expression evaluates to.
     pub fn ret_value_count(&self) -> ReturnValueCount {
         match self {
-            Self::Nullary(NulOp::Nop | NulOp::Unreachable)
+            Self::Nullary(NulOp::Nop)
             | Self::Unary(UnOp::Drop | UnOp::LocalSet(_) | UnOp::GlobalSet(_), _)
             | Self::Binary(
                 BinOp::I32Store(_)
@@ -867,6 +879,8 @@ impl Expr {
                 _,
                 _,
             ) => ReturnValueCount::Zero,
+
+            Self::Nullary(NulOp::Unreachable) => ReturnValueCount::Unreachable,
 
             Self::Block(block_ty, _) | Self::Loop(block_ty, _) | Self::If(block_ty, _, _, _) => {
                 if block_ty.is_empty() {
@@ -888,6 +902,10 @@ impl Expr {
 
             _ => ReturnValueCount::One,
         }
+    }
+
+    pub fn diverges(&self) -> bool {
+        matches!(self.ret_value_count(), ReturnValueCount::Unreachable)
     }
 
     pub fn ty(&self) -> ExprTy {
@@ -1156,6 +1174,208 @@ impl Expr {
             Self::Call(func, _) => ExprTy::Call(*func),
             Self::CallIndirect(ty, _, _, _) => ExprTy::CallIndirect(*ty),
         }
+    }
+
+    pub fn has_side_effect(&self) -> bool {
+        self.any(&mut |expr| match expr {
+            Expr::Value(..) | Expr::Index(_) => false,
+            Expr::Intrinsic(_) => true,
+
+            Expr::Nullary(op) => match op {
+                NulOp::Nop => false,
+                NulOp::Unreachable => true,
+
+                NulOp::LocalGet(_) | NulOp::GlobalGet(_) | NulOp::MemorySize(_) => false,
+            },
+
+            Expr::Unary(op, _) => match op {
+                UnOp::I32Clz
+                | UnOp::I32Ctz
+                | UnOp::I32Popcnt
+                | UnOp::I64Clz
+                | UnOp::I64Ctz
+                | UnOp::I64Popcnt
+                | UnOp::F32Abs
+                | UnOp::F32Neg
+                | UnOp::F32Sqrt
+                | UnOp::F32Ceil
+                | UnOp::F32Floor
+                | UnOp::F32Trunc
+                | UnOp::F32Nearest
+                | UnOp::F64Abs
+                | UnOp::F64Neg
+                | UnOp::F64Sqrt
+                | UnOp::F64Ceil
+                | UnOp::F64Floor
+                | UnOp::F64Trunc
+                | UnOp::F64Nearest
+                | UnOp::I32Eqz
+                | UnOp::I64Eqz
+                | UnOp::I32WrapI64
+                | UnOp::I64ExtendI32S
+                | UnOp::I64ExtendI32U
+                | UnOp::I32TruncF32S
+                | UnOp::I32TruncF32U
+                | UnOp::I32TruncF64S
+                | UnOp::I32TruncF64U
+                | UnOp::I64TruncF32S
+                | UnOp::I64TruncF32U
+                | UnOp::I64TruncF64S
+                | UnOp::I64TruncF64U
+                | UnOp::F32DemoteF64
+                | UnOp::F64PromoteF32
+                | UnOp::F32ConvertI32S
+                | UnOp::F32ConvertI32U
+                | UnOp::F32ConvertI64S
+                | UnOp::F32ConvertI64U
+                | UnOp::F64ConvertI32S
+                | UnOp::F64ConvertI32U
+                | UnOp::F64ConvertI64S
+                | UnOp::F64ConvertI64U
+                | UnOp::F32ReinterpretI32
+                | UnOp::F64ReinterpretI64
+                | UnOp::I32ReinterpretF32
+                | UnOp::I64ReinterpretF64
+                | UnOp::I32Extend8S
+                | UnOp::I32Extend16S
+                | UnOp::I64Extend8S
+                | UnOp::I64Extend16S
+                | UnOp::I64Extend32S => false,
+
+                UnOp::LocalSet(_) | UnOp::LocalTee(_) => true,
+                UnOp::GlobalSet(_) => true,
+
+                UnOp::I32Load(_)
+                | UnOp::I64Load(_)
+                | UnOp::F32Load(_)
+                | UnOp::F64Load(_)
+                | UnOp::I32Load8S(_)
+                | UnOp::I32Load8U(_)
+                | UnOp::I32Load16S(_)
+                | UnOp::I32Load16U(_)
+                | UnOp::I64Load8S(_)
+                | UnOp::I64Load8U(_)
+                | UnOp::I64Load16S(_)
+                | UnOp::I64Load16U(_)
+                | UnOp::I64Load32S(_)
+                | UnOp::I64Load32U(_) => false,
+
+                UnOp::MemoryGrow(_) => true,
+                UnOp::Drop => false,
+            },
+
+            Expr::Binary(op, ..) => match op {
+                BinOp::I32DivS
+                | BinOp::I32DivU
+                | BinOp::I32RemS
+                | BinOp::I32RemU
+                | BinOp::I64DivS
+                | BinOp::I64DivU
+                | BinOp::I64RemS
+                | BinOp::I64RemU => true, // conservative
+
+                BinOp::I32Add
+                | BinOp::I32Sub
+                | BinOp::I32Mul
+                | BinOp::I32And
+                | BinOp::I32Or
+                | BinOp::I32Xor
+                | BinOp::I32Shl
+                | BinOp::I32ShrS
+                | BinOp::I32ShrU
+                | BinOp::I32Rotl
+                | BinOp::I32Rotr
+                | BinOp::I64Add
+                | BinOp::I64Sub
+                | BinOp::I64Mul
+                | BinOp::I64And
+                | BinOp::I64Or
+                | BinOp::I64Xor
+                | BinOp::I64Shl
+                | BinOp::I64ShrS
+                | BinOp::I64ShrU
+                | BinOp::I64Rotl
+                | BinOp::I64Rotr
+                | BinOp::F32Add
+                | BinOp::F32Sub
+                | BinOp::F32Mul
+                | BinOp::F32Div
+                | BinOp::F32Min
+                | BinOp::F32Max
+                | BinOp::F32Copysign
+                | BinOp::F64Add
+                | BinOp::F64Sub
+                | BinOp::F64Mul
+                | BinOp::F64Div
+                | BinOp::F64Min
+                | BinOp::F64Max
+                | BinOp::F64Copysign
+                | BinOp::I32Eq
+                | BinOp::I32Ne
+                | BinOp::I32LtS
+                | BinOp::I32LtU
+                | BinOp::I32GtS
+                | BinOp::I32GtU
+                | BinOp::I32LeS
+                | BinOp::I32LeU
+                | BinOp::I32GeS
+                | BinOp::I32GeU
+                | BinOp::I64Eq
+                | BinOp::I64Ne
+                | BinOp::I64LtS
+                | BinOp::I64LtU
+                | BinOp::I64GtS
+                | BinOp::I64GtU
+                | BinOp::I64LeS
+                | BinOp::I64LeU
+                | BinOp::I64GeS
+                | BinOp::I64GeU
+                | BinOp::F32Eq
+                | BinOp::F32Ne
+                | BinOp::F32Lt
+                | BinOp::F32Gt
+                | BinOp::F32Le
+                | BinOp::F32Ge
+                | BinOp::F64Eq
+                | BinOp::F64Ne
+                | BinOp::F64Lt
+                | BinOp::F64Gt
+                | BinOp::F64Le
+                | BinOp::F64Ge => false,
+
+                BinOp::I32Store(_)
+                | BinOp::I64Store(_)
+                | BinOp::F32Store(_)
+                | BinOp::F64Store(_)
+                | BinOp::I32Store8(_)
+                | BinOp::I32Store16(_)
+                | BinOp::I64Store8(_)
+                | BinOp::I64Store16(_)
+                | BinOp::I64Store32(_) => true,
+            },
+
+            Expr::Ternary(op, ..) => match op {
+                TernOp::Select => false,
+            },
+
+            Expr::Block(..) => false,
+            Expr::Loop(..) => true,
+            Expr::If(..) => false,
+            Expr::Br(..) | Expr::BrIf(..) | Expr::BrTable(..) | Expr::Return(..) => true,
+            Expr::Call(..) | Expr::CallIndirect(..) => true, // conservative
+        })
+    }
+
+    pub fn branches_to(&self, block_id: BlockId) -> bool {
+        self.any(&mut |expr| match expr {
+            Expr::Br(br_block_id, _) | Expr::BrIf(br_block_id, ..) => block_id == *br_block_id,
+
+            Expr::BrTable(br_block_ids, default_br_block_id, ..) => {
+                *default_br_block_id == block_id || br_block_ids.contains(&block_id)
+            }
+
+            _ => false,
+        })
     }
 }
 
