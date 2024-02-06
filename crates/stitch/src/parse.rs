@@ -779,7 +779,7 @@ impl Parser {
                 let rhs = Box::new(self.pop_expr());
                 let lhs = Box::new(self.pop_expr());
 
-                Expr::Binary(op, lhs, rhs)
+                Expr::Binary(op, [lhs, rhs])
             }
 
             fn tern_expr(&mut self, op: TernOp) -> Expr {
@@ -787,7 +787,7 @@ impl Parser {
                 let e1 = Box::new(self.pop_expr());
                 let e0 = Box::new(self.pop_expr());
 
-                Expr::Ternary(op, e0, e1, e2)
+                Expr::Ternary(op, [e0, e1, e2])
             }
 
             fn push_block(&mut self, expr: Expr, block: Block) {

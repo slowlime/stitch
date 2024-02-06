@@ -578,7 +578,7 @@ impl<'a> BodyEncoder<'a, '_> {
                 },
             ),
 
-            Expr::Binary(op, lhs, rhs) => self.binary(
+            Expr::Binary(op, [lhs, rhs]) => self.binary(
                 lhs,
                 rhs,
                 match *op {
@@ -698,7 +698,7 @@ impl<'a> BodyEncoder<'a, '_> {
                 },
             ),
 
-            Expr::Ternary(TernOp::Select, first, second, condition) => {
+            Expr::Ternary(TernOp::Select, [first, second, condition]) => {
                 self.ternary(first, second, condition, Instruction::Select)
             }
 

@@ -452,8 +452,8 @@ pub enum Expr {
 
     Nullary(NulOp),
     Unary(UnOp, Box<Expr>),
-    Binary(BinOp, Box<Expr>, Box<Expr>),
-    Ternary(TernOp, Box<Expr>, Box<Expr>, Box<Expr>),
+    Binary(BinOp, [Box<Expr>; 2]),
+    Ternary(TernOp, [Box<Expr>; 3]),
 
     Block(BlockType, Block),
     Loop(BlockType, Block),
@@ -588,16 +588,15 @@ impl Expr {
                 }
 
                 Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(visit(v, ctx, inner))),
-                Expr::Binary(op, lhs, rhs) => Expr::Binary(
+                Expr::Binary(op, [lhs, rhs]) => Expr::Binary(
                     *op,
-                    Box::new(visit(v, ctx, lhs)),
-                    Box::new(visit(v, ctx, rhs)),
+                    [Box::new(visit(v, ctx, lhs)), Box::new(visit(v, ctx, rhs))],
                 ),
-                Expr::Ternary(op, first, second, third) => Expr::Ternary(
+                Expr::Ternary(op, [first, second, third]) => Expr::Ternary(
                     *op,
-                    Box::new(visit(v, ctx, first)),
+                    [Box::new(visit(v, ctx, first)),
                     Box::new(visit(v, ctx, second)),
-                    Box::new(visit(v, ctx, third)),
+                    Box::new(visit(v, ctx, third))],
                 ),
 
                 Expr::Block(block_ty, block) => {
@@ -659,8 +658,8 @@ impl Expr {
         (match self {
             Expr::Value(_, _) | Expr::Intrinsic(_) | Expr::Index(_) | Expr::Nullary(_) => true,
             Expr::Unary(_, inner) => inner.all(predicate),
-            Expr::Binary(_, lhs, rhs) => lhs.all(predicate) && rhs.all(predicate),
-            Expr::Ternary(_, first, second, third) => {
+            Expr::Binary(_, [lhs, rhs]) => lhs.all(predicate) && rhs.all(predicate),
+            Expr::Ternary(_, [first, second, third]) => {
                 first.all(predicate) && second.all(predicate) && third.all(predicate)
             }
             Expr::Block(_, block) | Expr::Loop(_, block) => block.body.iter().all(&mut *predicate),
@@ -837,7 +836,7 @@ impl Expr {
 
     pub fn to_store(&self) -> Option<(MemArg, &Expr, &Expr, Store)> {
         match self {
-            Self::Binary(op, addr, value) => {
+            Self::Binary(op, [addr, value]) => {
                 let (mem_arg, store) = match *op {
                     BinOp::I32Store(mem_arg) => (mem_arg, Store::I32 { dst_size: 4 }),
                     BinOp::I64Store(mem_arg) => (mem_arg, Store::I64 { dst_size: 8 }),
@@ -876,7 +875,6 @@ impl Expr {
                 | BinOp::I64Store8(_)
                 | BinOp::I64Store16(_)
                 | BinOp::I64Store32(_),
-                _,
                 _,
             ) => ReturnValueCount::Zero,
 
@@ -962,7 +960,6 @@ impl Expr {
                 | BinOp::I32Rotl
                 | BinOp::I32Rotr,
                 _,
-                _,
             ) => ValType::I32.into(),
 
             Self::Binary(
@@ -982,7 +979,6 @@ impl Expr {
                 | BinOp::I64Rotl
                 | BinOp::I64Rotr,
                 _,
-                _,
             ) => ValType::I64.into(),
 
             Self::Binary(
@@ -994,7 +990,6 @@ impl Expr {
                 | BinOp::F32Max
                 | BinOp::F32Copysign,
                 _,
-                _,
             ) => ValType::F32.into(),
 
             Self::Binary(
@@ -1005,7 +1000,6 @@ impl Expr {
                 | BinOp::F64Min
                 | BinOp::F64Max
                 | BinOp::F64Copysign,
-                _,
                 _,
             ) => ValType::F64.into(),
 
@@ -1024,7 +1018,6 @@ impl Expr {
                 | BinOp::I32GeS
                 | BinOp::I32GeU,
                 _,
-                _,
             ) => ValType::I32.into(),
 
             Self::Binary(
@@ -1039,7 +1032,6 @@ impl Expr {
                 | BinOp::I64GeS
                 | BinOp::I64GeU,
                 _,
-                _,
             ) => ValType::I64.into(),
 
             Self::Binary(
@@ -1050,7 +1042,6 @@ impl Expr {
                 | BinOp::F32Le
                 | BinOp::F32Ge,
                 _,
-                _,
             ) => ValType::F32.into(),
 
             Self::Binary(
@@ -1060,7 +1051,6 @@ impl Expr {
                 | BinOp::F64Gt
                 | BinOp::F64Le
                 | BinOp::F64Ge,
-                _,
                 _,
             ) => ValType::F64.into(),
 
@@ -1107,7 +1097,7 @@ impl Expr {
             }
 
             Self::Unary(UnOp::Drop, _) => ExprTy::Empty,
-            Self::Ternary(TernOp::Select, lhs, _, _) => lhs.ty(),
+            Self::Ternary(TernOp::Select, [lhs, _, _]) => lhs.ty(),
 
             Self::Nullary(NulOp::LocalGet(local))
             | Self::Unary(UnOp::LocalSet(local) | UnOp::LocalTee(local), _) => {
@@ -1126,7 +1116,6 @@ impl Expr {
             Self::Binary(
                 BinOp::I32Store(_) | BinOp::I64Store(_) | BinOp::F32Store(_) | BinOp::F64Store(_),
                 _,
-                _,
             ) => ExprTy::Empty,
 
             Self::Unary(
@@ -1144,11 +1133,10 @@ impl Expr {
                 _,
             ) => ValType::I64.into(),
 
-            Self::Binary(BinOp::I32Store8(_) | BinOp::I32Store16(_), _, _) => ValType::I32.into(),
+            Self::Binary(BinOp::I32Store8(_) | BinOp::I32Store16(_), _) => ValType::I32.into(),
 
             Self::Binary(
                 BinOp::I64Store8(_) | BinOp::I64Store16(_) | BinOp::I64Store32(_),
-                _,
                 _,
             ) => ValType::I64.into(),
 

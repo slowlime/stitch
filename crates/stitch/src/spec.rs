@@ -243,16 +243,16 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 expr.clone()
             }
             Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(self.expr(ctx, inner))),
-            Expr::Binary(op, lhs, rhs) => Expr::Binary(
+            Expr::Binary(op, [lhs, rhs]) => Expr::Binary(
                 *op,
-                Box::new(self.expr(ctx, lhs)),
-                Box::new(self.expr(ctx, rhs)),
+                [Box::new(self.expr(ctx, lhs)),
+                Box::new(self.expr(ctx, rhs))],
             ),
-            Expr::Ternary(op, first, second, third) => Expr::Ternary(
+            Expr::Ternary(op, [first, second, third]) => Expr::Ternary(
                 *op,
-                Box::new(self.expr(ctx, first)),
+                [Box::new(self.expr(ctx, first)),
                 Box::new(self.expr(ctx, second)),
-                Box::new(self.expr(ctx, third)),
+                Box::new(self.expr(ctx, third))],
             ),
 
             Expr::Block(block_ty, exprs) => Expr::Block(block_ty.clone(), self.block(ctx, exprs)),
@@ -617,7 +617,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 Expr::Value(result, attr)
             }
 
-            Expr::Binary(op, ref lhs, ref rhs) => {
+            Expr::Binary(op, [ref lhs, ref rhs]) => {
                 let (&Expr::Value(lhs, lhs_attr), &Expr::Value(rhs, rhs_attr)) = (&**lhs, &**rhs)
                 else {
                     return expr;
@@ -821,10 +821,10 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 Expr::Value(result, attr)
             }
 
-            Expr::Ternary(TernOp::Select, first, second, condition) => match condition.to_i32() {
+            Expr::Ternary(TernOp::Select, [first, second, condition]) => match condition.to_i32() {
                 Some(0) => *second,
                 Some(_) => *first,
-                _ => Expr::Ternary(TernOp::Select, first, second, condition),
+                _ => Expr::Ternary(TernOp::Select, [first, second, condition]),
             },
 
             Expr::Block(_, block) | Expr::Loop(_, block) if block.body.is_empty() => {
