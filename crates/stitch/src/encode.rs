@@ -7,9 +7,9 @@ use wasm_encoder::{
     GlobalSection, ImportSection, MemorySection, StartSection, TableSection, TypeSection,
 };
 
-use crate::ir::expr::{BinOp, Block, Id, MemArg, NulOp, TernOp, UnOp, Value};
-use crate::ir::ty::{BlockType, ElemType, GlobalType, MemoryType, TableType, Type, ValType};
-use crate::ir::{
+use crate::ast::expr::{BinOp, Block, Id, MemArg, NulOp, TernOp, UnOp, Value};
+use crate::ast::ty::{BlockType, ElemType, GlobalType, MemoryType, TableType, Type, ValType};
+use crate::ast::{
     self, BlockId, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId, ImportDesc,
     ImportId, LocalId, MemoryDef, MemoryId, Module, TableDef, TableId, TypeId,
 };
@@ -64,7 +64,7 @@ impl<'a> Encoder<'a> {
             self.types.insert(ty_id).unwrap();
 
             match ty {
-                ir::ty::Type::Func(ty) => {
+                ast::ty::Type::Func(ty) => {
                     let params = ty.params.iter().map(|val_ty| self.convert_val_type(val_ty));
                     let ret = ty.ret.iter().map(|val_ty| self.convert_val_type(val_ty));
 

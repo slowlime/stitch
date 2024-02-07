@@ -4,12 +4,12 @@ use std::mem;
 use log::{trace, warn};
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
-use crate::ir::expr::{
+use crate::ast::expr::{
     BinOp, Block, Intrinsic, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs,
     VisitContext, F32, F64,
 };
-use crate::ir::ty::Type;
-use crate::ir::{
+use crate::ast::ty::Type;
+use crate::ast::{
     BlockId, Export, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, LocalId, MemError,
     MemoryId, Module, TableDef, TableId,
 };

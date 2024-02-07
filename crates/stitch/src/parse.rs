@@ -8,10 +8,10 @@ use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
-use crate::ir::expr::{
+use crate::ast::expr::{
     BinOp, ExprTy, Intrinsic, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64,
 };
-use crate::ir::{
+use crate::ast::{
     self, BlockId, ExportId, FuncId, GlobalId, ImportId, IntrinsicDecl, LocalId, MemoryId, TableId,
     TypeId,
 };
@@ -48,7 +48,7 @@ pub enum ParseError {
 
     #[error("{kind} import ({module}/{name}) is not supported")]
     UnsupportedImport {
-        kind: ir::ImportKind,
+        kind: ast::ImportKind,
         module: String,
         name: String,
     },
@@ -74,61 +74,61 @@ pub enum ParseError {
     },
 }
 
-fn make_val_type(val_ty: wasmparser::ValType) -> ir::ty::ValType {
+fn make_val_type(val_ty: wasmparser::ValType) -> ast::ty::ValType {
     match val_ty {
-        wasmparser::ValType::I32 => ir::ty::ValType::I32,
-        wasmparser::ValType::I64 => ir::ty::ValType::I64,
-        wasmparser::ValType::F32 => ir::ty::ValType::F32,
-        wasmparser::ValType::F64 => ir::ty::ValType::F64,
+        wasmparser::ValType::I32 => ast::ty::ValType::I32,
+        wasmparser::ValType::I64 => ast::ty::ValType::I64,
+        wasmparser::ValType::F32 => ast::ty::ValType::F32,
+        wasmparser::ValType::F64 => ast::ty::ValType::F64,
         wasmparser::ValType::V128 | wasmparser::ValType::Ref(_) => {
             unreachable!("unsupported types")
         }
     }
 }
 
-fn make_elem_type(ref_ty: wasmparser::RefType) -> ir::ty::ElemType {
+fn make_elem_type(ref_ty: wasmparser::RefType) -> ast::ty::ElemType {
     assert!(
         ref_ty.is_func_ref(),
         "unsupported table element type {ref_ty}"
     );
 
-    ir::ty::ElemType::FuncType
+    ast::ty::ElemType::FuncType
 }
 
-fn make_table_type(table_ty: wasmparser::TableType) -> ir::ty::TableType {
+fn make_table_type(table_ty: wasmparser::TableType) -> ast::ty::TableType {
     let elem_ty = make_elem_type(table_ty.element_type);
 
-    ir::ty::TableType {
+    ast::ty::TableType {
         elem_ty,
-        limits: ir::ty::Limits {
+        limits: ast::ty::Limits {
             min: table_ty.initial,
             max: table_ty.maximum,
         },
     }
 }
 
-fn make_mem_type(mem_ty: wasmparser::MemoryType) -> ir::ty::MemoryType {
+fn make_mem_type(mem_ty: wasmparser::MemoryType) -> ast::ty::MemoryType {
     assert!(!mem_ty.memory64, "unsupported memory type {mem_ty:?}");
 
-    ir::ty::MemoryType {
-        limits: ir::ty::Limits {
+    ast::ty::MemoryType {
+        limits: ast::ty::Limits {
             min: mem_ty.initial as _,
             max: mem_ty.maximum.map(|max| max as _),
         },
     }
 }
 
-fn make_global_type(global_ty: wasmparser::GlobalType) -> ir::ty::GlobalType {
-    ir::ty::GlobalType {
+fn make_global_type(global_ty: wasmparser::GlobalType) -> ast::ty::GlobalType {
+    ast::ty::GlobalType {
         val_type: make_val_type(global_ty.content_type),
         mutable: global_ty.mutable,
     }
 }
 
-fn make_block_type(block_ty: wasmparser::BlockType) -> ir::ty::BlockType {
+fn make_block_type(block_ty: wasmparser::BlockType) -> ast::ty::BlockType {
     match block_ty {
-        wasmparser::BlockType::Empty => ir::ty::BlockType::Empty,
-        wasmparser::BlockType::Type(ty) => ir::ty::BlockType::Result(make_val_type(ty)),
+        wasmparser::BlockType::Empty => ast::ty::BlockType::Empty,
+        wasmparser::BlockType::Type(ty) => ast::ty::BlockType::Result(make_val_type(ty)),
         _ => unreachable!("func block types are not supported"),
     }
 }
@@ -143,7 +143,7 @@ struct ImportCount {
 
 #[derive(Debug, Default)]
 struct Parser {
-    module: ir::Module,
+    module: ast::Module,
     types: Vec<TypeId>,
     funcs: Vec<FuncId>,
     tables: Vec<TableId>,
@@ -157,7 +157,7 @@ struct Parser {
 pub type Result<T, E = ParseError> = ::std::result::Result<T, E>;
 
 impl Parser {
-    fn add_ty(&mut self, ty: ir::ty::Type) -> TypeId {
+    fn add_ty(&mut self, ty: ast::ty::Type) -> TypeId {
         trace!("ty {}: {ty:?}", self.types.len());
         let id = self.module.types.insert(ty);
         self.types.push(id);
@@ -165,59 +165,59 @@ impl Parser {
         id
     }
 
-    fn add_func(&mut self, func: ir::Func) -> FuncId {
+    fn add_func(&mut self, func: ast::Func) -> FuncId {
         let id = self.module.funcs.insert(func);
         self.funcs.push(id);
 
         id
     }
 
-    fn add_table(&mut self, table: ir::Table) -> TableId {
+    fn add_table(&mut self, table: ast::Table) -> TableId {
         let id = self.module.tables.insert(table);
         self.tables.push(id);
 
         id
     }
 
-    fn add_mem(&mut self, mem: ir::Memory) -> MemoryId {
+    fn add_mem(&mut self, mem: ast::Memory) -> MemoryId {
         let id = self.module.mems.insert(mem);
         self.mems.push(id);
 
         id
     }
 
-    fn add_global(&mut self, global: ir::Global) -> GlobalId {
+    fn add_global(&mut self, global: ast::Global) -> GlobalId {
         let id = self.module.globals.insert(global);
         self.globals.push(id);
 
         id
     }
 
-    fn add_import(&mut self, import: ir::Import) -> Result<ImportId> {
+    fn add_import(&mut self, import: ast::Import) -> Result<ImportId> {
         let id = self.module.imports.insert(import);
         self.imports.push(id);
 
         let import = &self.module.imports[id];
 
         match import.desc.kind() {
-            ir::ImportKind::Func => self.import_count.funcs += 1,
-            ir::ImportKind::Table => self.import_count.tables += 1,
-            ir::ImportKind::Memory => self.import_count.mems += 1,
-            ir::ImportKind::Global => self.import_count.globals += 1,
+            ast::ImportKind::Func => self.import_count.funcs += 1,
+            ast::ImportKind::Table => self.import_count.tables += 1,
+            ast::ImportKind::Memory => self.import_count.mems += 1,
+            ast::ImportKind::Global => self.import_count.globals += 1,
         }
 
         match &import.desc {
-            ir::ImportDesc::Func(ty_idx) => {
-                self.add_func(ir::Func::Import(ir::func::FuncImport {
+            ast::ImportDesc::Func(ty_idx) => {
+                self.add_func(ast::Func::Import(ast::func::FuncImport {
                     ty: self.module.types[*ty_idx].as_func().clone(),
                     import_id: id,
                 }));
             }
 
-            ir::ImportDesc::Global(global_ty) => {
-                self.add_global(ir::Global {
+            ast::ImportDesc::Global(global_ty) => {
+                self.add_global(ast::Global {
                     ty: global_ty.clone(),
-                    def: ir::GlobalDef::Import(id),
+                    def: ast::GlobalDef::Import(id),
                 });
             }
 
@@ -233,11 +233,11 @@ impl Parser {
         Ok(id)
     }
 
-    fn add_export(&mut self, export: ir::Export) -> ExportId {
+    fn add_export(&mut self, export: ast::Export) -> ExportId {
         self.module.exports.insert(export)
     }
 
-    fn parse(mut self, bytes: &[u8]) -> Result<ir::Module> {
+    fn parse(mut self, bytes: &[u8]) -> Result<ast::Module> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = wasmparser::Validator::new_with_features(FEATURES);
         let mut code_section_entries: usize = 0;
@@ -348,7 +348,7 @@ impl Parser {
                     .map(make_val_type)
                     .collect();
                 let ret = func_ty.results().get(0).copied().map(make_val_type);
-                let ty = ir::ty::Type::Func(ir::ty::FuncType { params, ret });
+                let ty = ast::ty::Type::Func(ast::ty::FuncType { params, ret });
                 self.add_ty(ty);
             }
         }
@@ -360,21 +360,21 @@ impl Parser {
         for import in reader {
             let wasmparser::Import { module, name, ty } = import?;
 
-            self.add_import(ir::Import {
+            self.add_import(ast::Import {
                 module: module.to_owned(),
                 name: name.to_owned(),
                 desc: match ty {
                     wasmparser::TypeRef::Func(idx) => {
-                        ir::ImportDesc::Func(self.types[idx as usize])
+                        ast::ImportDesc::Func(self.types[idx as usize])
                     }
                     wasmparser::TypeRef::Table(table_ty) => {
-                        ir::ImportDesc::Table(make_table_type(table_ty))
+                        ast::ImportDesc::Table(make_table_type(table_ty))
                     }
                     wasmparser::TypeRef::Memory(mem_ty) => {
-                        ir::ImportDesc::Memory(make_mem_type(mem_ty))
+                        ast::ImportDesc::Memory(make_mem_type(mem_ty))
                     }
                     wasmparser::TypeRef::Global(global_ty) => {
-                        ir::ImportDesc::Global(make_global_type(global_ty))
+                        ast::ImportDesc::Global(make_global_type(global_ty))
                     }
                     wasmparser::TypeRef::Tag(_) => unreachable!("unsupported type {ty:?}"),
                 },
@@ -393,14 +393,14 @@ impl Parser {
                 .clone();
             trace!("func {idx}: ({func_ty_idx}) {ty:?}");
             idx += 1;
-            let mut body = ir::FuncBody::new(ty);
+            let mut body = ast::FuncBody::new(ty);
 
             for param_ty in &body.ty.params {
                 let local_id = body.locals.insert(param_ty.clone());
                 body.params.push(local_id);
             }
 
-            self.add_func(ir::Func::Body(body));
+            self.add_func(ast::Func::Body(body));
         }
 
         Ok(())
@@ -412,7 +412,7 @@ impl Parser {
             let table_ty = make_table_type(table.ty);
             assert!(matches!(table.init, wasmparser::TableInit::RefNull));
 
-            self.add_table(ir::Table::new(table_ty));
+            self.add_table(ast::Table::new(table_ty));
         }
 
         Ok(())
@@ -423,9 +423,9 @@ impl Parser {
             let ty = make_mem_type(memory_type?);
             let pages = ty.limits.min as usize;
 
-            self.add_mem(ir::Memory {
+            self.add_mem(ast::Memory {
                 ty,
-                def: ir::MemoryDef::Bytes(vec![0; pages * PAGE_SIZE]),
+                def: ast::MemoryDef::Bytes(vec![0; pages * PAGE_SIZE]),
             });
         }
 
@@ -446,9 +446,9 @@ impl Parser {
                 .body
                 .try_into()
                 .unwrap();
-            let def = ir::GlobalDef::Value(expr);
+            let def = ast::GlobalDef::Value(expr);
 
-            self.add_global(ir::Global { ty, def });
+            self.add_global(ast::Global { ty, def });
         }
 
         Ok(())
@@ -460,14 +460,14 @@ impl Parser {
             let idx = export.index as usize;
 
             let def = match export.kind {
-                ExternalKind::Func => ir::ExportDef::Func(self.funcs[idx]),
-                ExternalKind::Table => ir::ExportDef::Table(self.tables[idx]),
-                ExternalKind::Memory => ir::ExportDef::Memory(self.mems[idx]),
-                ExternalKind::Global => ir::ExportDef::Global(self.globals[idx]),
+                ExternalKind::Func => ast::ExportDef::Func(self.funcs[idx]),
+                ExternalKind::Table => ast::ExportDef::Table(self.tables[idx]),
+                ExternalKind::Memory => ast::ExportDef::Memory(self.mems[idx]),
+                ExternalKind::Global => ast::ExportDef::Global(self.globals[idx]),
                 _ => unreachable!(),
             };
 
-            self.add_export(ir::Export {
+            self.add_export(ast::Export {
                 name: export.name.to_owned(),
                 def,
             });
@@ -510,7 +510,7 @@ impl Parser {
 
             let table = &mut self.module.tables[self.tables[table_idx as usize]];
             let elems = match table.def {
-                ir::TableDef::Elems(ref mut elems) => elems,
+                ast::TableDef::Elems(ref mut elems) => elems,
                 _ => unreachable!("table imports are not supported"),
             };
 
@@ -563,7 +563,7 @@ impl Parser {
             let offset = offset.to_u32().expect("data segment offset must be an i32") as usize;
             let range = offset..(data.data.len() + offset as usize);
 
-            let ir::MemoryDef::Bytes(ref mut bytes) = self.module.mems[self.mems[mem_idx]].def
+            let ast::MemoryDef::Bytes(ref mut bytes) = self.module.mems[self.mems[mem_idx]].def
             else {
                 unreachable!("memory imports are not supported");
             };
@@ -625,8 +625,8 @@ impl Parser {
         blocks: &mut SlotMap<BlockId, ()>,
         has_return: bool,
         reader: wasmparser::OperatorsReader<'_>,
-    ) -> Result<ir::expr::Block> {
-        use ir::Expr;
+    ) -> Result<ast::expr::Block> {
+        use ast::Expr;
 
         #[derive(Debug)]
         struct Block {
@@ -664,7 +664,7 @@ impl Parser {
             body: Option<Vec<Expr>>,
         }
 
-        fn exprs(blocks: &mut Vec<Block>) -> &mut Vec<ir::Expr> {
+        fn exprs(blocks: &mut Vec<Block>) -> &mut Vec<ast::Expr> {
             &mut blocks.last_mut().unwrap().exprs
         }
 
@@ -673,7 +673,7 @@ impl Parser {
                 self.func.unwrap().0[idx as usize]
             }
 
-            fn push_expr(&mut self, expr: ir::Expr) {
+            fn push_expr(&mut self, expr: ast::Expr) {
                 exprs(&mut self.block_stack).push(expr);
             }
 
@@ -693,20 +693,20 @@ impl Parser {
                 self.block_stack[self.block_stack.len() - relative_depth as usize - 1].block_id
             }
 
-            fn pop_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
+            fn pop_br_expr(&mut self, relative_depth: u32) -> Option<Box<ast::Expr>> {
                 self.block_stack[self.block_stack.len() - relative_depth as usize - 1]
                     .br_captures_expr
                     .then(|| Box::new(self.pop_expr()))
             }
 
-            fn capture_br_expr(&mut self, relative_depth: u32) -> Option<Box<ir::Expr>> {
+            fn capture_br_expr(&mut self, relative_depth: u32) -> Option<Box<ast::Expr>> {
                 let expr = self.pop_br_expr(relative_depth);
                 self.drop_all();
 
                 expr
             }
 
-            fn maybe_pop_expr(&mut self) -> Option<ir::Expr> {
+            fn maybe_pop_expr(&mut self) -> Option<ast::Expr> {
                 let start_idx = exprs(&mut self.block_stack)
                     .iter()
                     .enumerate()
@@ -757,8 +757,8 @@ impl Parser {
                     let block_id = self.blocks.insert(());
 
                     Some(Expr::Block(
-                        ir::ty::BlockType::Result(ty),
-                        ir::expr::Block {
+                        ast::ty::BlockType::Result(ty),
+                        ast::expr::Block {
                             body: exprs(&mut self.block_stack).split_off(start_idx),
                             id: block_id,
                         },
@@ -885,7 +885,7 @@ impl Parser {
                     ctx.push_block(
                         Expr::Block(
                             ty,
-                            ir::expr::Block {
+                            ast::expr::Block {
                                 body: vec![],
                                 id: block_id,
                             },
@@ -906,7 +906,7 @@ impl Parser {
                     ctx.push_block(
                         Expr::Loop(
                             ty,
-                            ir::expr::Block {
+                            ast::expr::Block {
                                 body: vec![],
                                 id: block_id,
                             },
@@ -927,11 +927,11 @@ impl Parser {
                         Expr::If(
                             ty,
                             condition,
-                            ir::expr::Block {
+                            ast::expr::Block {
                                 body: vec![],
                                 id: then_block_id,
                             },
-                            ir::expr::Block {
+                            ast::expr::Block {
                                 body: vec![],
                                 id: else_block_id,
                             },
@@ -1373,14 +1373,14 @@ impl Parser {
 
         assert!(ctx.block_stack.is_empty());
 
-        Ok(ir::expr::Block {
+        Ok(ast::expr::Block {
             body: ctx.body.unwrap(),
             id: root_block_id,
         })
     }
 
-    fn make_mem_arg(&self, mem_arg: wasmparser::MemArg) -> ir::expr::MemArg {
-        ir::expr::MemArg {
+    fn make_mem_arg(&self, mem_arg: wasmparser::MemArg) -> ast::expr::MemArg {
+        ast::expr::MemArg {
             mem_id: self.mems[mem_arg.memory as usize],
             offset: mem_arg.offset as u32,
             align: mem_arg.align as u32,
@@ -1388,6 +1388,6 @@ impl Parser {
     }
 }
 
-pub fn parse(bytes: &[u8]) -> Result<ir::Module> {
+pub fn parse(bytes: &[u8]) -> Result<ast::Module> {
     Parser::default().parse(bytes)
 }

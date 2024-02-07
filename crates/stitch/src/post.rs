@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use log::warn;
 
-use crate::ir::expr::{make_visitor, Id, NulOp, UnOp};
-use crate::ir::ty::Type;
-use crate::ir::{Expr, FuncId, GlobalDef, GlobalId, Module, TableDef};
+use crate::ast::expr::{make_visitor, Id, NulOp, UnOp};
+use crate::ast::ty::Type;
+use crate::ast::{Expr, FuncId, GlobalDef, GlobalId, Module, TableDef};
 
 pub struct PostProc<'a> {
     module: &'a mut Module,
