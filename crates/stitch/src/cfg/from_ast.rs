@@ -18,7 +18,7 @@ use crate::util::try_match;
 use super::ExprTy;
 use super::{BinOp, Block, BlockId, FuncBody, LocalId, NulOp, Terminator, TernOp, UnOp};
 
-impl super::FuncBody {
+impl FuncBody {
     pub fn from_ast(module: &Module, func: &AstFunc) -> Self {
         let translator = Translator {
             module,
@@ -76,8 +76,8 @@ impl Translator<'_> {
         }
 
         self.translate_block(&self.ast.main_block, None);
-        // TODO: self.func.remove_unreachable_blocks();
-        // TODO: self.func.merge_blocks();
+        self.func.remove_unreachable_blocks();
+        self.func.merge_blocks();
 
         self.func
     }
@@ -505,9 +505,7 @@ impl Translator<'_> {
                         iter::repeat_with(|| self.func.blocks.insert(Default::default()))
                             .take(block_ids.len() + 1)
                             .collect();
-                    let (&default_block_id, block_ids) = trampolines.split_last().unwrap();
-                    self.current_block_mut().term =
-                        Terminator::Switch(index, block_ids.to_owned(), default_block_id);
+                    self.current_block_mut().term = Terminator::Switch(index, trampolines.clone());
 
                     for (&trampoline_block_id, target_block_id) in
                         trampolines.iter().zip(all_block_ids())
@@ -518,11 +516,9 @@ impl Translator<'_> {
                 } else {
                     self.current_block_mut().term = Terminator::Switch(
                         index,
-                        block_ids
-                            .iter()
-                            .map(|&block_id| self.block_map[block_id].block().unwrap())
+                        all_block_ids()
+                            .map(|block_id| self.block_map[block_id].block().unwrap())
                             .collect(),
-                        self.block_map[*default_block_id].block().unwrap(),
                     );
                 }
 

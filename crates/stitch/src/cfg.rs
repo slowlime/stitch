@@ -1,5 +1,10 @@
 mod from_ast;
 mod to_ast;
+mod merge_blocks;
+mod predecessors;
+mod remove_unreachable_blocks;
+
+use std::slice;
 
 use slotmap::{new_key_type, SlotMap};
 
@@ -554,14 +559,32 @@ pub enum Terminator {
     Trap,
     Br(BlockId),
     If(Expr, [BlockId; 2]),
-    Switch(Expr, Vec<BlockId>, BlockId),
+    Switch(Expr, Vec<BlockId>),
     Return(Option<Expr>),
+}
+
+impl Terminator {
+    pub fn successors(&self) -> &[BlockId] {
+        match self {
+            Self::Trap => &[],
+            Self::Br(block_id) => slice::from_ref(block_id),
+            Self::If(_, successors) => successors,
+            Self::Switch(_, successors) => successors,
+            Self::Return(_) => &[],
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Block {
     pub body: Vec<Stmt>,
     pub term: Terminator,
+}
+
+impl Block {
+    pub fn successors(&self) -> &[BlockId] {
+        self.term.successors()
+    }
 }
 
 #[derive(Debug, Clone)]
