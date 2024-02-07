@@ -16,6 +16,7 @@ impl FuncBody {
             }
         }
 
-        self.blocks.retain(|block_id, _| reachable.contains_key(block_id));
+        self.blocks
+            .retain(|block_id, _| reachable.contains_key(block_id));
     }
 }

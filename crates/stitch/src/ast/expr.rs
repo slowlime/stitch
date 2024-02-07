@@ -594,9 +594,11 @@ impl Expr {
                 ),
                 Expr::Ternary(op, [first, second, third]) => Expr::Ternary(
                     *op,
-                    [Box::new(visit(v, ctx, first)),
-                    Box::new(visit(v, ctx, second)),
-                    Box::new(visit(v, ctx, third))],
+                    [
+                        Box::new(visit(v, ctx, first)),
+                        Box::new(visit(v, ctx, second)),
+                        Box::new(visit(v, ctx, third)),
+                    ],
                 ),
 
                 Expr::Block(block_ty, block) => {
@@ -1135,10 +1137,9 @@ impl Expr {
 
             Self::Binary(BinOp::I32Store8(_) | BinOp::I32Store16(_), _) => ValType::I32.into(),
 
-            Self::Binary(
-                BinOp::I64Store8(_) | BinOp::I64Store16(_) | BinOp::I64Store32(_),
-                _,
-            ) => ValType::I64.into(),
+            Self::Binary(BinOp::I64Store8(_) | BinOp::I64Store16(_) | BinOp::I64Store32(_), _) => {
+                ValType::I64.into()
+            }
 
             Self::Nullary(NulOp::MemorySize(_)) | Self::Unary(UnOp::MemoryGrow(_), _) => {
                 ValType::I32.into()

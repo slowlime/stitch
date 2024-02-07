@@ -1,8 +1,10 @@
+mod dom_tree;
 mod from_ast;
-mod to_ast;
 mod merge_blocks;
 mod predecessors;
 mod remove_unreachable_blocks;
+mod rpo;
+mod to_ast;
 
 use std::slice;
 
@@ -11,6 +13,10 @@ use slotmap::{new_key_type, SlotMap};
 use crate::ast::expr::{Id, Intrinsic, MemArg, Value, ValueAttrs};
 use crate::ast::ty::{FuncType, ValType};
 use crate::ast::{FuncId, GlobalId, MemoryId, TableId, TypeId};
+
+pub use self::dom_tree::DomTree;
+pub use self::predecessors::Predecessors;
+pub use self::rpo::Rpo;
 
 new_key_type! {
     pub struct LocalId;
@@ -356,13 +362,9 @@ impl Expr {
             },
 
             Self::Unary(op, _) => match *op {
-                UnOp::I32Clz
-                | UnOp::I32Ctz
-                | UnOp::I32Popcnt => ValType::I32.into(),
+                UnOp::I32Clz | UnOp::I32Ctz | UnOp::I32Popcnt => ValType::I32.into(),
 
-                UnOp::I64Clz
-                | UnOp::I64Ctz
-                | UnOp::I64Popcnt => ValType::I64.into(),
+                UnOp::I64Clz | UnOp::I64Ctz | UnOp::I64Popcnt => ValType::I64.into(),
 
                 UnOp::F32Abs
                 | UnOp::F32Neg
@@ -380,12 +382,10 @@ impl Expr {
                 | UnOp::F64Trunc
                 | UnOp::F64Nearest => ValType::F64.into(),
 
-                UnOp::I32Eqz
-                | UnOp::I64Eqz => ValType::I32.into(),
+                UnOp::I32Eqz | UnOp::I64Eqz => ValType::I32.into(),
 
                 UnOp::I32WrapI64 => ValType::I32.into(),
-                UnOp::I64ExtendI32S
-                | UnOp::I64ExtendI32U => ValType::I64.into(),
+                UnOp::I64ExtendI32S | UnOp::I64ExtendI32U => ValType::I64.into(),
 
                 UnOp::I32TruncF32S
                 | UnOp::I32TruncF32U
@@ -415,12 +415,9 @@ impl Expr {
                 UnOp::I32ReinterpretF32 => ValType::I32.into(),
                 UnOp::I64ReinterpretF64 => ValType::I64.into(),
 
-                UnOp::I32Extend8S
-                | UnOp::I32Extend16S => ValType::I32.into(),
+                UnOp::I32Extend8S | UnOp::I32Extend16S => ValType::I32.into(),
 
-                UnOp::I64Extend8S
-                | UnOp::I64Extend16S
-                | UnOp::I64Extend32S => ValType::I64.into(),
+                UnOp::I64Extend8S | UnOp::I64Extend16S | UnOp::I64Extend32S => ValType::I64.into(),
 
                 UnOp::LocalTee(local_id) => ExprTy::Local(local_id),
 

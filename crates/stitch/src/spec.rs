@@ -245,14 +245,15 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(self.expr(ctx, inner))),
             Expr::Binary(op, [lhs, rhs]) => Expr::Binary(
                 *op,
-                [Box::new(self.expr(ctx, lhs)),
-                Box::new(self.expr(ctx, rhs))],
+                [Box::new(self.expr(ctx, lhs)), Box::new(self.expr(ctx, rhs))],
             ),
             Expr::Ternary(op, [first, second, third]) => Expr::Ternary(
                 *op,
-                [Box::new(self.expr(ctx, first)),
-                Box::new(self.expr(ctx, second)),
-                Box::new(self.expr(ctx, third))],
+                [
+                    Box::new(self.expr(ctx, first)),
+                    Box::new(self.expr(ctx, second)),
+                    Box::new(self.expr(ctx, third)),
+                ],
             ),
 
             Expr::Block(block_ty, exprs) => Expr::Block(block_ty.clone(), self.block(ctx, exprs)),
@@ -865,13 +866,9 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             Expr::Block(..) | Expr::Loop(..) => expr,
 
             Expr::If(block_ty, condition, then_block, else_block) => match *condition {
-                Expr::Value(Value::I32(0), _) => {
-                    self.expr(ctx, &Expr::Block(block_ty, else_block))
-                }
+                Expr::Value(Value::I32(0), _) => self.expr(ctx, &Expr::Block(block_ty, else_block)),
 
-                Expr::Value(Value::I32(_), _) => {
-                    self.expr(ctx, &Expr::Block(block_ty, then_block))
-                }
+                Expr::Value(Value::I32(_), _) => self.expr(ctx, &Expr::Block(block_ty, then_block)),
 
                 _ => Expr::If(
                     block_ty,
