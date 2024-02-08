@@ -546,7 +546,7 @@ pub enum Stmt {
     Drop(Expr),
     LocalSet(LocalId, Expr),
     GlobalSet(GlobalId, Expr),
-    Store(MemArg, Store),
+    Store(MemArg, Store, Box<[Expr; 2]>),
     Call(Call),
 }
 

@@ -76,6 +76,7 @@ impl Translator<'_> {
         }
 
         self.translate_block(&self.ast.main_block, None);
+        self.remove_nops();
         self.func.remove_unreachable_blocks();
         self.func.merge_blocks();
 
@@ -361,27 +362,27 @@ impl Translator<'_> {
                     AstBinOp::F64Ge => push!(F64Ge),
 
                     AstBinOp::I32Store(mem_arg) => {
-                        self.push_stmt(Stmt::Store(mem_arg, I32Store::Four.into()))
+                        self.push_stmt(Stmt::Store(mem_arg, I32Store::Four.into(), exprs))
                     }
                     AstBinOp::I64Store(mem_arg) => {
-                        self.push_stmt(Stmt::Store(mem_arg, I64Store::Eight.into()))
+                        self.push_stmt(Stmt::Store(mem_arg, I64Store::Eight.into(), exprs))
                     }
-                    AstBinOp::F32Store(mem_arg) => self.push_stmt(Stmt::Store(mem_arg, Store::F32)),
-                    AstBinOp::F64Store(mem_arg) => self.push_stmt(Stmt::Store(mem_arg, Store::F64)),
+                    AstBinOp::F32Store(mem_arg) => self.push_stmt(Stmt::Store(mem_arg, Store::F32, exprs)),
+                    AstBinOp::F64Store(mem_arg) => self.push_stmt(Stmt::Store(mem_arg, Store::F64, exprs)),
                     AstBinOp::I32Store8(mem_arg) => {
-                        self.push_stmt(Stmt::Store(mem_arg, I32Store::One.into()))
+                        self.push_stmt(Stmt::Store(mem_arg, I32Store::One.into(), exprs))
                     }
                     AstBinOp::I32Store16(mem_arg) => {
-                        self.push_stmt(Stmt::Store(mem_arg, I32Store::Two.into()))
+                        self.push_stmt(Stmt::Store(mem_arg, I32Store::Two.into(), exprs))
                     }
                     AstBinOp::I64Store8(mem_arg) => {
-                        self.push_stmt(Stmt::Store(mem_arg, I64Store::One.into()))
+                        self.push_stmt(Stmt::Store(mem_arg, I64Store::One.into(), exprs))
                     }
                     AstBinOp::I64Store16(mem_arg) => {
-                        self.push_stmt(Stmt::Store(mem_arg, I64Store::Two.into()))
+                        self.push_stmt(Stmt::Store(mem_arg, I64Store::Two.into(), exprs))
                     }
                     AstBinOp::I64Store32(mem_arg) => {
-                        self.push_stmt(Stmt::Store(mem_arg, I64Store::Four.into()))
+                        self.push_stmt(Stmt::Store(mem_arg, I64Store::Four.into(), exprs))
                     }
                 }
             }
@@ -726,6 +727,12 @@ impl Translator<'_> {
 
                 self.current_block_mut().term = Terminator::Br(block_id);
             }
+        }
+    }
+
+    fn remove_nops(&mut self) {
+        for block in self.func.blocks.values_mut() {
+            block.body.retain(|stmt| !matches!(stmt, Stmt::Nop));
         }
     }
 }
