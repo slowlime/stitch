@@ -29,7 +29,12 @@ impl FuncBody {
             ref mut next_child,
         }) = stack.last_mut()
         {
-            if let Some(&succ_block_id) = self.blocks[block_id].successors().get(*next_child) {
+            if let Some(&succ_block_id) = self.blocks[block_id]
+                .successors()
+                .iter()
+                .rev()
+                .nth(*next_child)
+            {
                 *next_child += 1;
 
                 if discovered.insert(succ_block_id, ()).is_none() {

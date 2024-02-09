@@ -538,7 +538,7 @@ impl Translator<'_> {
             }
 
             AstExpr::Call(func_id, args) => {
-                let is_stmt = self.module.funcs[*func_id].ty().ret.is_some();
+                let is_stmt = self.module.funcs[*func_id].ty().ret.is_none();
 
                 let mut arg_results = Vec::with_capacity(args.len());
 
@@ -566,7 +566,7 @@ impl Translator<'_> {
             }
 
             AstExpr::CallIndirect(ty_id, table_id, args, index) => {
-                let is_stmt = self.module.types[*ty_id].as_func().ret.is_some();
+                let is_stmt = self.module.types[*ty_id].as_func().ret.is_none();
 
                 let mut arg_results = Vec::with_capacity(args.len());
 
@@ -720,7 +720,7 @@ impl Translator<'_> {
             BlockTarget::Block(block_id) => {
                 if let Some(expr) = expr {
                     let local_id = self.block_results[ast_block_id];
-                    assert!(local_id.is_null());
+                    assert!(!local_id.is_null());
 
                     self.push_stmt(Stmt::LocalSet(local_id, expr));
                 }

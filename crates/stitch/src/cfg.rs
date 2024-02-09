@@ -5,6 +5,7 @@ mod predecessors;
 mod remove_unreachable_blocks;
 mod rpo;
 mod to_ast;
+mod printer;
 
 use std::slice;
 

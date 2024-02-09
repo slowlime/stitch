@@ -127,6 +127,15 @@ impl BlockType {
     }
 }
 
+impl Display for BlockType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "(none)"),
+            Self::Result(val_ty) => write!(f, "(result {val_ty})"),
+        }
+    }
+}
+
 impl From<Option<ValType>> for BlockType {
     fn from(val_ty: Option<ValType>) -> Self {
         match val_ty {
