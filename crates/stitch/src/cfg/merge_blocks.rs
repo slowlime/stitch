@@ -13,10 +13,41 @@ impl FuncBody {
             block_ids.remove(&block_id);
 
             if let Terminator::Br(target_block_id) = self.blocks[block_id].term {
-                if target_block_id != self.entry
-                    && block_id != target_block_id
-                    && preds[target_block_id].len() == 1
-                {
+                if target_block_id == self.entry || block_id == target_block_id {
+                    continue;
+                }
+
+                if self.blocks[block_id].body.is_empty() {
+                    trace!("eliminating empty {block_id:?} in favor of {target_block_id:?}");
+                    self.blocks.remove(block_id).unwrap();
+
+                    let [&mut ref block_preds, target_preds] =
+                        preds.get_disjoint_mut([block_id, target_block_id]).unwrap();
+
+                    // make predecessors pointing to block_id refer to target_block_id
+                    for &pred_block_id in block_preds {
+                        for pred_succ_block_id in self.blocks[pred_block_id].successors_mut() {
+                            if *pred_succ_block_id == block_id {
+                                *pred_succ_block_id = target_block_id;
+                            }
+                        }
+                    }
+
+                    target_preds.remove(target_preds.binary_search(&block_id).unwrap());
+
+                    // add block_id's predecessors to target_block_id's predecessor list
+                    for &pred_block_id in block_preds {
+                        if let Err(idx) = target_preds.binary_search(&pred_block_id) {
+                            target_preds.insert(idx, pred_block_id);
+                        }
+                    }
+
+                    preds.remove(block_id);
+
+                    if self.entry == block_id {
+                        self.entry = target_block_id;
+                    }
+                } else if preds[target_block_id].len() == 1 {
                     trace!("merging {target_block_id:?} into {block_id:?}");
                     block_ids.remove(&target_block_id);
                     block_ids.insert(block_id);
@@ -42,6 +73,14 @@ impl FuncBody {
                         }
                     }
                 }
+            }
+        }
+
+        assert!(self.blocks.contains_key(self.entry));
+
+        for block in self.blocks.values() {
+            for &succ_block_id in block.successors() {
+                assert!(self.blocks.contains_key(succ_block_id));
             }
         }
     }

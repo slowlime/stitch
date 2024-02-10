@@ -99,6 +99,10 @@ impl FuncBody {
             succ[idom_block_id].push(block_id);
         }
 
+        for succs in succ.values_mut() {
+            succs.sort_unstable_by_key(|&block_id| rpo.idx[block_id]);
+        }
+
         trace!("finished");
 
         DomTree { idom, succ }

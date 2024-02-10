@@ -128,6 +128,10 @@ impl<'a> PostProc<'a> {
             };
             let mut unused_locals = body.locals.keys().collect::<HashSet<_>>();
 
+            for local_id in &body.params {
+                unused_locals.remove(local_id);
+            }
+
             for expr in &body.main_block.body {
                 expr.map(&mut make_visitor(|expr, _| match expr {
                     Expr::Nullary(NulOp::LocalGet(local_id))

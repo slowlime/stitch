@@ -1,5 +1,6 @@
 use std::array;
 
+use log::trace;
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
 use super::{
@@ -31,12 +32,27 @@ impl FuncBody {
             preds,
             dom_tree,
             local_map: Default::default(),
-            block_map: Default::default(),
+            ctx: Default::default(),
             loop_headers: Default::default(),
             merge_nodes: Default::default(),
         };
 
         translator.translate()
+    }
+}
+
+enum Context {
+    BlockFollowedBy(BlockId),
+    LoopHeadedBy(BlockId),
+}
+
+impl Context {
+    fn matches(&self, block_id: BlockId) -> bool {
+        match *self {
+            Self::BlockFollowedBy(self_block_id) | Self::LoopHeadedBy(self_block_id) => {
+                block_id == self_block_id
+            }
+        }
     }
 }
 
@@ -47,8 +63,7 @@ struct Translator<'a> {
     preds: Predecessors,
     dom_tree: DomTree,
     local_map: SecondaryMap<LocalId, AstLocalId>,
-    // a branch to .block_map[block_id] in the AST jumps to block_id in the CFG
-    block_map: SecondaryMap<BlockId, AstBlockId>,
+    ctx: Vec<(Context, AstBlockId)>,
     loop_headers: SparseSecondaryMap<BlockId, ()>,
     merge_nodes: SparseSecondaryMap<BlockId, ()>,
 }
@@ -59,6 +74,11 @@ impl Translator<'_> {
         self.translate_params();
         let mut body = vec![];
         self.do_tree(self.func.entry, &mut body);
+
+        if self.func.ty.ret.is_some() && !body.last().is_some_and(AstExpr::diverges) {
+            body.push(AstExpr::Nullary(AstNulOp::Unreachable));
+        }
+
         self.ast.main_block.body = body;
 
         self.ast
@@ -100,16 +120,35 @@ impl Translator<'_> {
             .collect();
     }
 
+    fn lookup_block_id(&self, block_id: BlockId) -> AstBlockId {
+        self.ctx
+            .iter()
+            .rev()
+            .find(|(ctx, _)| ctx.matches(block_id))
+            .unwrap()
+            .1
+    }
+
     fn do_tree(&mut self, root: BlockId, exprs: &mut Vec<AstExpr>) {
         let merge_children = self.dom_tree.succ[root]
             .iter()
+            .rev() // blocks with smaller rpo numbers should go after those with greater
             .copied()
             .filter(|&succ_block_id| self.is_merge_node(succ_block_id))
             .collect::<Vec<_>>();
 
+        trace!(
+            "do_tree({root:?}): {}",
+            if self.is_loop_header(root) {
+                "loop header"
+            } else {
+                "plain"
+            }
+        );
+
         if self.is_loop_header(root) {
             let ast_block_id = self.ast.blocks.insert(());
-            self.block_map.insert(root, ast_block_id);
+            self.ctx.push((Context::LoopHeadedBy(root), ast_block_id));
             let mut body = vec![];
             self.node_within(root, &merge_children, &mut body);
 
@@ -120,6 +159,7 @@ impl Translator<'_> {
                     id: ast_block_id,
                 },
             ));
+            self.ctx.pop();
         } else {
             self.node_within(root, &merge_children, exprs)
         }
@@ -131,11 +171,15 @@ impl Translator<'_> {
         merge_children: &[BlockId],
         exprs: &mut Vec<AstExpr>,
     ) {
+        trace!("node_within({block_id:?}, {merge_children:?})");
+
         if let Some((&head, tail)) = merge_children.split_first() {
             let mut body = vec![];
             let ast_block_id = self.ast.blocks.insert(());
-            self.block_map.insert(head, ast_block_id);
+            self.ctx
+                .push((Context::BlockFollowedBy(head), ast_block_id));
             self.node_within(block_id, tail, &mut body);
+            self.ctx.pop();
 
             exprs.push(AstExpr::Block(
                 BlockType::Empty,
@@ -146,7 +190,20 @@ impl Translator<'_> {
             ));
             self.do_tree(head, exprs);
         } else {
+            trace!("translating the body of {block_id:?}");
             self.translate_body(block_id, exprs);
+
+            trace!(
+                "translating the terminator of {block_id:?}: {}",
+                match &self.func.blocks[block_id].term {
+                    Terminator::Trap => "trap".to_owned(),
+                    Terminator::Br(target_block_id) => format!("br to {target_block_id:?}"),
+                    Terminator::If(_, [then_block_id, else_block_id]) =>
+                        format!("if then {then_block_id:?} else {else_block_id:?}"),
+                    Terminator::Switch(_, block_ids) => format!("switch [{block_ids:?}]"),
+                    Terminator::Return(_) => format!("return"),
+                }
+            );
 
             match &self.func.blocks[block_id].term {
                 Terminator::Trap => exprs.push(AstExpr::Nullary(AstNulOp::Unreachable)),
@@ -155,8 +212,12 @@ impl Translator<'_> {
                 }
 
                 &Terminator::If(ref condition, [then_block_id, else_block_id]) => {
+                    let ast_then_block_id = self.ast.blocks.insert(());
+                    let ast_else_block_id = self.ast.blocks.insert(());
+
                     let mut then_body = vec![];
                     self.do_branch(block_id, then_block_id, &mut then_body);
+
                     let mut else_body = vec![];
                     self.do_branch(block_id, else_block_id, &mut else_body);
 
@@ -165,11 +226,11 @@ impl Translator<'_> {
                         Box::new(self.translate_expr(condition)),
                         AstBlock {
                             body: then_body,
-                            id: self.ast.blocks.insert(()),
+                            id: ast_then_block_id,
                         },
                         AstBlock {
                             body: else_body,
-                            id: self.ast.blocks.insert(()),
+                            id: ast_else_block_id,
                         },
                     ));
                 }
@@ -178,7 +239,7 @@ impl Translator<'_> {
                     let block_ids = block_ids
                         .into_iter()
                         // all targets are merge nodes, so the switch is nested within their blocks
-                        .map(|&block_id| self.block_map[block_id])
+                        .map(|&block_id| self.lookup_block_id(block_id))
                         .collect::<Vec<_>>();
                     let (&default_block_id, block_ids) = block_ids.split_first().unwrap();
 
@@ -206,12 +267,16 @@ impl Translator<'_> {
         to_block_id: BlockId,
         exprs: &mut Vec<AstExpr>,
     ) {
-        if self.rpo.idx[from_block_id] >= self.rpo.idx[to_block_id]
+        if self.rpo.idx[from_block_id] >= self.rpo.idx[to_block_id] // backward edge
             || self.is_merge_node(to_block_id)
         {
-            // backward edge
-            exprs.push(AstExpr::Br(self.block_map[to_block_id], None));
+            trace!(
+                "do_branch({from_block_id:?}, {to_block_id:?}) -> (br {:?})",
+                self.lookup_block_id(to_block_id),
+            );
+            exprs.push(AstExpr::Br(self.lookup_block_id(to_block_id), None));
         } else {
+            trace!("do_branch({from_block_id:?}, {to_block_id:?}) -> do_tree({to_block_id:?})");
             self.do_tree(to_block_id, exprs);
         }
     }

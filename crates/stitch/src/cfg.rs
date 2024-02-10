@@ -2,10 +2,11 @@ mod dom_tree;
 mod from_ast;
 mod merge_blocks;
 mod predecessors;
+mod printer;
 mod remove_unreachable_blocks;
 mod rpo;
 mod to_ast;
-mod printer;
+mod dot;
 
 use std::slice;
 
@@ -571,6 +572,16 @@ impl Terminator {
             Self::Return(_) => &[],
         }
     }
+
+    pub fn successors_mut(&mut self) -> &mut [BlockId] {
+        match self {
+            Self::Trap => &mut [],
+            Self::Br(block_id) => slice::from_mut(block_id),
+            Self::If(_, successors) => successors,
+            Self::Switch(_, successors) => successors,
+            Self::Return(_) => &mut [],
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -582,6 +593,10 @@ pub struct Block {
 impl Block {
     pub fn successors(&self) -> &[BlockId] {
         self.term.successors()
+    }
+
+    pub fn successors_mut(&mut self) -> &mut [BlockId] {
+        self.term.successors_mut()
     }
 }
 

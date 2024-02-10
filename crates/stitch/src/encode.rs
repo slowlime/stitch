@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use log::warn;
+use log::{trace, warn};
 use slotmap::SecondaryMap;
 use wasm_encoder::{
     CodeSection, DataSection, ElementSection, EntityType, ExportSection, FunctionSection,
@@ -258,7 +258,7 @@ impl<'a> Encoder<'a> {
     fn encode_code(&mut self) {
         let mut sec = CodeSection::new();
 
-        for func in self.module.funcs.values() {
+        for (func_id, func) in &self.module.funcs {
             let Func::Body(body) = func else { continue };
 
             let params = body.params.iter().copied().collect::<HashSet<_>>();
@@ -290,6 +290,7 @@ impl<'a> Encoder<'a> {
             }
 
             grouped_locals.truncate(wr_idx + 1);
+            trace!("encoding func {func_id:?}");
 
             let encoder = BodyEncoder {
                 encoder: self,
@@ -412,6 +413,7 @@ impl<'a> BodyEncoder<'a, '_> {
     }
 
     fn block(&mut self, block: &Block) {
+        trace!("encoding block {block}");
         self.block_depths
             .insert(block.id, self.block_stack.len() as u32);
         self.block_stack.push(block.id);
@@ -426,6 +428,8 @@ impl<'a> BodyEncoder<'a, '_> {
 
     fn expr(&mut self, expr: &Expr) {
         use wasm_encoder::Instruction;
+
+        trace!("encoding expr {expr}");
 
         match expr {
             Expr::Value(value, _) => self.nullary(match value {
@@ -530,7 +534,7 @@ impl<'a> BodyEncoder<'a, '_> {
                     UnOp::LocalTee(local_id) => Instruction::LocalTee(self.locals[local_id] as u32),
 
                     UnOp::GlobalSet(global_id) => {
-                        Instruction::GlobalGet(self.encoder.globals[global_id] as u32)
+                        Instruction::GlobalSet(self.encoder.globals[global_id] as u32)
                     }
 
                     UnOp::I32Load(mem_arg) => Instruction::I32Load(self.convert_mem_arg(&mem_arg)),

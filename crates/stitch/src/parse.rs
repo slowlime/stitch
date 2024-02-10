@@ -167,6 +167,7 @@ impl Parser {
 
     fn add_func(&mut self, func: ast::Func) -> FuncId {
         let id = self.module.funcs.insert(func);
+        trace!("added func {id:?}");
         self.funcs.push(id);
 
         id
