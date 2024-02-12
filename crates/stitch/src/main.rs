@@ -1,13 +1,11 @@
-use std::error::Error;
 use std::process::exit;
-use std::{env, fs, mem};
+use std::{env, fs};
 
-use stitch::ast::FuncBody;
+use anyhow::Result;
 use stitch::post::PostProc;
-use stitch::spec::Specializer;
-use stitch::{cfg, encode, parse};
+use stitch::{encode, parse};
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<()> {
     pretty_env_logger::init();
 
     let mut args = env::args_os().skip(1);
@@ -23,7 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let module_bytes = fs::read(&input_path)?;
     let mut module = parse::parse(&module_bytes)?;
 
-    Specializer::new(&mut module).process();
+    // TODO: Specializer::new(&mut module).process();
     PostProc::new(&mut module).process();
 
     let module = encode::encode(&mut module);

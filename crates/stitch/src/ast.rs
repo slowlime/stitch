@@ -12,12 +12,13 @@ use thiserror::Error;
 
 use crate::util::slot::BiSlotMap;
 
-use self::ty::{GlobalType, MemoryType, TableType, Type};
+use self::func::FuncImport;
+use self::ty::{ElemType, FuncType, GlobalType, MemoryType, TableType, Type, ValType};
 
 pub use self::expr::Expr;
 pub use self::func::{Func, FuncBody};
 
-const STITCH_MODULE_NAME: &str = "stitch";
+pub const STITCH_MODULE_NAME: &str = "stitch";
 
 new_key_type! {
     pub struct TypeId;
@@ -35,6 +36,24 @@ new_key_type! {
 pub enum IntrinsicDecl {
     Specialize,
     Unknown,
+}
+
+impl IntrinsicDecl {
+    pub fn check_ty(&self, func_ty: &FuncType) -> Result<(), String> {
+        match self {
+            Self::Specialize
+                if func_ty.params.len() >= 3
+                    && func_ty.ret == Some(ValType::I32)
+                    && func_ty.params[0..3].iter().all(|ty| *ty == ValType::I32) =>
+            {
+                Ok(())
+            }
+            Self::Specialize => Err("[i32 i32 i32 t...] -> [i32]".into()),
+
+            Self::Unknown if func_ty.params.is_empty() && func_ty.ret.is_some() => Ok(()),
+            Self::Unknown => Err("[] -> [t]".into()),
+        }
+    }
 }
 
 impl Display for IntrinsicDecl {
@@ -78,11 +97,52 @@ impl Module {
             _ => return None,
         };
 
-        Some(match (name.as_str(), desc) {
-            ("specialize", ImportDesc::Func(_)) => IntrinsicDecl::Specialize,
-            ("unknown", ImportDesc::Global(_)) => IntrinsicDecl::Unknown,
+        let (name, suffix) = match name.find('#') {
+            Some(idx) => name.split_at(idx),
+            None => (name.as_str(), ""),
+        };
+
+        Some(match name {
+            "specialize" => IntrinsicDecl::Specialize,
+            "unknown" => IntrinsicDecl::Unknown,
             _ => return None,
         })
+    }
+
+    pub fn remove_func(&mut self, func_id: FuncId) -> Option<Func> {
+        let result = self.funcs.remove(func_id)?;
+
+        for table in self.tables.values_mut() {
+            if !matches!(table.ty.elem_ty, ElemType::Funcref) {
+                continue;
+            }
+
+            if let TableDef::Elems(elems) = &mut table.def {
+                for elem in elems {
+                    if elem.is_some_and(|elem_func_id| elem_func_id == func_id) {
+                        elem.take();
+                    }
+                }
+            }
+        }
+
+        if self
+            .start
+            .is_some_and(|start_func_id| start_func_id == func_id)
+        {
+            self.start.take();
+        }
+
+        if let Func::Import(FuncImport { import_id, .. }) = result {
+            self.imports.remove(import_id);
+        }
+
+        self.exports.retain(|_, export| match export.def {
+            ExportDef::Func(export_func_id) => func_id != export_func_id,
+            _ => true,
+        });
+
+        Some(result)
     }
 
     pub fn read_mem(&self, mem_id: MemoryId, range: Range<usize>) -> Result<&[u8], MemError> {
@@ -159,13 +219,6 @@ pub enum GlobalDef {
 impl GlobalDef {
     pub fn is_import(&self) -> bool {
         matches!(self, Self::Import(_))
-    }
-
-    pub fn get_intrinsic(&self, module: &Module) -> Option<IntrinsicDecl> {
-        match *self {
-            Self::Import(import_id) => module.get_intrinsic(import_id),
-            _ => None,
-        }
     }
 }
 

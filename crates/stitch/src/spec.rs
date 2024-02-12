@@ -5,8 +5,8 @@ use log::{trace, warn};
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 
 use crate::ast::expr::{
-    BinOp, Block, Intrinsic, Load, MemArg, NulOp, PtrAttr, TernOp, UnOp, Value, ValueAttrs,
-    VisitContext, F32, F64,
+    BinOp, Block, Intrinsic, Load, MemArg, NulOp, TernOp, UnOp, Value, ValueAttrs, VisitContext,
+    F32, F64,
 };
 use crate::ast::ty::Type;
 use crate::ast::{
@@ -239,9 +239,17 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         }
 
         let mut expr = match expr {
-            Expr::Value(_, _) | Expr::Index(_) | Expr::Intrinsic(_) | Expr::Nullary(_) => {
-                expr.clone()
-            }
+            Expr::Value(_, _) | Expr::Nullary(_) => expr.clone(),
+            &Expr::Intrinsic(Intrinsic::Specialize {
+                table_id,
+                mem_id,
+                ref args,
+            }) => Expr::Intrinsic(Intrinsic::Specialize {
+                table_id,
+                mem_id,
+                args: args.iter().map(|expr| self.expr(ctx, expr)).collect(),
+            }),
+            Expr::Intrinsic(Intrinsic::Unknown(_)) => expr.clone(),
             Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(self.expr(ctx, inner))),
             Expr::Binary(op, [lhs, rhs]) => Expr::Binary(
                 *op,
@@ -354,7 +362,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 MemArg { mem_id, offset, .. },
                 &Expr::Value(Value::I32(addr), addr_attrs),
                 load,
-            )) if addr_attrs.ptr >= PtrAttr::Const => {
+            )) if addr_attrs.contains(ValueAttrs::CONST_PTR) => {
                 let start = (addr as u32 + offset) as usize;
                 let end = start + load.src_size() as usize;
 
@@ -376,11 +384,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                             Load::F64 => Value::F64(F64::from_bits(value)),
                         };
 
-                        let attrs = if addr_attrs.propagate {
-                            ValueAttrs {
-                                propagate: false,
-                                ..addr_attrs
-                            }
+                        let attrs = if addr_attrs.contains(ValueAttrs::PROPAGATE_LOAD) {
+                            addr_attrs & !ValueAttrs::PROPAGATE_LOAD
                         } else {
                             addr_attrs
                         };
@@ -439,20 +444,16 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         */
 
         match expr {
-            Expr::Value(_, _) | Expr::Index(_) => expr,
+            Expr::Value(_, _) => expr,
 
             Expr::Intrinsic(ref mut intr) => {
                 let result = match *intr {
                     Intrinsic::Specialize {
                         table_id,
-                        elem_idx,
                         mem_id,
-                        name_addr,
-                        name_len,
                         ref mut args,
-                    } => self.intr_specialize(
-                        ctx, table_id, elem_idx, mem_id, name_addr, name_len, args,
-                    ),
+                    } => self.intr_specialize(ctx, table_id, mem_id, args),
+
                     Intrinsic::Unknown(_) => todo!(),
                 };
 
@@ -625,11 +626,7 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
                 };
 
                 let attr = match op {
-                    BinOp::I32Add | BinOp::I32Sub => ValueAttrs {
-                        ptr: lhs_attr.ptr.max(rhs_attr.ptr),
-                        propagate: false,
-                    },
-
+                    BinOp::I32Add | BinOp::I32Sub => (lhs_attr | rhs_attr) & ValueAttrs::CONST_PTR,
                     _ => lhs_attr.meet(&rhs_attr),
                 };
 
@@ -1056,11 +1053,8 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
         &mut self,
         ctx: &mut SpecContext,
         table_id: TableId,
-        elem_idx: u32,
         mem_id: MemoryId,
-        name_addr: u32,
-        name_len: u32,
-        args: &mut Vec<Option<Value>>,
+        args: &mut Vec<Expr>,
     ) -> Result<Expr, ()> {
         let table = &self.spec.module.tables[table_id];
 
@@ -1106,6 +1100,9 @@ impl<'a, 'b, 'm> FuncSpecializer<'a, 'b, 'm> {
             });
         }
 
-        Ok(Expr::Index(spec_func_id.into()))
+        Ok(Expr::Value(
+            Value::Id(spec_func_id.into()),
+            ValueAttrs::default(),
+        ))
     }
 }

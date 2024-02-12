@@ -3,5 +3,5 @@ pub mod cfg;
 pub mod encode;
 pub mod parse;
 pub mod post;
-pub mod spec;
+pub mod interp;
 mod util;

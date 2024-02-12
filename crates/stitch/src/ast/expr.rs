@@ -1,4 +1,7 @@
 use std::fmt::{self, Debug, Display};
+use std::iter;
+
+use bitflags::bitflags;
 
 use crate::util::{try_match, Indent};
 
@@ -101,9 +104,19 @@ pub enum Value {
     I64(i64),
     F32(F32),
     F64(F64),
+    Id(Id),
 }
 
 impl Value {
+    pub fn val_ty(&self) -> ValType {
+        match self {
+            Self::I32(_) | Self::Id(_) => ValType::I32,
+            Self::I64(_) => ValType::I64,
+            Self::F32(_) => ValType::F32,
+            Self::F64(_) => ValType::F64,
+        }
+    }
+
     pub fn to_i32(&self) -> Option<i32> {
         try_match!(*self, Self::I32(value) => value)
     }
@@ -129,32 +142,21 @@ impl Value {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PtrAttr {
-    #[default]
-    None,
-
-    /// Allows inlining loads from addresses derived from a value.
-    Const,
-
-    /// Allows inlining stores to addresses derived from a value in addition to loads.
-    Owned,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ValueAttrs {
-    pub ptr: PtrAttr,
-
-    /// Whether the specializer can propagate these attributes to the value loaded from this address.
-    pub propagate: bool,
+bitflags! {
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct ValueAttrs: u8 {
+        const CONST_PTR = 1 << 0;
+        const PROPAGATE_LOAD = 1 << 1;
+        const UNKNOWN = 1 << 2;
+    }
 }
 
 impl ValueAttrs {
     pub fn meet(&self, other: &Self) -> Self {
-        Self {
-            ptr: self.ptr.min(other.ptr),
-            propagate: self.propagate && other.propagate,
-        }
+        const MEET_OR: ValueAttrs = ValueAttrs::UNKNOWN;
+        const MEET_AND: ValueAttrs = MEET_OR.complement();
+
+        *self & *other & MEET_AND | (*self | *other) & MEET_OR
     }
 }
 
@@ -606,64 +608,6 @@ impl Display for TernOp {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum Intrinsic {
-    Specialize {
-        table_id: TableId,
-        elem_idx: u32,
-        mem_id: MemoryId,
-        name_addr: u32,
-        name_len: u32,
-        args: Vec<Option<Value>>,
-    },
-
-    Unknown(ValType),
-}
-
-impl Display for Intrinsic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Specialize {
-                table_id,
-                elem_idx,
-                mem_id,
-                name_addr,
-                name_len,
-                args,
-            } => {
-                write!(
-                    f,
-                    "stitch/specialize \
-                        table_id={table_id:?} \
-                        elem_idx={elem_idx:?} \
-                        mem_id={mem_id:?} \
-                        name_addr={name_addr:?} \
-                        name_len={name_len:?} \
-                        args=["
-                )?;
-
-                for (idx, arg) in args.iter().enumerate() {
-                    if idx > 0 {
-                        write!(f, ", ")?;
-                    }
-
-                    match arg {
-                        Some(Value::I32(value)) => write!(f, "{value}_i32")?,
-                        Some(Value::I64(value)) => write!(f, "{value}_i64")?,
-                        Some(Value::F32(value)) => write!(f, "{value}_f32")?,
-                        Some(Value::F64(value)) => write!(f, "{value}_f64")?,
-                        None => write!(f, "_")?,
-                    }
-                }
-
-                write!(f, "]")
-            }
-
-            Self::Unknown(val_ty) => write!(f, "stitch/unknown {val_ty}"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Id {
     Func(FuncId),
@@ -696,9 +640,6 @@ impl Display for Block {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Value(Value, ValueAttrs),
-
-    Intrinsic(Intrinsic),
-    Index(Id),
 
     Nullary(NulOp),
     Unary(UnOp, Box<Expr>),
@@ -833,9 +774,7 @@ impl Expr {
             v.pre(ctx, expr);
 
             let result = match expr {
-                Expr::Value(_, _) | Expr::Intrinsic(_) | Expr::Index(_) | Expr::Nullary(_) => {
-                    expr.clone()
-                }
+                Expr::Value(_, _) | Expr::Nullary(_) => expr.clone(),
 
                 Expr::Unary(op, inner) => Expr::Unary(*op, Box::new(visit(v, ctx, inner))),
                 Expr::Binary(op, [lhs, rhs]) => Expr::Binary(
@@ -908,17 +847,17 @@ impl Expr {
 
     pub fn all(&self, predicate: &mut impl FnMut(&Expr) -> bool) -> bool {
         (match self {
-            Expr::Value(_, _) | Expr::Intrinsic(_) | Expr::Index(_) | Expr::Nullary(_) => true,
+            Expr::Value(_, _) | Expr::Nullary(_) => true,
             Expr::Unary(_, inner) => inner.all(predicate),
-            Expr::Binary(_, [lhs, rhs]) => lhs.all(predicate) && rhs.all(predicate),
-            Expr::Ternary(_, [first, second, third]) => {
-                first.all(predicate) && second.all(predicate) && third.all(predicate)
+            Expr::Binary(_, exprs) => exprs.iter().all(|arg| arg.all(predicate)),
+            Expr::Ternary(_, exprs) => exprs.iter().all(|arg| arg.all(predicate)),
+            Expr::Block(_, block) | Expr::Loop(_, block) => {
+                block.body.iter().all(|expr| expr.all(predicate))
             }
-            Expr::Block(_, block) | Expr::Loop(_, block) => block.body.iter().all(&mut *predicate),
             Expr::If(_, condition, then_block, else_block) => {
                 condition.all(predicate)
-                    && then_block.body.iter().all(&mut *predicate)
-                    && else_block.body.iter().all(&mut *predicate)
+                    && then_block.body.iter().all(|expr| expr.all(predicate))
+                    && else_block.body.iter().all(|expr| expr.all(predicate))
             }
             Expr::Br(_, inner) | Expr::Return(inner) => {
                 inner.as_ref().map(|inner| predicate(inner)).unwrap_or(true)
@@ -930,10 +869,11 @@ impl Expr {
             Expr::BrTable(_, _, inner, index) => {
                 inner.as_ref().map(|inner| predicate(inner)).unwrap_or(true) && index.all(predicate)
             }
-            Expr::Call(_, args) => args.iter().all(&mut *predicate),
-            Expr::CallIndirect(_, _, args, index) => {
-                args.iter().all(&mut *predicate) && index.all(&mut *predicate)
-            }
+            Expr::Call(_, args) => args.iter().all(|expr| expr.all(predicate)),
+            Expr::CallIndirect(_, _, args, index) => args
+                .iter()
+                .chain(iter::once(&**index))
+                .all(|expr| expr.all(predicate)),
         }) && predicate(self)
     }
 
@@ -1160,15 +1100,7 @@ impl Expr {
 
     pub fn ty(&self) -> ExprTy {
         match self {
-            Self::Value(Value::I32(_), _) => ValType::I32.into(),
-            Self::Value(Value::I64(_), _) => ValType::I64.into(),
-            Self::Value(Value::F32(_), _) => ValType::F32.into(),
-            Self::Value(Value::F64(_), _) => ValType::F64.into(),
-
-            Self::Index(_) => ValType::I32.into(),
-
-            Self::Intrinsic(Intrinsic::Specialize { .. }) => ValType::I32.into(),
-            Self::Intrinsic(Intrinsic::Unknown(val_ty)) => val_ty.clone().into(),
+            Self::Value(value, _) => value.val_ty().into(),
 
             Self::Unary(UnOp::I32Clz | UnOp::I32Ctz | UnOp::I32Popcnt, _) => ValType::I32.into(),
             Self::Unary(UnOp::I64Clz | UnOp::I64Ctz | UnOp::I64Popcnt, _) => ValType::I64.into(),
@@ -1417,8 +1349,7 @@ impl Expr {
 
     pub fn has_side_effect(&self) -> bool {
         self.any(&mut |expr| match expr {
-            Expr::Value(..) | Expr::Index(_) => false,
-            Expr::Intrinsic(_) => true,
+            Expr::Value(..) => false,
 
             Expr::Nullary(op) => match op {
                 NulOp::Nop => false,
@@ -1649,13 +1580,12 @@ impl Expr {
                             Value::I64(value) => write!(self.f, "i64.const {value}")?,
                             Value::F32(value) => write!(self.f, "f32.const {value}")?,
                             Value::F64(value) => write!(self.f, "f64.const {value}")?,
+                            Value::Id(id) => write!(self.f, "index_of {id:?}")?,
                         }
 
                         write!(self.f, " {attrs:?}")?
                     }
 
-                    Expr::Intrinsic(intrinsic) => write!(self.f, "{}", intrinsic)?,
-                    Expr::Index(id) => write!(self.f, "index_of {id:?}")?,
                     Expr::Nullary(op) => write!(self.f, "{op}")?,
                     Expr::Unary(op, _) => write!(self.f, "{op}")?,
                     Expr::Binary(op, ..) => write!(self.f, "{op}")?,
@@ -1701,7 +1631,8 @@ impl Expr {
                 self.indent.0 += 1;
 
                 match expr {
-                    Expr::Value(..) | Expr::Intrinsic(_) | Expr::Index(_) | Expr::Nullary(_) => {}
+                    Expr::Value(..) | Expr::Nullary(_) => {}
+
                     Expr::Unary(_, inner) => self.visit(inner)?,
 
                     Expr::Binary(_, exprs) => {

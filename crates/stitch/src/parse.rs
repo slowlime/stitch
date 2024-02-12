@@ -1,19 +1,17 @@
+use std::mem;
 use std::ops::Range;
-use std::{fmt, mem};
 
-use log::{log_enabled, trace, warn};
+use log::{log_enabled, trace};
 use slotmap::SlotMap;
 use thiserror::Error;
 use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
-use crate::ast::expr::{
-    BinOp, ExprTy, Intrinsic, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64,
-};
+use crate::ast::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64};
 use crate::ast::{
-    self, BlockId, ExportId, FuncId, GlobalId, ImportId, IntrinsicDecl, LocalId, MemoryId, TableId,
-    TypeId,
+    self, BlockId, ExportId, FuncId, GlobalId, ImportDesc, ImportId, ImportKind, IntrinsicDecl,
+    LocalId, MemoryId, TableId, TypeId, STITCH_MODULE_NAME,
 };
 
 const PAGE_SIZE: usize = 65536;
@@ -72,6 +70,16 @@ pub enum ParseError {
         mem_idx: usize,
         mem_size: usize,
     },
+
+    #[error("unknown intrinsic {kind} stitch/{name}")]
+    UnknownIntrinsic { kind: ImportKind, name: String },
+
+    #[error("invalid type for intrinsic stitch/{intrinsic}: expected {expected}, got {actual}")]
+    InvalidIntrinsicTy {
+        intrinsic: IntrinsicDecl,
+        expected: String,
+        actual: ast::ty::FuncType,
+    },
 }
 
 fn make_val_type(val_ty: wasmparser::ValType) -> ast::ty::ValType {
@@ -92,7 +100,7 @@ fn make_elem_type(ref_ty: wasmparser::RefType) -> ast::ty::ElemType {
         "unsupported table element type {ref_ty}"
     );
 
-    ast::ty::ElemType::FuncType
+    ast::ty::ElemType::Funcref
 }
 
 fn make_table_type(table_ty: wasmparser::TableType) -> ast::ty::TableType {
@@ -238,6 +246,44 @@ impl Parser {
         self.module.exports.insert(export)
     }
 
+    fn check_intrinsic_types(&self) -> Result<()> {
+        for (import_id, import) in &self.module.imports {
+            if import.module != STITCH_MODULE_NAME {
+                continue;
+            }
+
+            let Some(intrinsic) = self.module.get_intrinsic(import_id) else {
+                return Err(ParseError::UnknownIntrinsic {
+                    kind: import.desc.kind(),
+                    name: import.name.clone(),
+                });
+            };
+
+            let ImportDesc::Func(ty_id) = import.desc else {
+                return Err(ParseError::UnknownIntrinsic {
+                    kind: import.desc.kind(),
+                    name: import.name.clone(),
+                });
+            };
+
+            let func_ty = self.module.types[ty_id].as_func();
+
+            match intrinsic.check_ty(func_ty) {
+                Ok(()) => {}
+
+                Err(expected) => {
+                    return Err(ParseError::InvalidIntrinsicTy {
+                        intrinsic,
+                        expected,
+                        actual: func_ty.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn parse(mut self, bytes: &[u8]) -> Result<ast::Module> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = wasmparser::Validator::new_with_features(FEATURES);
@@ -331,6 +377,8 @@ impl Parser {
                 }
             }
         }
+
+        self.check_intrinsic_types()?;
 
         Ok(self.module)
     }
@@ -985,7 +1033,7 @@ impl Parser {
                     Expr::Return(ctx.capture_br_expr(ctx.block_stack.len() as u32 - 1))
                 }
 
-                Operator::Call { function_index } => 'out: {
+                Operator::Call { function_index } => {
                     let func_id = ctx.parser.funcs[function_index as usize];
                     let func_ty = ctx.parser.module.funcs[func_id].ty();
 
@@ -993,91 +1041,6 @@ impl Parser {
                         .map(|_| ctx.pop_expr())
                         .collect::<Vec<_>>();
                     args.reverse();
-
-                    'intrinsic: {
-                        let Some(intrinsic) =
-                            ctx.parser.module.funcs[func_id].get_intrinsic(&ctx.parser.module)
-                        else {
-                            break 'intrinsic;
-                        };
-
-                        let invalid_argument = |idx: usize, reason: fmt::Arguments<'_>| {
-                            warn!("invalid argument {idx} to {intrinsic}: {reason}")
-                        };
-                        let wrong_type = |idx: usize, expected: &str| {
-                            invalid_argument(idx, format_args!("expected {expected}"))
-                        };
-                        let table_not_exists = |table_idx: u32| {
-                            invalid_argument(1, format_args!("table {table_idx} does not exist"))
-                        };
-
-                        break 'out Expr::Intrinsic(match intrinsic {
-                            IntrinsicDecl::Specialize => match args.as_slice() {
-                                [table_idx, elem_idx, name_addr, name_len, args @ ..] => {
-                                    let parse = || -> Result<_, ()> {
-                                        let table_idx = table_idx
-                                            .to_u32()
-                                            .ok_or_else(|| wrong_type(1, "a constant i32"))?;
-                                        let &table_id =
-                                            ctx.parser
-                                                .tables
-                                                .get(table_idx as usize)
-                                                .ok_or_else(|| table_not_exists(table_idx))?;
-                                        let elem_idx = elem_idx
-                                            .to_u32()
-                                            .ok_or_else(|| wrong_type(2, "a constant i32"))?;
-                                        let name_addr = name_addr
-                                            .to_u32()
-                                            .ok_or_else(|| wrong_type(3, "a constant i32"))?;
-                                        let name_len = name_len
-                                            .to_u32()
-                                            .ok_or_else(|| wrong_type(4, "a constant i32"))?;
-
-                                        let args = args
-                                            .iter()
-                                            .map(|arg| match arg {
-                                                &Expr::Value(value, _) => Some(Some(value)),
-                                                &Expr::Intrinsic(Intrinsic::Unknown(_)) => {
-                                                    Some(None)
-                                                }
-                                                _ => None,
-                                            })
-                                            .enumerate()
-                                            .map(|(idx, arg)| {
-                                                arg.ok_or_else(|| {
-                                                    wrong_type(idx + 5, "a value or stitch/unknown")
-                                                })
-                                            })
-                                            .collect::<Result<Vec<_>, _>>()?;
-
-                                        Ok(Intrinsic::Specialize {
-                                            table_id,
-                                            elem_idx,
-                                            mem_id: ctx.parser.mems[0],
-                                            name_addr,
-                                            name_len,
-                                            args,
-                                        })
-                                    };
-
-                                    match parse() {
-                                        Ok(intrinsic) => intrinsic,
-                                        _ => break 'intrinsic,
-                                    }
-                                }
-
-                                _ => {
-                                    warn!(
-                                        "too few arguments to stitch/specialize: expected at least 4, got {}",
-                                        args.len(),
-                                    );
-                                    break 'intrinsic;
-                                }
-                            },
-
-                            IntrinsicDecl::Unknown => unreachable!(),
-                        });
-                    }
 
                     Expr::Call(func_id, args)
                 }
@@ -1111,23 +1074,7 @@ impl Parser {
                     ctx.un_expr(UnOp::LocalTee(ctx.local(local_index)))
                 }
 
-                Operator::GlobalGet { global_index } => 'out: {
-                    let global_id = ctx.parser.globals[global_index as usize];
-
-                    'intrinsic: {
-                        let global = &ctx.parser.module.globals[global_id];
-                        let Some(intrinsic) = global.def.get_intrinsic(&ctx.parser.module) else {
-                            break 'intrinsic;
-                        };
-
-                        break 'out Expr::Intrinsic(match intrinsic {
-                            IntrinsicDecl::Unknown => {
-                                Intrinsic::Unknown(global.ty.val_type.clone())
-                            }
-                            IntrinsicDecl::Specialize => unreachable!(),
-                        });
-                    }
-
+                Operator::GlobalGet { global_index } => {
                     NulOp::GlobalGet(ctx.parser.globals[global_index as usize]).into()
                 }
 

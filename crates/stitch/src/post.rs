@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use log::warn;
 
-use crate::ast::expr::{make_visitor, Id, NulOp, UnOp};
+use crate::ast::expr::{make_visitor, Id, NulOp, UnOp, Value};
 use crate::ast::ty::Type;
-use crate::ast::{Expr, FuncId, GlobalDef, GlobalId, Module, TableDef};
+use crate::ast::{Expr, FuncId, Module, TableDef};
 
 pub struct PostProc<'a> {
     module: &'a mut Module,
@@ -29,13 +29,6 @@ impl<'a> PostProc<'a> {
             .filter(|(_, func)| func.get_intrinsic(&self.module).is_some())
             .map(|(func_id, _)| func_id)
             .collect::<HashSet<_>>();
-        let mut global_ids = self
-            .module
-            .globals
-            .iter()
-            .filter(|(_, global)| global.def.get_intrinsic(&self.module).is_some())
-            .map(|(global_id, _)| global_id)
-            .collect::<HashSet<_>>();
         let import_ids = self
             .module
             .imports
@@ -45,24 +38,10 @@ impl<'a> PostProc<'a> {
 
         fn check_expr<'a>(
             func_ids: &'a mut HashSet<FuncId>,
-            global_ids: &'a mut HashSet<GlobalId>,
         ) -> impl FnMut(&Expr) -> bool + 'a {
             move |expr: &Expr| match expr {
-                Expr::Index(Id::Func(func_id)) if func_ids.remove(func_id) => {
+                Expr::Value(Value::Id(Id::Func(func_id)), _) if func_ids.remove(func_id) => {
                     warn!("Expr::Index references an intrinsic");
-                    true
-                }
-
-                Expr::Intrinsic(_) => {
-                    warn!("encountered an unprocessed intrinsic expression");
-                    true
-                }
-
-                Expr::Nullary(NulOp::GlobalGet(global_id))
-                | Expr::Unary(UnOp::GlobalSet(global_id), _)
-                    if global_ids.remove(global_id) =>
-                {
-                    warn!("a global variable instruction references an intrinsic");
                     true
                 }
 
@@ -79,7 +58,7 @@ impl<'a> PostProc<'a> {
             let Some(body) = func.body() else { continue };
 
             for expr in &body.main_block.body {
-                expr.all(&mut check_expr(&mut func_ids, &mut global_ids));
+                expr.all(&mut check_expr(&mut func_ids));
             }
         }
 
@@ -95,20 +74,9 @@ impl<'a> PostProc<'a> {
             }
         }
 
-        for global in self.module.globals.values() {
-            let GlobalDef::Value(expr) = &global.def else {
-                continue;
-            };
-
-            expr.all(&mut check_expr(&mut func_ids, &mut global_ids));
-        }
-
         self.module
             .funcs
             .retain(|func_id, _| !func_ids.contains(&func_id));
-        self.module
-            .globals
-            .retain(|global_id, _| !global_ids.contains(&global_id));
         self.module
             .imports
             .retain(|import_id, _| !import_ids.contains(&import_id));

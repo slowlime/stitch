@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use log::{trace, warn};
+use log::trace;
 use slotmap::SecondaryMap;
 use wasm_encoder::{
     CodeSection, DataSection, ElementSection, EntityType, ExportSection, FunctionSection,
@@ -347,7 +347,7 @@ impl Encoder<'_> {
 
     fn convert_elem_type(&self, elem_ty: &ElemType) -> wasm_encoder::RefType {
         match elem_ty {
-            ElemType::FuncType => wasm_encoder::RefType::FUNCREF,
+            ElemType::Funcref => wasm_encoder::RefType::FUNCREF,
         }
     }
 
@@ -437,16 +437,10 @@ impl<'a> BodyEncoder<'a, '_> {
                 Value::I64(value) => Instruction::I64Const(*value),
                 Value::F32(value) => Instruction::F32Const(value.to_f32()),
                 Value::F64(value) => Instruction::F64Const(value.to_f64()),
+                Value::Id(id) => Instruction::I32Const(match *id {
+                    Id::Func(func_id) => self.encoder.funcs[func_id],
+                } as i32),
             }),
-
-            Expr::Index(id) => self.nullary(Instruction::I32Const(match *id {
-                Id::Func(func_id) => self.encoder.funcs[func_id],
-            } as i32)),
-
-            Expr::Intrinsic(_) => {
-                warn!("the module contains an intrinsic: replacing with `unreachable`");
-                self.nullary(Instruction::Unreachable);
-            }
 
             Expr::Nullary(op) => self.nullary(match *op {
                 NulOp::Nop => Instruction::Nop,

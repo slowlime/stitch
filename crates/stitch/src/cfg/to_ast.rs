@@ -339,8 +339,6 @@ impl Translator<'_> {
     fn translate_expr(&mut self, expr: &Expr) -> AstExpr {
         match expr {
             &Expr::Value(value, attrs) => AstExpr::Value(value, attrs),
-            Expr::Intrinsic(intrinsic) => AstExpr::Intrinsic(intrinsic.clone()),
-            &Expr::Index(id) => AstExpr::Index(id),
 
             Expr::Nullary(op) => AstExpr::Nullary(match *op {
                 NulOp::LocalGet(local_id) => AstNulOp::LocalGet(self.translate_local(local_id)),

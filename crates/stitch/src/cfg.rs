@@ -1,4 +1,5 @@
 mod dom_tree;
+mod dot;
 mod from_ast;
 mod merge_blocks;
 mod predecessors;
@@ -6,13 +7,12 @@ mod printer;
 mod remove_unreachable_blocks;
 mod rpo;
 mod to_ast;
-mod dot;
 
 use std::slice;
 
 use slotmap::{new_key_type, SlotMap};
 
-use crate::ast::expr::{Id, Intrinsic, MemArg, Value, ValueAttrs};
+use crate::ast::expr::{MemArg, Value, ValueAttrs};
 use crate::ast::ty::{FuncType, ValType};
 use crate::ast::{FuncId, GlobalId, MemoryId, TableId, TypeId};
 
@@ -329,8 +329,6 @@ pub enum Call {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Value(Value, ValueAttrs),
-    Intrinsic(Intrinsic),
-    Index(Id),
 
     Nullary(NulOp),
     Unary(UnOp, Box<Expr>),
@@ -343,19 +341,7 @@ pub enum Expr {
 impl Expr {
     pub fn ty(&self) -> ExprTy {
         match self {
-            Self::Value(value, _) => match value {
-                Value::I32(_) => ValType::I32.into(),
-                Value::I64(_) => ValType::I64.into(),
-                Value::F32(_) => ValType::F32.into(),
-                Value::F64(_) => ValType::F64.into(),
-            },
-
-            Self::Intrinsic(intrinsic) => match intrinsic {
-                Intrinsic::Specialize { .. } => ValType::I32.into(),
-                Intrinsic::Unknown(val_ty) => val_ty.clone().into(),
-            },
-
-            Self::Index(_) => ValType::I32.into(),
+            Self::Value(value, _) => value.val_ty().into(),
 
             Self::Nullary(op) => match *op {
                 NulOp::LocalGet(local_id) => ExprTy::Local(local_id),
@@ -522,6 +508,21 @@ impl Expr {
 
             Self::Call(Call::Direct { func_id, .. }) => ExprTy::Call(*func_id),
             Self::Call(Call::Indirect { ty_id, .. }) => ExprTy::CallIndirect(*ty_id),
+        }
+    }
+
+    pub fn nth_subexpr(&self, n: usize) -> Option<&Self> {
+        match self {
+            Self::Value(..) | Self::Nullary(_) => None,
+            Self::Unary(_, expr) => (n == 0).then_some(&**expr),
+            Self::Binary(_, exprs) => exprs.get(n),
+            Self::Ternary(_, exprs) => exprs.get(n),
+            Self::Call(Call::Direct { args, .. }) => args.get(n),
+            Self::Call(Call::Indirect { args, index, .. }) => match args.get(n) {
+                Some(expr) => Some(expr),
+                _ if n == args.len() => Some(&**index),
+                _ => None,
+            },
         }
     }
 }

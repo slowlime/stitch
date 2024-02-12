@@ -80,7 +80,15 @@ impl Display for FuncType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ElemType {
-    FuncType,
+    Funcref,
+}
+
+impl Display for ElemType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Funcref => write!(f, "funcref"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
