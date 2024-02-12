@@ -78,7 +78,10 @@ impl FuncBody {
                     }
                 }
 
-                trace!("new_idom for {block_id:?}: {new_idom:?} (previously {:?})", idom.get(block_id));
+                trace!(
+                    "new_idom for {block_id:?}: {new_idom:?} (previously {:?})",
+                    idom.get(block_id)
+                );
 
                 if idom.insert(block_id, new_idom) != Some(new_idom) {
                     changed = true;

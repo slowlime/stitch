@@ -15,9 +15,10 @@ use crate::util::slot::BiSlotMap;
 use self::func::FuncImport;
 use self::ty::{ElemType, FuncType, GlobalType, MemoryType, TableType, Type, ValType};
 
-pub use self::expr::Expr;
+pub use self::expr::{ConstExpr, Expr};
 pub use self::func::{Func, FuncBody};
 
+pub const PAGE_SIZE: usize = 65536;
 pub const STITCH_MODULE_NAME: &str = "stitch";
 
 new_key_type! {
@@ -92,14 +93,14 @@ pub struct Module {
 
 impl Module {
     pub fn get_intrinsic(&self, import_id: ImportId) -> Option<IntrinsicDecl> {
-        let (name, desc) = match &self.imports[import_id] {
-            Import { module, name, desc } if module == STITCH_MODULE_NAME => (name, desc),
+        let name = match &self.imports[import_id] {
+            Import { module, name, .. } if module == STITCH_MODULE_NAME => name.as_str(),
             _ => return None,
         };
 
-        let (name, suffix) = match name.find('#') {
+        let (name, _suffix) = match name.find('#') {
             Some(idx) => name.split_at(idx),
-            None => (name.as_str(), ""),
+            None => (name, ""),
         };
 
         Some(match name {
@@ -145,7 +146,7 @@ impl Module {
         Some(result)
     }
 
-    pub fn read_mem(&self, mem_id: MemoryId, range: Range<usize>) -> Result<&[u8], MemError> {
+    pub fn get_mem(&self, mem_id: MemoryId, range: Range<usize>) -> Result<&[u8], MemError> {
         match &self.mems[mem_id].def {
             MemoryDef::Import(_) => Err(MemError::Import),
 
@@ -153,6 +154,24 @@ impl Module {
                 range,
                 size: bytes.len(),
             }),
+        }
+    }
+
+    pub fn get_mem_mut(
+        &mut self,
+        mem_id: MemoryId,
+        range: Range<usize>,
+    ) -> Result<&mut [u8], MemError> {
+        match &mut self.mems[mem_id].def {
+            MemoryDef::Import(_) => Err(MemError::Import),
+
+            MemoryDef::Bytes(bytes) => {
+                let size = bytes.len();
+
+                bytes
+                    .get_mut(range.clone())
+                    .ok_or(MemError::OutOfBounds { range, size })
+            }
         }
     }
 }
@@ -213,7 +232,7 @@ pub struct Global {
 #[derive(Debug, Clone)]
 pub enum GlobalDef {
     Import(ImportId),
-    Value(Expr),
+    Value(ConstExpr),
 }
 
 impl GlobalDef {

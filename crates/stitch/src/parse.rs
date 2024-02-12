@@ -11,10 +11,8 @@ use wasmparser::{
 use crate::ast::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64};
 use crate::ast::{
     self, BlockId, ExportId, FuncId, GlobalId, ImportDesc, ImportId, ImportKind, IntrinsicDecl,
-    LocalId, MemoryId, TableId, TypeId, STITCH_MODULE_NAME,
+    LocalId, MemoryId, TableId, TypeId, PAGE_SIZE, STITCH_MODULE_NAME,
 };
-
-const PAGE_SIZE: usize = 65536;
 
 const FEATURES: WasmFeatures = WasmFeatures {
     mutable_global: true,
@@ -495,7 +493,7 @@ impl Parser {
                 .body
                 .try_into()
                 .unwrap();
-            let def = ast::GlobalDef::Value(expr);
+            let def = ast::GlobalDef::Value(expr.try_into().unwrap());
 
             self.add_global(ast::Global { ty, def });
         }

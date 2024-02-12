@@ -10,8 +10,8 @@ use wasm_encoder::{
 use crate::ast::expr::{BinOp, Block, Id, MemArg, NulOp, TernOp, UnOp, Value};
 use crate::ast::ty::{BlockType, ElemType, GlobalType, MemoryType, TableType, Type, ValType};
 use crate::ast::{
-    self, BlockId, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId, ImportDesc,
-    ImportId, LocalId, MemoryDef, MemoryId, Module, TableDef, TableId, TypeId,
+    self, BlockId, ConstExpr, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId,
+    ImportDesc, ImportId, LocalId, MemoryDef, MemoryId, Module, TableDef, TableId, TypeId,
 };
 use crate::util::iter::segments;
 use crate::util::slot::SeqSlot;
@@ -375,16 +375,18 @@ impl Encoder<'_> {
         }
     }
 
-    fn convert_const_expr(&self, expr: &Expr) -> Option<wasm_encoder::ConstExpr> {
-        use wasm_encoder::ConstExpr;
-
+    fn convert_const_expr(&self, expr: &ConstExpr) -> Option<wasm_encoder::ConstExpr> {
         Some(match *expr {
-            Expr::Value(Value::I32(value), _) => ConstExpr::i32_const(value),
-            Expr::Value(Value::I64(value), _) => ConstExpr::i64_const(value),
-            Expr::Value(Value::F32(value), _) => ConstExpr::f32_const(value.to_f32()),
-            Expr::Value(Value::F64(value), _) => ConstExpr::f64_const(value.to_f64()),
-            Expr::Nullary(NulOp::GlobalGet(global_id)) => {
-                ConstExpr::global_get(self.globals[global_id] as u32)
+            ConstExpr::Value(Value::I32(value), _) => wasm_encoder::ConstExpr::i32_const(value),
+            ConstExpr::Value(Value::I64(value), _) => wasm_encoder::ConstExpr::i64_const(value),
+            ConstExpr::Value(Value::F32(value), _) => {
+                wasm_encoder::ConstExpr::f32_const(value.to_f32())
+            }
+            ConstExpr::Value(Value::F64(value), _) => {
+                wasm_encoder::ConstExpr::f64_const(value.to_f64())
+            }
+            ConstExpr::GlobalGet(global_id) => {
+                wasm_encoder::ConstExpr::global_get(self.globals[global_id] as u32)
             }
             _ => return None,
         })

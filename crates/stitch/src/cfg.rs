@@ -8,7 +8,7 @@ mod remove_unreachable_blocks;
 mod rpo;
 mod to_ast;
 
-use std::slice;
+use std::{iter, slice};
 
 use slotmap::{new_key_type, SlotMap};
 
@@ -44,6 +44,16 @@ impl I32Load {
     pub fn sign_extend(&self) -> bool {
         *self as u8 & 0b1_000 != 0
     }
+
+    pub fn load(&self, src: &[u8]) -> i32 {
+        match self {
+            Self::Four => i32::from_le_bytes(src.try_into().unwrap()),
+            Self::TwoS => i16::from_le_bytes(src.try_into().unwrap()) as i32,
+            Self::TwoU => u16::from_le_bytes(src.try_into().unwrap()) as i32,
+            Self::OneS => i8::from_le_bytes(src.try_into().unwrap()) as i32,
+            Self::OneU => u8::from_le_bytes(src.try_into().unwrap()) as i32,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +76,18 @@ impl I64Load {
     pub fn sign_extend(&self) -> bool {
         *self as u8 & 0b1_0000 != 0
     }
+
+    pub fn load(&self, src: &[u8]) -> i64 {
+        match self {
+            Self::Eight => i64::from_le_bytes(src.try_into().unwrap()),
+            Self::FourS => i32::from_le_bytes(src.try_into().unwrap()) as i64,
+            Self::FourU => u32::from_le_bytes(src.try_into().unwrap()) as i64,
+            Self::TwoS => i16::from_le_bytes(src.try_into().unwrap()) as i64,
+            Self::TwoU => u16::from_le_bytes(src.try_into().unwrap()) as i64,
+            Self::OneS => i8::from_le_bytes(src.try_into().unwrap()) as i64,
+            Self::OneU => u8::from_le_bytes(src.try_into().unwrap()) as i64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +96,34 @@ pub enum Load {
     I64(I64Load),
     F32,
     F64,
+}
+
+impl Load {
+    pub fn src_size(&self) -> usize {
+        match self {
+            Self::I32(load) => load.src_size(),
+            Self::I64(load) => load.src_size(),
+            Self::F32 => 4,
+            Self::F64 => 8,
+        }
+    }
+
+    pub fn sign_extend(&self) -> bool {
+        match self {
+            Self::I32(load) => load.sign_extend(),
+            Self::I64(load) => load.sign_extend(),
+            Self::F32 | Self::F64 => false,
+        }
+    }
+
+    pub fn load(&self, src: &[u8]) -> Value {
+        match self {
+            Self::I32(load) => Value::I32(load.load(src)),
+            Self::I64(load) => Value::I64(load.load(src)),
+            Self::F32 => Value::F32(f32::from_le_bytes(src.try_into().unwrap()).into()),
+            Self::F64 => Value::F64(f64::from_le_bytes(src.try_into().unwrap()).into()),
+        }
+    }
 }
 
 impl From<I32Load> for Load {
@@ -100,6 +150,11 @@ impl I32Store {
     pub fn dst_size(&self) -> usize {
         *self as usize
     }
+
+    pub fn store(&self, dst: &mut [u8], value: i32) {
+        let src = value.to_le_bytes();
+        dst.copy_from_slice(&src[0..*self as usize]);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,6 +170,11 @@ impl I64Store {
     pub fn dst_size(&self) -> usize {
         *self as usize
     }
+
+    pub fn store(&self, dst: &mut [u8], value: i64) {
+        let src = value.to_le_bytes();
+        dst.copy_from_slice(&src[0..*self as usize]);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,6 +183,26 @@ pub enum Store {
     I64(I64Store),
     F32,
     F64,
+}
+
+impl Store {
+    pub fn dst_size(&self) -> usize {
+        match self {
+            Self::I32(store) => store.dst_size(),
+            Self::I64(store) => store.dst_size(),
+            Self::F32 => 4,
+            Self::F64 => 8,
+        }
+    }
+
+    pub fn store(&self, dst: &mut [u8], value: Value) {
+        match *self {
+            Self::I32(store) => store.store(dst, value.to_i32().unwrap()),
+            Self::I64(store) => store.store(dst, value.to_i64().unwrap()),
+            Self::F32 => dst.copy_from_slice(&value.to_f32().unwrap().to_bits().to_le_bytes()),
+            Self::F64 => dst.copy_from_slice(&value.to_f64().unwrap().to_bits().to_le_bytes()),
+        }
+    }
 }
 
 impl From<I32Store> for Store {
@@ -326,6 +406,22 @@ pub enum Call {
     },
 }
 
+impl Call {
+    pub fn nth_subexpr(&self, n: usize) -> Option<&Expr> {
+        match self {
+            Self::Direct { args, .. } => args.get(n),
+            Self::Indirect { args, index, .. } => args.iter().chain(iter::once(&**index)).nth(n),
+        }
+    }
+
+    pub fn subexpr_count(&self) -> usize {
+        match self {
+            Self::Direct { args, .. } => args.len(),
+            Self::Indirect { args, index, .. } => args.len() + 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Value(Value, ValueAttrs),
@@ -517,12 +613,17 @@ impl Expr {
             Self::Unary(_, expr) => (n == 0).then_some(&**expr),
             Self::Binary(_, exprs) => exprs.get(n),
             Self::Ternary(_, exprs) => exprs.get(n),
-            Self::Call(Call::Direct { args, .. }) => args.get(n),
-            Self::Call(Call::Indirect { args, index, .. }) => match args.get(n) {
-                Some(expr) => Some(expr),
-                _ if n == args.len() => Some(&**index),
-                _ => None,
-            },
+            Self::Call(call) => call.nth_subexpr(n),
+        }
+    }
+
+    pub fn subexpr_count(&self) -> usize {
+        match self {
+            Self::Value(..) | Self::Nullary(_) => 0,
+            Self::Unary(..) => 1,
+            Self::Binary(..) => 2,
+            Self::Ternary(..) => 3,
+            Self::Call(call) => call.subexpr_count(),
         }
     }
 }

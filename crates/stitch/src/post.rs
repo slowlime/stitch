@@ -36,9 +36,7 @@ impl<'a> PostProc<'a> {
             .filter(|&import_id| self.module.get_intrinsic(import_id).is_some())
             .collect::<HashSet<_>>();
 
-        fn check_expr<'a>(
-            func_ids: &'a mut HashSet<FuncId>,
-        ) -> impl FnMut(&Expr) -> bool + 'a {
+        fn check_expr<'a>(func_ids: &'a mut HashSet<FuncId>) -> impl FnMut(&Expr) -> bool + 'a {
             move |expr: &Expr| match expr {
                 Expr::Value(Value::Id(Id::Func(func_id)), _) if func_ids.remove(func_id) => {
                     warn!("Expr::Index references an intrinsic");

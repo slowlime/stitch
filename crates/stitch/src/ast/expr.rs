@@ -12,6 +12,16 @@ use super::{BlockId, FuncId, GlobalId, LocalId, MemoryId, TableId, TypeId};
 pub struct F32(u32);
 
 impl F32 {
+    pub fn nearest(&self) -> Self {
+        let f = self.to_f32();
+
+        if f.fract() == 0.5 && f.trunc() % 2.0 == 0.0 {
+            f.floor().into()
+        } else {
+            f.round().into()
+        }
+    }
+
     pub fn from_bits(bits: u32) -> Self {
         Self(bits)
     }
@@ -41,6 +51,12 @@ impl Display for F32 {
     }
 }
 
+impl Default for F32 {
+    fn default() -> Self {
+        Self::from_f32(0.0)
+    }
+}
+
 impl PartialOrd for F32 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.to_f32().partial_cmp(&other.to_f32())
@@ -57,6 +73,16 @@ impl From<f32> for F32 {
 pub struct F64(u64);
 
 impl F64 {
+    pub fn nearest(&self) -> Self {
+        let f = self.to_f64();
+
+        if f.fract() == 0.5 && f.trunc() % 2.0 == 0.0 {
+            f.floor().into()
+        } else {
+            f.round().into()
+        }
+    }
+
     pub fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -86,6 +112,12 @@ impl Display for F64 {
     }
 }
 
+impl Default for F64 {
+    fn default() -> Self {
+        Self::from_f64(0.0)
+    }
+}
+
 impl PartialOrd for F64 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.to_f64().partial_cmp(&other.to_f64())
@@ -108,6 +140,15 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn default_for(val_ty: &ValType) -> Self {
+        match val_ty {
+            ValType::I32 => Self::I32(0),
+            ValType::I64 => Self::I64(0),
+            ValType::F32 => Self::F32(Default::default()),
+            ValType::F64 => Self::F64(Default::default()),
+        }
+    }
+
     pub fn val_ty(&self) -> ValType {
         match self {
             Self::I32(_) | Self::Id(_) => ValType::I32,
@@ -157,6 +198,32 @@ impl ValueAttrs {
         const MEET_AND: ValueAttrs = MEET_OR.complement();
 
         *self & *other & MEET_AND | (*self | *other) & MEET_OR
+    }
+
+    pub fn deref_attrs(&self) -> ValueAttrs {
+        if self.contains(Self::PROPAGATE_LOAD) {
+            *self & !(Self::PROPAGATE_LOAD | Self::UNKNOWN)
+        } else {
+            Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstExpr {
+    Value(Value, ValueAttrs),
+    GlobalGet(GlobalId),
+}
+
+impl TryFrom<Expr> for ConstExpr {
+    type Error = ();
+
+    fn try_from(expr: Expr) -> Result<Self, Self::Error> {
+        match expr {
+            Expr::Value(value, attrs) => Ok(Self::Value(value, attrs)),
+            Expr::Nullary(NulOp::GlobalGet(global_id)) => Ok(Self::GlobalGet(global_id)),
+            _ => Err(()),
+        }
     }
 }
 
