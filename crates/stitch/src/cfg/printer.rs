@@ -274,7 +274,6 @@ impl Display for Expr {
                     Value::I64(value) => write!(f, "(i64.const {value}")?,
                     Value::F32(value) => write!(f, "(f32.const {value}")?,
                     Value::F64(value) => write!(f, "(f64.const {value}")?,
-                    Value::Id(id) => write!(f, "(index_of {id:?})")?,
                 }
 
                 write!(f, " {attrs:?})")?;

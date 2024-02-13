@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use log::warn;
 
-use crate::ast::expr::{make_visitor, Id, NulOp, UnOp, Value};
+use crate::ast::expr::{make_visitor, NulOp, UnOp};
 use crate::ast::ty::Type;
 use crate::ast::{Expr, FuncId, Module, TableDef};
 
@@ -38,11 +38,6 @@ impl<'a> PostProc<'a> {
 
         fn check_expr<'a>(func_ids: &'a mut HashSet<FuncId>) -> impl FnMut(&Expr) -> bool + 'a {
             move |expr: &Expr| match expr {
-                Expr::Value(Value::Id(Id::Func(func_id)), _) if func_ids.remove(func_id) => {
-                    warn!("Expr::Index references an intrinsic");
-                    true
-                }
-
                 Expr::Call(func_id, _) if func_ids.remove(func_id) => {
                     warn!("Expr::Call references an intrinsic");
                     true

@@ -136,7 +136,6 @@ pub enum Value {
     I64(i64),
     F32(F32),
     F64(F64),
-    Id(Id),
 }
 
 impl Value {
@@ -151,7 +150,7 @@ impl Value {
 
     pub fn val_ty(&self) -> ValType {
         match self {
-            Self::I32(_) | Self::Id(_) => ValType::I32,
+            Self::I32(_) => ValType::I32,
             Self::I64(_) => ValType::I64,
             Self::F32(_) => ValType::F32,
             Self::F64(_) => ValType::F64,
@@ -672,17 +671,6 @@ impl Display for TernOp {
         match self {
             Self::Select => write!(f, "select"),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Id {
-    Func(FuncId),
-}
-
-impl From<FuncId> for Id {
-    fn from(func_id: FuncId) -> Self {
-        Self::Func(func_id)
     }
 }
 
@@ -1647,7 +1635,6 @@ impl Expr {
                             Value::I64(value) => write!(self.f, "i64.const {value}")?,
                             Value::F32(value) => write!(self.f, "f32.const {value}")?,
                             Value::F64(value) => write!(self.f, "f64.const {value}")?,
-                            Value::Id(id) => write!(self.f, "index_of {id:?}")?,
                         }
 
                         write!(self.f, " {attrs:?}")?

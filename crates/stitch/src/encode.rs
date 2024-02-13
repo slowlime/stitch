@@ -7,7 +7,7 @@ use wasm_encoder::{
     GlobalSection, ImportSection, MemorySection, StartSection, TableSection, TypeSection,
 };
 
-use crate::ast::expr::{BinOp, Block, Id, MemArg, NulOp, TernOp, UnOp, Value};
+use crate::ast::expr::{BinOp, Block, MemArg, NulOp, TernOp, UnOp, Value};
 use crate::ast::ty::{BlockType, ElemType, GlobalType, MemoryType, TableType, Type, ValType};
 use crate::ast::{
     self, BlockId, ConstExpr, ExportDef, Expr, Func, FuncBody, FuncId, GlobalDef, GlobalId,
@@ -388,7 +388,6 @@ impl Encoder<'_> {
             ConstExpr::GlobalGet(global_id) => {
                 wasm_encoder::ConstExpr::global_get(self.globals[global_id] as u32)
             }
-            _ => return None,
         })
     }
 }
@@ -439,9 +438,6 @@ impl<'a> BodyEncoder<'a, '_> {
                 Value::I64(value) => Instruction::I64Const(*value),
                 Value::F32(value) => Instruction::F32Const(value.to_f32()),
                 Value::F64(value) => Instruction::F64Const(value.to_f64()),
-                Value::Id(id) => Instruction::I32Const(match *id {
-                    Id::Func(func_id) => self.encoder.funcs[func_id],
-                } as i32),
             }),
 
             Expr::Nullary(op) => self.nullary(match *op {

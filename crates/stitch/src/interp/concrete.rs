@@ -5,7 +5,7 @@ use std::rc::Rc;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use slotmap::SecondaryMap;
 
-use crate::ast::expr::{Id, Value, ValueAttrs, F32, F64};
+use crate::ast::expr::{Value, ValueAttrs, F32, F64};
 use crate::ast::ty::FuncType;
 use crate::ast::{ConstExpr, FuncId, GlobalDef, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE};
 use crate::cfg::{
@@ -41,8 +41,8 @@ impl<'a> From<&'a [Expr]> for Task<'a> {
 }
 
 trait ValueExt {
-    fn try_to_i32(&self) -> Result<i32>;
-    fn try_to_u32(&self) -> Result<u32>;
+    fn unwrap_i32(&self) -> i32;
+    fn unwrap_u32(&self) -> u32;
     fn unwrap_i64(&self) -> i64;
     fn unwrap_u64(&self) -> u64;
     fn unwrap_f32(&self) -> f32;
@@ -50,15 +50,12 @@ trait ValueExt {
 }
 
 impl ValueExt for Value {
-    fn try_to_i32(&self) -> Result<i32> {
-        match self {
-            Self::Id(id) => bail!("cannot cast (index_of {id:?}) to i32"),
-            _ => Ok(self.to_i32().unwrap()),
-        }
+    fn unwrap_i32(&self) -> i32 {
+        self.to_i32().unwrap()
     }
 
-    fn try_to_u32(&self) -> Result<u32> {
-        self.try_to_i32().map(|x| x as u32)
+    fn unwrap_u32(&self) -> u32 {
+        self.to_u32().unwrap()
     }
 
     fn unwrap_i64(&self) -> i64 {
@@ -168,7 +165,7 @@ impl Interpreter<'_> {
 
                     Stmt::Store(mem_arg, store, _) => {
                         let (value, _) = frame.stack.pop().unwrap();
-                        let base_addr = frame.stack.pop().unwrap().0.try_to_u32()?;
+                        let base_addr = frame.stack.pop().unwrap().0.unwrap_u32();
                         let start = (base_addr + mem_arg.offset) as usize;
                         let range = start..start + store.dst_size();
                         let bytes = self.module.get_mem_mut(mem_arg.mem_id, range)?;
@@ -185,7 +182,7 @@ impl Interpreter<'_> {
                     Terminator::Br(block_id) => frame.jump(block_id),
 
                     Terminator::If(_, [then_block_id, else_block_id]) => {
-                        if frame.stack.pop().unwrap().0.try_to_i32()? == 0 {
+                        if frame.stack.pop().unwrap().0.unwrap_i32() == 0 {
                             frame.jump(else_block_id);
                         } else {
                             frame.jump(then_block_id);
@@ -195,7 +192,7 @@ impl Interpreter<'_> {
                     Terminator::Switch(_, ref block_ids) => {
                         let (&default_block_id, block_ids) = block_ids.split_last().unwrap();
 
-                        match block_ids.get(frame.stack.pop().unwrap().0.try_to_u32()? as usize) {
+                        match block_ids.get(frame.stack.pop().unwrap().0.unwrap_u32() as usize) {
                             Some(&block_id) => frame.jump(block_id),
                             None => frame.jump(default_block_id),
                         }
@@ -391,15 +388,15 @@ impl Interpreter<'_> {
 
         let result = match op {
             UnOp::I32Clz => (
-                Value::I32(arg.try_to_i32()?.leading_zeros() as i32),
+                Value::I32(arg.unwrap_i32().leading_zeros() as i32),
                 Default::default(),
             ),
             UnOp::I32Ctz => (
-                Value::I32(arg.try_to_i32()?.trailing_zeros() as i32),
+                Value::I32(arg.unwrap_i32().trailing_zeros() as i32),
                 Default::default(),
             ),
             UnOp::I32Popcnt => (
-                Value::I32(arg.try_to_i32()?.count_ones() as i32),
+                Value::I32(arg.unwrap_i32().count_ones() as i32),
                 Default::default(),
             ),
 
@@ -433,18 +430,18 @@ impl Interpreter<'_> {
             UnOp::F64Nearest => (Value::F64(arg.to_f64().unwrap().nearest()), arg_attrs),
 
             UnOp::I32Eqz => (
-                Value::I32((arg.try_to_i32()? == 0) as i32),
+                Value::I32((arg.unwrap_i32() == 0) as i32),
                 Default::default(),
             ),
             UnOp::I64Eqz => (
-                Value::I32((arg.try_to_i32()? == 0) as i32),
+                Value::I32((arg.unwrap_i32() == 0) as i32),
                 Default::default(),
             ),
 
             UnOp::I32WrapI64 => (Value::I32(arg.unwrap_i64() as i32), arg_attrs),
 
-            UnOp::I64ExtendI32S => (Value::I64(arg.try_to_i32()? as i64), arg_attrs),
-            UnOp::I64ExtendI32U => (Value::I64(arg.try_to_u32()? as i64), arg_attrs),
+            UnOp::I64ExtendI32S => (Value::I64(arg.unwrap_i32() as i64), arg_attrs),
+            UnOp::I64ExtendI32U => (Value::I64(arg.unwrap_u32() as i64), arg_attrs),
 
             UnOp::I32TruncF32S => (Value::I32(arg.unwrap_f32() as i32), arg_attrs),
             UnOp::I32TruncF32U => (Value::I32(arg.unwrap_f32() as u32 as i32), arg_attrs),
@@ -459,17 +456,17 @@ impl Interpreter<'_> {
             UnOp::F32DemoteF64 => (Value::F32((arg.unwrap_f64() as f32).into()), arg_attrs),
             UnOp::F64PromoteF32 => (Value::F64((arg.unwrap_f32() as f64).into()), arg_attrs),
 
-            UnOp::F32ConvertI32S => (Value::F32((arg.try_to_i32()? as f32).into()), arg_attrs),
-            UnOp::F32ConvertI32U => (Value::F32((arg.try_to_u32()? as f32).into()), arg_attrs),
+            UnOp::F32ConvertI32S => (Value::F32((arg.unwrap_i32() as f32).into()), arg_attrs),
+            UnOp::F32ConvertI32U => (Value::F32((arg.unwrap_u32() as f32).into()), arg_attrs),
             UnOp::F32ConvertI64S => (Value::F32((arg.unwrap_i64() as f32).into()), arg_attrs),
             UnOp::F32ConvertI64U => (Value::F32((arg.unwrap_u64() as f32).into()), arg_attrs),
 
-            UnOp::F64ConvertI32S => (Value::F64((arg.try_to_i32()? as f64).into()), arg_attrs),
-            UnOp::F64ConvertI32U => (Value::F64((arg.try_to_u32()? as f64).into()), arg_attrs),
+            UnOp::F64ConvertI32S => (Value::F64((arg.unwrap_i32() as f64).into()), arg_attrs),
+            UnOp::F64ConvertI32U => (Value::F64((arg.unwrap_u32() as f64).into()), arg_attrs),
             UnOp::F64ConvertI64S => (Value::F64((arg.unwrap_i64() as f64).into()), arg_attrs),
             UnOp::F64ConvertI64U => (Value::F64((arg.unwrap_u64() as f64).into()), arg_attrs),
 
-            UnOp::F32ReinterpretI32 => (Value::F32(F32::from_bits(arg.try_to_u32()?)), arg_attrs),
+            UnOp::F32ReinterpretI32 => (Value::F32(F32::from_bits(arg.unwrap_u32())), arg_attrs),
             UnOp::F64ReinterpretI64 => (Value::F64(F64::from_bits(arg.unwrap_u64())), arg_attrs),
             UnOp::I32ReinterpretF32 => (
                 Value::I32(arg.to_f32().unwrap().to_bits() as i32),
@@ -480,8 +477,8 @@ impl Interpreter<'_> {
                 arg_attrs,
             ),
 
-            UnOp::I32Extend8S => (Value::I32(arg.try_to_u32()? as i8 as i32), arg_attrs),
-            UnOp::I32Extend16S => (Value::I32(arg.try_to_u32()? as i64 as i32), arg_attrs),
+            UnOp::I32Extend8S => (Value::I32(arg.unwrap_u32() as i8 as i32), arg_attrs),
+            UnOp::I32Extend16S => (Value::I32(arg.unwrap_u32() as i64 as i32), arg_attrs),
 
             UnOp::I64Extend8S => (Value::I64(arg.unwrap_u64() as i8 as i64), arg_attrs),
             UnOp::I64Extend16S => (Value::I64(arg.unwrap_u64() as i16 as i64), arg_attrs),
@@ -494,7 +491,7 @@ impl Interpreter<'_> {
             }
 
             UnOp::Load(mem_arg, load) => {
-                let base_addr = arg.try_to_u32()?;
+                let base_addr = arg.unwrap_u32();
                 let start = (base_addr + mem_arg.offset) as usize;
                 let range = start..start + load.src_size();
                 let bytes = self.module.get_mem(mem_arg.mem_id, range)?;
@@ -513,7 +510,7 @@ impl Interpreter<'_> {
 
                     MemoryDef::Bytes(ref mut bytes) => {
                         let prev_pages = bytes.len().div_ceil(PAGE_SIZE);
-                        let increment = arg.try_to_u32()? as usize;
+                        let increment = arg.unwrap_u32() as usize;
 
                         match mem.ty.limits.max {
                             Some(max) if prev_pages + increment > max as usize => {
@@ -544,66 +541,66 @@ impl Interpreter<'_> {
 
         frame.stack.push(match op {
             BinOp::I32Add => (
-                Value::I32(lhs.try_to_i32()?.wrapping_add(rhs.try_to_i32()?)),
+                Value::I32(lhs.unwrap_i32().wrapping_add(rhs.unwrap_i32())),
                 meet_attrs,
             ),
             BinOp::I32Sub => (
-                Value::I32(lhs.try_to_i32()?.wrapping_add(rhs.try_to_i32()?)),
+                Value::I32(lhs.unwrap_i32().wrapping_add(rhs.unwrap_i32())),
                 meet_attrs,
             ),
             BinOp::I32Mul => (
-                Value::I32(lhs.try_to_i32()?.wrapping_mul(rhs.try_to_i32()?)),
+                Value::I32(lhs.unwrap_i32().wrapping_mul(rhs.unwrap_i32())),
                 meet_attrs,
             ),
-            BinOp::I32DivS => match (lhs.try_to_i32()?, rhs.try_to_i32()?) {
+            BinOp::I32DivS => match (lhs.unwrap_i32(), rhs.unwrap_i32()) {
                 (_, 0) => bail!("division by zero"),
                 (lhs, -1) if lhs == i32::MIN => {
                     bail!("dividing i32::MIN by -1 resulted in an overflow")
                 }
                 (lhs, rhs) => (Value::I32(lhs / rhs), meet_attrs),
             },
-            BinOp::I32DivU => match (lhs.try_to_u32()?, rhs.try_to_u32()?) {
+            BinOp::I32DivU => match (lhs.unwrap_u32(), rhs.unwrap_u32()) {
                 (_, 0) => bail!("division by zero"),
                 (lhs, rhs) => (Value::I32((lhs / rhs) as i32), meet_attrs),
             },
-            BinOp::I32RemS => match (lhs.try_to_i32()?, rhs.try_to_i32()?) {
+            BinOp::I32RemS => match (lhs.unwrap_i32(), rhs.unwrap_i32()) {
                 (_, 0) => bail!("taking the remainder of dividing by zero"),
                 (lhs, rhs) => (Value::I32(lhs % rhs), meet_attrs),
             },
-            BinOp::I32RemU => match (lhs.try_to_u32()?, rhs.try_to_u32()?) {
+            BinOp::I32RemU => match (lhs.unwrap_u32(), rhs.unwrap_u32()) {
                 (_, 0) => bail!("taking the remainder of dividing by zero"),
                 (lhs, rhs) => (Value::I32((lhs % rhs) as i32), meet_attrs),
             },
             BinOp::I32And => (
-                Value::I32(lhs.try_to_i32()? & rhs.try_to_i32()?),
+                Value::I32(lhs.unwrap_i32() & rhs.unwrap_i32()),
                 meet_attrs,
             ),
             BinOp::I32Or => (
-                Value::I32(lhs.try_to_i32()? & rhs.try_to_i32()?),
+                Value::I32(lhs.unwrap_i32() & rhs.unwrap_i32()),
                 meet_attrs,
             ),
             BinOp::I32Xor => (
-                Value::I32(lhs.try_to_i32()? ^ rhs.try_to_i32()?),
+                Value::I32(lhs.unwrap_i32() ^ rhs.unwrap_i32()),
                 meet_attrs,
             ),
             BinOp::I32Shl => (
-                Value::I32(lhs.try_to_i32()?.wrapping_shl(rhs.try_to_u32()?)),
+                Value::I32(lhs.unwrap_i32().wrapping_shl(rhs.unwrap_u32())),
                 meet_attrs,
             ),
             BinOp::I32ShrS => (
-                Value::I32(lhs.try_to_i32()?.wrapping_shr(rhs.try_to_u32()?)),
+                Value::I32(lhs.unwrap_i32().wrapping_shr(rhs.unwrap_u32())),
                 meet_attrs,
             ),
             BinOp::I32ShrU => (
-                Value::I32(lhs.try_to_u32()?.wrapping_shr(rhs.try_to_u32()?) as i32),
+                Value::I32(lhs.unwrap_u32().wrapping_shr(rhs.unwrap_u32()) as i32),
                 meet_attrs,
             ),
             BinOp::I32Rotl => (
-                Value::I32(lhs.try_to_i32()?.rotate_left(rhs.try_to_u32()?)),
+                Value::I32(lhs.unwrap_i32().rotate_left(rhs.unwrap_u32())),
                 meet_attrs,
             ),
             BinOp::I32Rotr => (
-                Value::I32(lhs.try_to_i32()?.rotate_right(rhs.try_to_u32()?)),
+                Value::I32(lhs.unwrap_i32().rotate_right(rhs.unwrap_u32())),
                 meet_attrs,
             ),
 
@@ -721,49 +718,43 @@ impl Interpreter<'_> {
             ),
 
             BinOp::I32Eq => (
-                Value::I32(match (lhs, rhs) {
-                    (Value::Id(Id::Func(lhs)), Value::Id(Id::Func(rhs))) => (lhs == rhs) as i32,
-                    _ => (lhs.try_to_i32()? == rhs.try_to_i32()?) as i32,
-                }),
+                Value::I32((lhs.unwrap_i32() == rhs.unwrap_i32()) as i32),
                 Default::default(),
             ),
             BinOp::I32Ne => (
-                Value::I32(match (lhs, rhs) {
-                    (Value::Id(Id::Func(lhs)), Value::Id(Id::Func(rhs))) => (lhs != rhs) as i32,
-                    _ => (lhs.try_to_i32()? != rhs.try_to_i32()?) as i32,
-                }),
+                Value::I32((lhs.unwrap_i32() != rhs.unwrap_i32()) as i32),
                 Default::default(),
             ),
             BinOp::I32LtS => (
-                Value::I32((lhs.try_to_i32()? < rhs.try_to_i32()?) as i32),
+                Value::I32((lhs.unwrap_i32() < rhs.unwrap_i32()) as i32),
                 Default::default(),
             ),
             BinOp::I32LtU => (
-                Value::I32((lhs.try_to_u32()? < rhs.try_to_u32()?) as i32),
+                Value::I32((lhs.unwrap_u32() < rhs.unwrap_u32()) as i32),
                 Default::default(),
             ),
             BinOp::I32GtS => (
-                Value::I32((lhs.try_to_i32()? > rhs.try_to_i32()?) as i32),
+                Value::I32((lhs.unwrap_i32() > rhs.unwrap_i32()) as i32),
                 Default::default(),
             ),
             BinOp::I32GtU => (
-                Value::I32((lhs.try_to_u32()? > rhs.try_to_u32()?) as i32),
+                Value::I32((lhs.unwrap_u32() > rhs.unwrap_u32()) as i32),
                 Default::default(),
             ),
             BinOp::I32LeS => (
-                Value::I32((lhs.try_to_i32()? <= rhs.try_to_i32()?) as i32),
+                Value::I32((lhs.unwrap_i32() <= rhs.unwrap_i32()) as i32),
                 Default::default(),
             ),
             BinOp::I32LeU => (
-                Value::I32((lhs.try_to_u32()? <= rhs.try_to_u32()?) as i32),
+                Value::I32((lhs.unwrap_u32() <= rhs.unwrap_u32()) as i32),
                 Default::default(),
             ),
             BinOp::I32GeS => (
-                Value::I32((lhs.try_to_i32()? >= rhs.try_to_i32()?) as i32),
+                Value::I32((lhs.unwrap_i32() >= rhs.unwrap_i32()) as i32),
                 Default::default(),
             ),
             BinOp::I32GeU => (
-                Value::I32((lhs.try_to_u32()? >= rhs.try_to_u32()?) as i32),
+                Value::I32((lhs.unwrap_u32() >= rhs.unwrap_u32()) as i32),
                 Default::default(),
             ),
 
@@ -871,7 +862,7 @@ impl Interpreter<'_> {
             TernOp::Select => {
                 let [lhs, rhs, (condition, _)] = args;
 
-                match condition.try_to_i32()? {
+                match condition.unwrap_i32() {
                     0 => rhs,
                     _ => lhs,
                 }
@@ -906,7 +897,7 @@ impl Interpreter<'_> {
                 }
 
                 TableDef::Elems(elems) => {
-                    let idx = args.pop().unwrap().0.try_to_u32()? as usize;
+                    let idx = args.pop().unwrap().0.unwrap_u32() as usize;
 
                     elems.get(idx)
                         .with_context(|| anyhow!(

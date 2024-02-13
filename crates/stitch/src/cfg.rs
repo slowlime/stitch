@@ -417,7 +417,7 @@ impl Call {
     pub fn subexpr_count(&self) -> usize {
         match self {
             Self::Direct { args, .. } => args.len(),
-            Self::Indirect { args, index, .. } => args.len() + 1,
+            Self::Indirect { args, .. } => args.len() + 1,
         }
     }
 }
