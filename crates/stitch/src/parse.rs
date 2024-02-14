@@ -376,6 +376,9 @@ impl Parser {
             }
         }
 
+        self.module.default_table = self.tables.get(0).copied().unwrap_or_default();
+        self.module.default_mem = self.mems.get(0).copied().unwrap_or_default();
+
         self.check_intrinsic_types()?;
 
         Ok(self.module)

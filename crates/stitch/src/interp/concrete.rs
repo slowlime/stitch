@@ -1,13 +1,15 @@
-use std::array;
 use std::ops::Neg;
 use std::rc::Rc;
+use std::{array, str};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use slotmap::SecondaryMap;
+use slotmap::{Key, SecondaryMap};
 
 use crate::ast::expr::{Value, ValueAttrs, F32, F64};
-use crate::ast::ty::FuncType;
-use crate::ast::{ConstExpr, FuncId, GlobalDef, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE};
+use crate::ast::ty::{ElemType, FuncType};
+use crate::ast::{
+    ConstExpr, Export, ExportDef, FuncId, GlobalDef, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE,
+};
 use crate::cfg::{
     BinOp, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
 };
@@ -571,18 +573,9 @@ impl Interpreter<'_> {
                 (_, 0) => bail!("taking the remainder of dividing by zero"),
                 (lhs, rhs) => (Value::I32((lhs % rhs) as i32), meet_attrs),
             },
-            BinOp::I32And => (
-                Value::I32(lhs.unwrap_i32() & rhs.unwrap_i32()),
-                meet_attrs,
-            ),
-            BinOp::I32Or => (
-                Value::I32(lhs.unwrap_i32() & rhs.unwrap_i32()),
-                meet_attrs,
-            ),
-            BinOp::I32Xor => (
-                Value::I32(lhs.unwrap_i32() ^ rhs.unwrap_i32()),
-                meet_attrs,
-            ),
+            BinOp::I32And => (Value::I32(lhs.unwrap_i32() & rhs.unwrap_i32()), meet_attrs),
+            BinOp::I32Or => (Value::I32(lhs.unwrap_i32() & rhs.unwrap_i32()), meet_attrs),
+            BinOp::I32Xor => (Value::I32(lhs.unwrap_i32() ^ rhs.unwrap_i32()), meet_attrs),
             BinOp::I32Shl => (
                 Value::I32(lhs.unwrap_i32().wrapping_shl(rhs.unwrap_u32())),
                 meet_attrs,
@@ -899,12 +892,17 @@ impl Interpreter<'_> {
                 TableDef::Elems(elems) => {
                     let idx = args.pop().unwrap().0.unwrap_u32() as usize;
 
-                    elems.get(idx)
-                        .with_context(|| anyhow!(
-                            "the indirect call index ({idx}) is out of range for a table of size {}",
+                    elems
+                        .get(idx)
+                        .with_context(|| {
+                            anyhow!(
+                            "an indirect call index ({idx}) is out of range for a table of size {}",
                             elems.len()
-                        ))?
-                        .with_context(|| anyhow!("an indirect call's table entry (index {idx}) is uninitialized"))?
+                        )
+                        })?
+                        .with_context(|| {
+                            anyhow!("an indirect call's table entry (index {idx}) is uninitialized")
+                        })?
                 }
             },
         };
@@ -922,8 +920,8 @@ impl Interpreter<'_> {
 
         if let Some(intrinsic) = self.module.funcs[func_id].get_intrinsic(&self.module) {
             match intrinsic {
-                IntrinsicDecl::Specialize => self.eval_intr_specialize(func_id, args)?,
-                IntrinsicDecl::Unknown => self.eval_intr_unknown(func_id)?,
+                IntrinsicDecl::Specialize => self.eval_intr_specialize(frames, args)?,
+                IntrinsicDecl::Unknown => self.eval_intr_unknown(frames, func_id)?,
             }
 
             Ok(EvalResult::Ok)
@@ -934,11 +932,139 @@ impl Interpreter<'_> {
         }
     }
 
-    fn eval_intr_specialize(&mut self, func_id: FuncId, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
-        todo!()
+    fn eval_intr_specialize(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        mut args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let [elem_idx, name_addr, name_len] = array::from_fn(|i| args[i].0.unwrap_u32());
+        args.drain(..3);
+
+        ensure!(
+            !self.module.default_table.is_null(),
+            "the module does not define a function table"
+        );
+        let table = &self.module.tables[self.module.default_table];
+        ensure!(
+            table.ty.elem_ty == ElemType::Funcref,
+            "the default table has a wrong type: expected {}, got {}",
+            ElemType::Funcref,
+            table.ty.elem_ty,
+        );
+
+        let func_id = match &table.def {
+            TableDef::Import(_) => {
+                bail!("cannot specialize a function referenced in an imported table")
+            }
+
+            TableDef::Elems(elems) => elems
+                .get(elem_idx as usize)
+                .with_context(|| {
+                    anyhow!(
+                        "a table entry index {elem_idx} is out of range for a table of size {}",
+                        elems.len()
+                    )
+                })?
+                .with_context(|| anyhow!("a table entry (index {elem_idx}) is uninitialized"))?,
+        };
+
+        let name_addr = name_addr as usize;
+        let name_len = name_len as usize;
+
+        let name = if name_len > 0 {
+            ensure!(
+                !self.module.default_mem.is_null(),
+                "the module does not define a memory"
+            );
+
+            let name_bytes = self
+                .module
+                .get_mem(self.module.default_mem, name_addr..name_addr + name_len)
+                .context("could not read the export name")?;
+            let name = str::from_utf8(name_bytes)
+                .context("the export name is not a valid utf-8 string")?;
+
+            ensure!(
+                !self
+                    .module
+                    .exports
+                    .values()
+                    .any(|export| &export.name == name),
+                "the export name is already in use: {name}"
+            );
+
+            Some(name.to_owned())
+        } else {
+            None
+        };
+
+        let args = args
+            .into_iter()
+            .map(|(value, attrs)| {
+                if attrs.contains(ValueAttrs::UNKNOWN) {
+                    None
+                } else {
+                    Some((value, attrs))
+                }
+            })
+            .collect();
+
+        let spec_func_id = self.specialize(func_id, args)?;
+
+        let table = &mut self.module.tables[self.module.default_table];
+        let TableDef::Elems(elems) = &mut table.def else {
+            unreachable!()
+        };
+
+        let idx = match elems
+            .iter_mut()
+            .enumerate()
+            .find(|(_, elem)| elem.is_none())
+        {
+            Some((idx, elem)) => {
+                *elem = Some(spec_func_id);
+
+                idx
+            }
+
+            None => match table.ty.limits.max {
+                Some(max) if elems.len() + 1 > max as usize => {
+                    bail!("cannot grow a table past its maximum size")
+                }
+
+                _ => {
+                    elems.push(Some(spec_func_id));
+
+                    elems.len() - 1
+                }
+            },
+        };
+
+        if let Some(name) = name {
+            self.module.exports.insert(Export {
+                name,
+                def: ExportDef::Func(spec_func_id),
+            });
+        }
+
+        let frame = frames.last_mut().unwrap();
+        frame.stack.push((
+            Value::I32(u32::try_from(idx).unwrap() as i32),
+            Default::default(),
+        ));
+
+        Ok(())
     }
 
-    fn eval_intr_unknown(&mut self, func_id: FuncId) -> Result<()> {
-        todo!()
+    fn eval_intr_unknown(&mut self, frames: &mut Vec<Frame>, func_id: FuncId) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        let func_ty = self.module.funcs[func_id].ty();
+        let val_ty = func_ty.ret.as_ref().unwrap();
+        frame.stack.push((
+            Value::default_for(&val_ty),
+            ValueAttrs::default() | ValueAttrs::UNKNOWN,
+        ));
+
+        Ok(())
     }
 }
