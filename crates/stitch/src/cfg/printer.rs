@@ -237,7 +237,7 @@ impl Display for TernOp {
 impl Display for Call {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Direct { func_id, args } => {
+            Self::Direct { func_id, args, .. } => {
                 write!(f, "call {func_id:?}")?;
 
                 for arg in args {
@@ -250,6 +250,7 @@ impl Display for Call {
                 table_id,
                 args,
                 index,
+                ..
             } => {
                 write!(f, "call_indirect {ty_id:?} {table_id:?}")?;
 
@@ -283,7 +284,6 @@ impl Display for Expr {
             Self::Unary(op, expr) => write!(f, "({op} {expr})")?,
             Self::Binary(op, exprs) => write!(f, "({op} {} {})", exprs[0], exprs[1])?,
             Self::Ternary(op, exprs) => write!(f, "({op} {} {} {})", exprs[0], exprs[1], exprs[2])?,
-            Self::Call(call) => write!(f, "({call})")?,
         }
 
         Ok(())
@@ -300,7 +300,10 @@ impl Display for Stmt {
             Self::Store(mem_arg, store, args) => {
                 write!(f, "({store} {mem_arg} {} {})", args[0], args[1])
             }
-            Self::Call(call) => write!(f, "({call}"),
+            Self::Call(call) => match call.ret_local_id() {
+                Some(ret_local_id) => write!(f, "(local.set {ret_local_id:?} ({call}))"),
+                None => write!(f, "({call})"),
+            },
         }
     }
 }

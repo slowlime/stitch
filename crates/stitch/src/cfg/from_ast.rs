@@ -1032,7 +1032,7 @@ impl<'a> Translator<'a> {
                 expr: &args[next_subexpr],
             });
         } else {
-            let is_stmt = self.module.funcs[func_id].ty().ret.is_none();
+            let ret_ty = self.module.funcs[func_id].ty().ret.clone();
 
             let mut args = (0..args.len())
                 .map(|_| {
@@ -1042,14 +1042,9 @@ impl<'a> Translator<'a> {
                 .collect::<Vec<_>>();
             args.reverse();
 
-            let call = Call::Direct { func_id, args };
-
-            let result = if is_stmt {
-                self.push_stmt(Stmt::Call(call))
-            } else {
-                self.push_drop(Expr::Call(call))
-            };
-
+            let ret_local_id = ret_ty.map(|val_ty| self.func.locals.insert(val_ty));
+            let call = Call::Direct { ret_local_id, func_id, args };
+            let result = self.push_stmt(Stmt::Call(call));
             self.task_results.push(result);
         }
     }
@@ -1080,7 +1075,7 @@ impl<'a> Translator<'a> {
                 expr: args.get(next_subexpr).unwrap_or(index),
             });
         } else {
-            let is_stmt = self.module.types[ty_id].as_func().ret.is_none();
+            let ret_ty = self.module.types[ty_id].as_func().ret.clone();
 
             let mut args = (0..args.len() + 1)
                 .map(|_| {
@@ -1091,19 +1086,15 @@ impl<'a> Translator<'a> {
             args.reverse();
             let index = args.pop().unwrap();
 
+            let ret_local_id = ret_ty.map(|val_ty| self.func.locals.insert(val_ty));
             let call = Call::Indirect {
+                ret_local_id,
                 ty_id,
                 table_id,
                 args,
                 index: Box::new(index),
             };
-
-            let result = if is_stmt {
-                self.push_stmt(Stmt::Call(call))
-            } else {
-                self.push_drop(Expr::Call(call))
-            };
-
+            let result = self.push_stmt(Stmt::Call(call));
             self.task_results.push(result);
         }
     }
@@ -1151,12 +1142,6 @@ impl<'a> Translator<'a> {
                             ExprTy::Global(global_id) => {
                                 self.module.globals[global_id].ty.val_type.clone()
                             }
-                            ExprTy::Call(func_id) => {
-                                self.module.funcs[func_id].ty().ret.clone().unwrap()
-                            }
-                            ExprTy::CallIndirect(ty_id) => {
-                                self.module.types[ty_id].as_func().ret.clone().unwrap()
-                            }
                         });
 
                         self.func.blocks[block_id].body[idx] = Stmt::LocalSet(local_id, expr);
@@ -1168,6 +1153,13 @@ impl<'a> Translator<'a> {
                         self.func.blocks[block_id].body[idx] = Stmt::LocalSet(local_id, expr);
 
                         Expr::Nullary(NulOp::LocalGet(local_id))
+                    }
+
+                    Stmt::Call(call) if call.ret_local_id().is_some() => {
+                        let ret_local_id = call.ret_local_id().unwrap();
+                        self.func.blocks[block_id].body[idx] = Stmt::Call(call);
+
+                        Expr::Nullary(NulOp::LocalGet(ret_local_id))
                     }
 
                     stmt => panic!("cannot use {stmt:?} as an expression"),

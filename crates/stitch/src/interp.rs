@@ -12,6 +12,7 @@ use crate::ast::expr::{Value, ValueAttrs};
 use crate::ast::ty::ValType;
 use crate::ast::{self, ExportDef, Func, FuncId, Module};
 use crate::cfg::FuncBody;
+use crate::interp::spec::Specializer;
 
 pub const START_FUNC_NAME: &str = "stitch-start";
 
@@ -173,7 +174,8 @@ impl<'a> Interpreter<'a> {
             .insert(spec_sig.clone(), SpecializedFunc::Pending(func_id));
         self.spec_funcs.insert(func_id, spec_sig.clone());
 
-        // TODO: specialize
+        let func = Rc::clone(func);
+        let body = Specializer::new(self, spec_sig.clone(), func).run()?;
 
         *self.module.funcs[func_id].body_mut().unwrap() = body.to_ast();
         *self.spec_sigs.get_mut(&spec_sig).unwrap() = SpecializedFunc::Finished(func_id);

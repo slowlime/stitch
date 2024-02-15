@@ -394,11 +394,13 @@ pub enum TernOp {
 #[derive(Debug, Clone)]
 pub enum Call {
     Direct {
+        ret_local_id: Option<LocalId>,
         func_id: FuncId,
         args: Vec<Expr>,
     },
 
     Indirect {
+        ret_local_id: Option<LocalId>,
         ty_id: TypeId,
         table_id: TableId,
         args: Vec<Expr>,
@@ -407,6 +409,12 @@ pub enum Call {
 }
 
 impl Call {
+    pub fn ret_local_id(&self) -> Option<LocalId> {
+        match *self {
+            Self::Direct { ret_local_id, .. } | Self::Indirect { ret_local_id, .. } => ret_local_id,
+        }
+    }
+
     pub fn nth_subexpr(&self, n: usize) -> Option<&Expr> {
         match self {
             Self::Direct { args, .. } => args.get(n),
@@ -430,8 +438,6 @@ pub enum Expr {
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<[Expr; 2]>),
     Ternary(TernOp, Box<[Expr; 3]>),
-
-    Call(Call),
 }
 
 impl Expr {
@@ -601,9 +607,6 @@ impl Expr {
             Self::Ternary(op, exprs) => match *op {
                 TernOp::Select => exprs[0].ty(),
             },
-
-            Self::Call(Call::Direct { func_id, .. }) => ExprTy::Call(*func_id),
-            Self::Call(Call::Indirect { ty_id, .. }) => ExprTy::CallIndirect(*ty_id),
         }
     }
 
@@ -613,7 +616,6 @@ impl Expr {
             Self::Unary(_, expr) => (n == 0).then_some(&**expr),
             Self::Binary(_, exprs) => exprs.get(n),
             Self::Ternary(_, exprs) => exprs.get(n),
-            Self::Call(call) => call.nth_subexpr(n),
         }
     }
 
@@ -623,7 +625,6 @@ impl Expr {
             Self::Unary(..) => 1,
             Self::Binary(..) => 2,
             Self::Ternary(..) => 3,
-            Self::Call(call) => call.subexpr_count(),
         }
     }
 }
@@ -633,8 +634,6 @@ pub enum ExprTy {
     Concrete(ValType),
     Local(LocalId),
     Global(GlobalId),
-    Call(FuncId),
-    CallIndirect(TypeId),
 }
 
 impl From<ValType> for ExprTy {

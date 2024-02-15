@@ -514,14 +514,14 @@ impl Translator<'_> {
                 },
                 array::from_fn(|i| Box::new(self.translate_expr(&exprs[i]))),
             ),
-
-            Expr::Call(call) => self.translate_call(call),
         }
     }
 
     fn translate_call(&mut self, call: &Call) -> AstExpr {
-        match *call {
-            Call::Direct { func_id, ref args } => AstExpr::Call(
+        let call_expr = match *call {
+            Call::Direct {
+                func_id, ref args, ..
+            } => AstExpr::Call(
                 func_id,
                 args.iter().map(|expr| self.translate_expr(expr)).collect(),
             ),
@@ -531,12 +531,22 @@ impl Translator<'_> {
                 table_id,
                 ref args,
                 ref index,
+                ..
             } => AstExpr::CallIndirect(
                 ty_id,
                 table_id,
                 args.iter().map(|expr| self.translate_expr(expr)).collect(),
                 Box::new(self.translate_expr(index)),
             ),
+        };
+
+        match call.ret_local_id() {
+            Some(local_id) => AstExpr::Unary(
+                AstUnOp::LocalSet(self.translate_local(local_id)),
+                Box::new(call_expr),
+            ),
+
+            None => call_expr,
         }
     }
 

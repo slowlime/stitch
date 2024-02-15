@@ -84,21 +84,14 @@ struct Frame {
     func_id: FuncId,
     block_id: BlockId,
     next_stmt: usize,
-    subexpr_stack: Vec<usize>,
+    ret_local_id: Option<LocalId>,
 }
 
 impl Frame {
     fn jump(&mut self, block_id: BlockId) {
         self.block_id = block_id;
         self.next_stmt = 0;
-        self.subexpr_stack = vec![0];
     }
-}
-
-#[derive(Debug, Clone)]
-enum EvalResult {
-    Ok,
-    Yielded,
 }
 
 impl Interpreter<'_> {
@@ -108,15 +101,15 @@ impl Interpreter<'_> {
         args: Vec<(Value, ValueAttrs)>,
     ) -> Result<Option<(Value, ValueAttrs)>> {
         let ref mut frames = vec![];
-        self.push_frame(frames, func_id, args)?;
+        self.push_frame(frames, func_id, args, None)?;
 
         'frame: while let Some(frame) = frames.last_mut() {
             let func = Rc::clone(&self.cfgs[frame.func_id]);
             let block = &func.blocks[frame.block_id];
 
-            let result = match block.body.get(frame.next_stmt) {
+            match block.body.get(frame.next_stmt) {
                 Some(stmt) => match stmt {
-                    Stmt::Nop => EvalResult::Ok,
+                    Stmt::Nop => {}
                     Stmt::Drop(expr) => self.eval(frames, expr)?,
                     Stmt::LocalSet(_, expr) => self.eval(frames, expr)?,
                     Stmt::GlobalSet(_, expr) => self.eval(frames, expr)?,
@@ -125,21 +118,15 @@ impl Interpreter<'_> {
                 },
 
                 None => match &block.term {
-                    Terminator::Trap | Terminator::Br(_) | Terminator::Return(None) => {
-                        EvalResult::Ok
-                    }
+                    Terminator::Trap | Terminator::Br(_) | Terminator::Return(None) => {}
                     Terminator::If(expr, _) => self.eval(frames, expr)?,
                     Terminator::Switch(expr, _) => self.eval(frames, expr)?,
                     Terminator::Return(Some(expr)) => self.eval(frames, expr)?,
                 },
-            };
-
-            match result {
-                EvalResult::Ok => {}
-                EvalResult::Yielded => continue 'frame,
             }
 
             let frame = frames.last_mut().unwrap();
+            frame.next_stmt += 1;
 
             if let Some(stmt) = block.body.get(frame.next_stmt) {
                 match *stmt {
@@ -174,10 +161,8 @@ impl Interpreter<'_> {
                         store.store(bytes, value);
                     }
 
-                    Stmt::Call(_) => {}
+                    Stmt::Call(..) => continue 'frame,
                 }
-
-                frame.next_stmt += 1;
             } else {
                 match block.term {
                     Terminator::Trap => bail!("aborting execution due to an explicit trap"),
@@ -200,12 +185,18 @@ impl Interpreter<'_> {
                         }
                     }
 
-                    Terminator::Return(ref expr) => {
-                        let value = expr.is_some().then(|| frame.stack.pop().unwrap());
-                        frames.pop().unwrap();
+                    Terminator::Return(_) => {
+                        let mut frame = frames.pop().unwrap();
+                        let ret_local_id = frames.pop().unwrap().ret_local_id;
+                        let value = ret_local_id.map(|_| frame.stack.pop().unwrap());
 
                         match frames.last_mut() {
-                            Some(frame) => frame.stack.extend(value),
+                            Some(frame) => {
+                                if let Some(ret_local_id) = ret_local_id {
+                                    frame.locals[ret_local_id] = value.unwrap();
+                                }
+                            }
+
                             None => return Ok(value),
                         }
                     }
@@ -240,6 +231,7 @@ impl Interpreter<'_> {
         frames: &mut Vec<Frame>,
         func_id: FuncId,
         args: Vec<(Value, ValueAttrs)>,
+        ret_local_id: Option<LocalId>,
     ) -> Result<()> {
         let func = &self.module.funcs[func_id];
         self.check_args(&args, func.ty())?;
@@ -283,7 +275,7 @@ impl Interpreter<'_> {
             func_id,
             block_id: Default::default(),
             next_stmt: Default::default(),
-            subexpr_stack: Default::default(),
+            ret_local_id,
         };
 
         frame.jump(func.entry);
@@ -292,16 +284,11 @@ impl Interpreter<'_> {
         Ok(())
     }
 
-    fn eval<'a>(
-        &mut self,
-        frames: &mut Vec<Frame>,
-        task: impl Into<Task<'a>>,
-    ) -> Result<EvalResult> {
-        let mut stack = vec![task.into()];
+    fn eval<'a>(&mut self, frames: &mut Vec<Frame>, task: impl Into<Task<'a>>) -> Result<()> {
+        let mut stack = vec![(0, task.into())];
 
-        while let Some(&task) = stack.last() {
+        while let Some(&mut (ref mut subexpr_idx, task)) = stack.last_mut() {
             let frame = frames.last_mut().unwrap();
-            let subexpr_idx = &mut frame.subexpr_stack[stack.len() - 1];
 
             let subexpr = match task {
                 Task::Expr(expr) => expr.nth_subexpr(*subexpr_idx),
@@ -312,15 +299,9 @@ impl Interpreter<'_> {
             if let Some(subexpr) = subexpr {
                 *subexpr_idx += 1;
 
-                if frame.subexpr_stack.len() == stack.len() {
-                    frame.subexpr_stack.push(0);
-                }
-
-                stack.push(Task::Expr(subexpr));
+                stack.push((0, Task::Expr(subexpr)));
                 continue;
             }
-
-            debug_assert_eq!(stack.len(), frame.subexpr_stack.len());
 
             match task {
                 Task::Expr(expr) => match *expr {
@@ -329,25 +310,17 @@ impl Interpreter<'_> {
                     Expr::Unary(op, _) => self.eval_un_op(frames, op)?,
                     Expr::Binary(op, _) => self.eval_bin_op(frames, op)?,
                     Expr::Ternary(op, _) => self.eval_tern_op(frames, op)?,
-                    Expr::Call(ref call) => match self.eval_call(frames, call)? {
-                        EvalResult::Ok => {}
-                        EvalResult::Yielded => return Ok(EvalResult::Yielded),
-                    },
                 },
 
-                Task::Call(call) => match self.eval_call(frames, call)? {
-                    EvalResult::Ok => {}
-                    EvalResult::Yielded => return Ok(EvalResult::Yielded),
-                },
+                Task::Call(call) => self.eval_call(frames, call)?,
 
                 Task::Exprs(_) => {}
             }
 
             stack.pop();
-            frames.last_mut().unwrap().subexpr_stack.pop();
         }
 
-        Ok(EvalResult::Ok)
+        Ok(())
     }
 
     fn eval_nul_op(&mut self, frames: &mut Vec<Frame>, op: NulOp) -> Result<()> {
@@ -865,17 +838,8 @@ impl Interpreter<'_> {
         Ok(())
     }
 
-    fn eval_call(&mut self, frames: &mut Vec<Frame>, call: &Call) -> Result<EvalResult> {
+    fn eval_call(&mut self, frames: &mut Vec<Frame>, call: &Call) -> Result<()> {
         let frame = frames.last_mut().unwrap();
-        let subexpr_idx = frame.subexpr_stack.last_mut().unwrap();
-
-        // if subexpr_idx equals the number of the call's subexprs, we enqueue a call.
-        // if it's greater, the subroutine has returned; the results are already on this frame's stack.
-        if *subexpr_idx > call.subexpr_count() {
-            return Ok(EvalResult::Ok);
-        }
-
-        *subexpr_idx += 1;
         let mut args = frame
             .stack
             .drain(frame.stack.len() - call.subexpr_count()..)
@@ -918,18 +882,25 @@ impl Interpreter<'_> {
             );
         }
 
+        let ret_local_id = call.ret_local_id();
+
         if let Some(intrinsic) = self.module.funcs[func_id].get_intrinsic(&self.module) {
             match intrinsic {
                 IntrinsicDecl::Specialize => self.eval_intr_specialize(frames, args)?,
                 IntrinsicDecl::Unknown => self.eval_intr_unknown(frames, func_id)?,
             }
 
-            Ok(EvalResult::Ok)
-        } else {
-            self.push_frame(frames, func_id, args)?;
+            let frame = frames.last_mut().unwrap();
 
-            Ok(EvalResult::Yielded)
+            if let Some(ret_local_id) = ret_local_id {
+                let ret_value = frame.stack.pop().unwrap();
+                frame.locals[ret_local_id] = ret_value;
+            }
+        } else {
+            self.push_frame(frames, func_id, args, ret_local_id)?;
         }
+
+        Ok(())
     }
 
     fn eval_intr_specialize(
