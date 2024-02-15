@@ -5,7 +5,7 @@ use std::{array, str};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use slotmap::{Key, SecondaryMap};
 
-use crate::ast::expr::{Value, ValueAttrs, F32, F64};
+use crate::ast::expr::{Value, ValueAttrs};
 use crate::ast::ty::{ElemType, FuncType};
 use crate::ast::{
     ConstExpr, Export, ExportDef, FuncId, GlobalDef, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE,
@@ -14,6 +14,7 @@ use crate::cfg::{
     BinOp, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
 };
 use crate::interp::{format_arg_list, SpecializedFunc};
+use crate::util::float::{F32, F64};
 
 use super::Interpreter;
 
@@ -47,8 +48,8 @@ trait ValueExt {
     fn unwrap_u32(&self) -> u32;
     fn unwrap_i64(&self) -> i64;
     fn unwrap_u64(&self) -> u64;
-    fn unwrap_f32(&self) -> f32;
-    fn unwrap_f64(&self) -> f64;
+    fn unwrap_f32(&self) -> F32;
+    fn unwrap_f64(&self) -> F64;
 }
 
 impl ValueExt for Value {
@@ -68,12 +69,12 @@ impl ValueExt for Value {
         self.to_u64().unwrap()
     }
 
-    fn unwrap_f32(&self) -> f32 {
-        self.to_f32().unwrap().to_f32()
+    fn unwrap_f32(&self) -> F32 {
+        self.to_f32().unwrap()
     }
 
-    fn unwrap_f64(&self) -> f64 {
-        self.to_f64().unwrap().to_f64()
+    fn unwrap_f64(&self) -> F64 {
+        self.to_f64().unwrap()
     }
 }
 
@@ -388,21 +389,21 @@ impl Interpreter<'_> {
                 Default::default(),
             ),
 
-            UnOp::F32Abs => (Value::F32(arg.unwrap_f32().abs().into()), arg_attrs),
-            UnOp::F32Neg => (Value::F32(arg.unwrap_f32().neg().into()), arg_attrs),
-            UnOp::F32Sqrt => (Value::F32(arg.unwrap_f32().sqrt().into()), arg_attrs),
-            UnOp::F32Ceil => (Value::F32(arg.unwrap_f32().ceil().into()), arg_attrs),
-            UnOp::F32Floor => (Value::F32(arg.unwrap_f32().floor().into()), arg_attrs),
-            UnOp::F32Trunc => (Value::F32(arg.unwrap_f32().trunc().into()), arg_attrs),
-            UnOp::F32Nearest => (Value::F32(arg.to_f32().unwrap().nearest()), arg_attrs),
+            UnOp::F32Abs => (Value::F32(arg.unwrap_f32().abs()), arg_attrs),
+            UnOp::F32Neg => (Value::F32(arg.unwrap_f32().neg()), arg_attrs),
+            UnOp::F32Sqrt => (Value::F32(arg.unwrap_f32().sqrt()), arg_attrs),
+            UnOp::F32Ceil => (Value::F32(arg.unwrap_f32().ceil()), arg_attrs),
+            UnOp::F32Floor => (Value::F32(arg.unwrap_f32().floor()), arg_attrs),
+            UnOp::F32Trunc => (Value::F32(arg.unwrap_f32().trunc()), arg_attrs),
+            UnOp::F32Nearest => (Value::F32(arg.unwrap_f32().nearest()), arg_attrs),
 
-            UnOp::F64Abs => (Value::F64(arg.unwrap_f64().abs().into()), arg_attrs),
-            UnOp::F64Neg => (Value::F64(arg.unwrap_f64().neg().into()), arg_attrs),
-            UnOp::F64Sqrt => (Value::F64(arg.unwrap_f64().sqrt().into()), arg_attrs),
-            UnOp::F64Ceil => (Value::F64(arg.unwrap_f64().ceil().into()), arg_attrs),
-            UnOp::F64Floor => (Value::F64(arg.unwrap_f64().floor().into()), arg_attrs),
-            UnOp::F64Trunc => (Value::F64(arg.unwrap_f64().trunc().into()), arg_attrs),
-            UnOp::F64Nearest => (Value::F64(arg.to_f64().unwrap().nearest()), arg_attrs),
+            UnOp::F64Abs => (Value::F64(arg.unwrap_f64().abs()), arg_attrs),
+            UnOp::F64Neg => (Value::F64(arg.unwrap_f64().neg()), arg_attrs),
+            UnOp::F64Sqrt => (Value::F64(arg.unwrap_f64().sqrt()), arg_attrs),
+            UnOp::F64Ceil => (Value::F64(arg.unwrap_f64().ceil()), arg_attrs),
+            UnOp::F64Floor => (Value::F64(arg.unwrap_f64().floor()), arg_attrs),
+            UnOp::F64Trunc => (Value::F64(arg.unwrap_f64().trunc()), arg_attrs),
+            UnOp::F64Nearest => (Value::F64(arg.unwrap_f64().nearest()), arg_attrs),
 
             UnOp::I32Eqz => (
                 Value::I32((arg.unwrap_i32() == 0) as i32),
@@ -418,18 +419,18 @@ impl Interpreter<'_> {
             UnOp::I64ExtendI32S => (Value::I64(arg.unwrap_i32() as i64), arg_attrs),
             UnOp::I64ExtendI32U => (Value::I64(arg.unwrap_u32() as i64), arg_attrs),
 
-            UnOp::I32TruncF32S => (Value::I32(arg.unwrap_f32() as i32), arg_attrs),
-            UnOp::I32TruncF32U => (Value::I32(arg.unwrap_f32() as u32 as i32), arg_attrs),
-            UnOp::I32TruncF64S => (Value::I32(arg.unwrap_f64() as i32), arg_attrs),
-            UnOp::I32TruncF64U => (Value::I32(arg.unwrap_f64() as u32 as i32), arg_attrs),
+            UnOp::I32TruncF32S => (Value::I32(arg.unwrap_f32().trunc_i32()), arg_attrs),
+            UnOp::I32TruncF32U => (Value::I32(arg.unwrap_f32().trunc_u32() as i32), arg_attrs),
+            UnOp::I32TruncF64S => (Value::I32(arg.unwrap_f64().trunc_i32()), arg_attrs),
+            UnOp::I32TruncF64U => (Value::I32(arg.unwrap_f64().trunc_u32() as i32), arg_attrs),
 
-            UnOp::I64TruncF32S => (Value::I64(arg.unwrap_f32() as i64), arg_attrs),
-            UnOp::I64TruncF32U => (Value::I64(arg.unwrap_f32() as u64 as i64), arg_attrs),
-            UnOp::I64TruncF64S => (Value::I64(arg.unwrap_f64() as i64), arg_attrs),
-            UnOp::I64TruncF64U => (Value::I64(arg.unwrap_f64() as u64 as i64), arg_attrs),
+            UnOp::I64TruncF32S => (Value::I64(arg.unwrap_f32().trunc_i64()), arg_attrs),
+            UnOp::I64TruncF32U => (Value::I64(arg.unwrap_f32().trunc_u64() as i64), arg_attrs),
+            UnOp::I64TruncF64S => (Value::I64(arg.unwrap_f64().trunc_i64()), arg_attrs),
+            UnOp::I64TruncF64U => (Value::I64(arg.unwrap_f64().trunc_u64() as i64), arg_attrs),
 
-            UnOp::F32DemoteF64 => (Value::F32((arg.unwrap_f64() as f32).into()), arg_attrs),
-            UnOp::F64PromoteF32 => (Value::F64((arg.unwrap_f32() as f64).into()), arg_attrs),
+            UnOp::F32DemoteF64 => (Value::F32(arg.unwrap_f64().demote()), arg_attrs),
+            UnOp::F64PromoteF32 => (Value::F64(arg.unwrap_f32().promote()), arg_attrs),
 
             UnOp::F32ConvertI32S => (Value::F32((arg.unwrap_i32() as f32).into()), arg_attrs),
             UnOp::F32ConvertI32U => (Value::F32((arg.unwrap_u32() as f32).into()), arg_attrs),
@@ -517,11 +518,11 @@ impl Interpreter<'_> {
         frame.stack.push(match op {
             BinOp::I32Add => (
                 Value::I32(lhs.unwrap_i32().wrapping_add(rhs.unwrap_i32())),
-                meet_attrs,
+                lhs_attrs.addsub_attrs(&rhs_attrs),
             ),
             BinOp::I32Sub => (
                 Value::I32(lhs.unwrap_i32().wrapping_add(rhs.unwrap_i32())),
-                meet_attrs,
+                lhs_attrs.addsub_attrs(&rhs_attrs),
             ),
             BinOp::I32Mul => (
                 Value::I32(lhs.unwrap_i32().wrapping_mul(rhs.unwrap_i32())),
@@ -626,60 +627,60 @@ impl Interpreter<'_> {
             ),
 
             BinOp::F32Add => (
-                Value::F32((lhs.unwrap_f32() + rhs.unwrap_f32()).into()),
+                Value::F32(lhs.unwrap_f32() + rhs.unwrap_f32()),
                 meet_attrs,
             ),
             BinOp::F32Sub => (
-                Value::F32((lhs.unwrap_f32() - rhs.unwrap_f32()).into()),
+                Value::F32(lhs.unwrap_f32() - rhs.unwrap_f32()),
                 meet_attrs,
             ),
             BinOp::F32Mul => (
-                Value::F32((lhs.unwrap_f32() * rhs.unwrap_f32()).into()),
+                Value::F32(lhs.unwrap_f32() * rhs.unwrap_f32()),
                 meet_attrs,
             ),
             BinOp::F32Div => (
-                Value::F32((lhs.unwrap_f32() / rhs.unwrap_f32()).into()),
+                Value::F32(lhs.unwrap_f32() / rhs.unwrap_f32()),
                 meet_attrs,
             ),
             BinOp::F32Min => (
-                Value::F32(lhs.unwrap_f32().min(rhs.unwrap_f32()).into()),
+                Value::F32(lhs.unwrap_f32().min(rhs.unwrap_f32())),
                 meet_attrs,
             ),
             BinOp::F32Max => (
-                Value::F32(lhs.unwrap_f32().max(rhs.unwrap_f32()).into()),
+                Value::F32(lhs.unwrap_f32().max(rhs.unwrap_f32())),
                 meet_attrs,
             ),
             BinOp::F32Copysign => (
-                Value::F32(lhs.unwrap_f32().copysign(rhs.unwrap_f32()).into()),
+                Value::F32(lhs.unwrap_f32().copysign(rhs.unwrap_f32())),
                 meet_attrs,
             ),
 
             BinOp::F64Add => (
-                Value::F64((lhs.unwrap_f64() + rhs.unwrap_f64()).into()),
+                Value::F64(lhs.unwrap_f64() + rhs.unwrap_f64()),
                 meet_attrs,
             ),
             BinOp::F64Sub => (
-                Value::F64((lhs.unwrap_f64() - rhs.unwrap_f64()).into()),
+                Value::F64(lhs.unwrap_f64() - rhs.unwrap_f64()),
                 meet_attrs,
             ),
             BinOp::F64Mul => (
-                Value::F64((lhs.unwrap_f64() * rhs.unwrap_f64()).into()),
+                Value::F64(lhs.unwrap_f64() * rhs.unwrap_f64()),
                 meet_attrs,
             ),
             BinOp::F64Div => (
-                Value::F64((lhs.unwrap_f64() / rhs.unwrap_f64()).into()),
+                Value::F64(lhs.unwrap_f64() / rhs.unwrap_f64()),
                 meet_attrs,
             ),
             BinOp::F64Min => (
-                Value::F64(lhs.unwrap_f64().min(rhs.unwrap_f64()).into()),
+                Value::F64(lhs.unwrap_f64().min(rhs.unwrap_f64())),
                 meet_attrs,
             ),
             BinOp::F64Max => (
-                Value::F64(lhs.unwrap_f64().max(rhs.unwrap_f64()).into()),
+                Value::F64(lhs.unwrap_f64().max(rhs.unwrap_f64())),
                 meet_attrs,
             ),
             BinOp::F64Copysign => (
-                Value::F64(lhs.unwrap_f64().copysign(rhs.unwrap_f64()).into()),
+                Value::F64(lhs.unwrap_f64().copysign(rhs.unwrap_f64())),
                 meet_attrs,
             ),
 

@@ -4,131 +4,10 @@ use std::iter;
 use bitflags::bitflags;
 
 use crate::util::{try_match, Indent};
+use crate::util::float::{F32, F64};
 
 use super::ty::{BlockType, ValType};
 use super::{BlockId, FuncId, GlobalId, LocalId, MemoryId, TableId, TypeId};
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct F32(u32);
-
-impl F32 {
-    pub fn nearest(&self) -> Self {
-        let f = self.to_f32();
-
-        if f.fract() == 0.5 && f.trunc() % 2.0 == 0.0 {
-            f.floor().into()
-        } else {
-            f.round().into()
-        }
-    }
-
-    pub fn from_bits(bits: u32) -> Self {
-        Self(bits)
-    }
-
-    pub fn from_f32(value: f32) -> Self {
-        Self::from_bits(value.to_bits())
-    }
-
-    pub fn to_bits(&self) -> u32 {
-        self.0
-    }
-
-    pub fn to_f32(&self) -> f32 {
-        f32::from_bits(self.0)
-    }
-}
-
-impl Debug for F32 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.to_f32())
-    }
-}
-
-impl Display for F32 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_f32())
-    }
-}
-
-impl Default for F32 {
-    fn default() -> Self {
-        Self::from_f32(0.0)
-    }
-}
-
-impl PartialOrd for F32 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.to_f32().partial_cmp(&other.to_f32())
-    }
-}
-
-impl From<f32> for F32 {
-    fn from(value: f32) -> Self {
-        Self::from_f32(value)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct F64(u64);
-
-impl F64 {
-    pub fn nearest(&self) -> Self {
-        let f = self.to_f64();
-
-        if f.fract() == 0.5 && f.trunc() % 2.0 == 0.0 {
-            f.floor().into()
-        } else {
-            f.round().into()
-        }
-    }
-
-    pub fn from_bits(bits: u64) -> Self {
-        Self(bits)
-    }
-
-    pub fn from_f64(value: f64) -> Self {
-        Self::from_bits(value.to_bits())
-    }
-
-    pub fn to_bits(&self) -> u64 {
-        self.0
-    }
-
-    pub fn to_f64(&self) -> f64 {
-        f64::from_bits(self.0)
-    }
-}
-
-impl Debug for F64 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.to_f64())
-    }
-}
-
-impl Display for F64 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_f64())
-    }
-}
-
-impl Default for F64 {
-    fn default() -> Self {
-        Self::from_f64(0.0)
-    }
-}
-
-impl PartialOrd for F64 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.to_f64().partial_cmp(&other.to_f64())
-    }
-}
-
-impl From<f64> for F64 {
-    fn from(value: f64) -> Self {
-        Self::from_f64(value)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Value {
@@ -205,6 +84,10 @@ impl ValueAttrs {
         } else {
             Default::default()
         }
+    }
+
+    pub fn addsub_attrs(&self, other: &Self) -> ValueAttrs {
+        self.meet(other) | (*self | *other) & Self::CONST_PTR
     }
 }
 

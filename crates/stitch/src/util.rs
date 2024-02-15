@@ -1,5 +1,6 @@
 pub mod iter;
 pub mod slot;
+pub mod float;
 
 use std::fmt::{self, Display};
 

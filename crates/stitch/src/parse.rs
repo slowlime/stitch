@@ -8,11 +8,12 @@ use wasmparser::{
     BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
 };
 
-use crate::ast::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, Value, F32, F64};
+use crate::ast::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, Value};
 use crate::ast::{
     self, BlockId, ExportId, FuncId, GlobalId, ImportDesc, ImportId, ImportKind, IntrinsicDecl,
     LocalId, MemoryId, TableId, TypeId, PAGE_SIZE, STITCH_MODULE_NAME,
 };
+use crate::util::float::{F32, F64};
 
 const FEATURES: WasmFeatures = WasmFeatures {
     mutable_global: true,

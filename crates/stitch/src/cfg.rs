@@ -629,6 +629,12 @@ impl Expr {
     }
 }
 
+impl From<(Value, ValueAttrs)> for Expr {
+    fn from((value, attrs): (Value, ValueAttrs)) -> Self {
+        Self::Value(value, attrs)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ExprTy {
     Concrete(ValType),
