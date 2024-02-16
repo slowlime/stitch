@@ -15,6 +15,7 @@ use slotmap::{new_key_type, SlotMap};
 use crate::ast::expr::{MemArg, Value, ValueAttrs};
 use crate::ast::ty::{FuncType, ValType};
 use crate::ast::{FuncId, GlobalId, MemoryId, TableId, TypeId};
+use crate::util::try_match;
 
 pub use self::dom_tree::DomTree;
 pub use self::predecessors::Predecessors;
@@ -441,6 +442,10 @@ pub enum Expr {
 }
 
 impl Expr {
+    pub fn to_value(&self) -> Option<(Value, ValueAttrs)> {
+        try_match!(*self, Self::Value(value, attrs) => (value, attrs))
+    }
+
     pub fn ty(&self) -> ExprTy {
         match self {
             Self::Value(value, _) => value.val_ty().into(),
@@ -625,6 +630,155 @@ impl Expr {
             Self::Unary(..) => 1,
             Self::Binary(..) => 2,
             Self::Ternary(..) => 3,
+        }
+    }
+
+    pub fn has_side_effect(&self) -> bool {
+        match self {
+            Self::Value(..) => false,
+
+            Self::Nullary(op) => match *op {
+                NulOp::LocalGet(..) => false,
+                NulOp::GlobalGet(..) => false,
+                NulOp::MemorySize(..) => false,
+            },
+
+            Self::Unary(op, _) => match *op {
+                UnOp::I32Clz
+                | UnOp::I32Ctz
+                | UnOp::I32Popcnt
+                | UnOp::I64Clz
+                | UnOp::I64Ctz
+                | UnOp::I64Popcnt
+                | UnOp::F32Abs
+                | UnOp::F32Neg
+                | UnOp::F32Sqrt
+                | UnOp::F32Ceil
+                | UnOp::F32Floor
+                | UnOp::F32Trunc
+                | UnOp::F32Nearest
+                | UnOp::F64Abs
+                | UnOp::F64Neg
+                | UnOp::F64Sqrt
+                | UnOp::F64Ceil
+                | UnOp::F64Floor
+                | UnOp::F64Trunc
+                | UnOp::F64Nearest
+                | UnOp::I32Eqz
+                | UnOp::I64Eqz
+                | UnOp::I32WrapI64
+                | UnOp::I64ExtendI32S
+                | UnOp::I64ExtendI32U
+                | UnOp::I32TruncF32S
+                | UnOp::I32TruncF32U
+                | UnOp::I32TruncF64S
+                | UnOp::I32TruncF64U
+                | UnOp::I64TruncF32S
+                | UnOp::I64TruncF32U
+                | UnOp::I64TruncF64S
+                | UnOp::I64TruncF64U
+                | UnOp::F32DemoteF64
+                | UnOp::F64PromoteF32
+                | UnOp::F32ConvertI32S
+                | UnOp::F32ConvertI32U
+                | UnOp::F32ConvertI64S
+                | UnOp::F32ConvertI64U
+                | UnOp::F64ConvertI32S
+                | UnOp::F64ConvertI32U
+                | UnOp::F64ConvertI64S
+                | UnOp::F64ConvertI64U
+                | UnOp::F32ReinterpretI32
+                | UnOp::F64ReinterpretI64
+                | UnOp::I32ReinterpretF32
+                | UnOp::I64ReinterpretF64
+                | UnOp::I32Extend8S
+                | UnOp::I32Extend16S
+                | UnOp::I64Extend8S
+                | UnOp::I64Extend16S
+                | UnOp::I64Extend32S => false,
+                UnOp::LocalTee(_) => true,
+                UnOp::Load(_, _) => false,
+                UnOp::MemoryGrow(_) => true,
+            },
+
+            Self::Binary(op, _) => match *op {
+                BinOp::I32Add | BinOp::I32Sub | BinOp::I32Mul => false,
+
+                BinOp::I32DivS | BinOp::I32DivU | BinOp::I32RemS | BinOp::I32RemU => true,
+
+                BinOp::I32And
+                | BinOp::I32Or
+                | BinOp::I32Xor
+                | BinOp::I32Shl
+                | BinOp::I32ShrS
+                | BinOp::I32ShrU
+                | BinOp::I32Rotl
+                | BinOp::I32Rotr
+                | BinOp::I64Add
+                | BinOp::I64Sub
+                | BinOp::I64Mul => false,
+
+                BinOp::I64DivS | BinOp::I64DivU | BinOp::I64RemS | BinOp::I64RemU => true,
+
+                BinOp::I64And
+                | BinOp::I64Or
+                | BinOp::I64Xor
+                | BinOp::I64Shl
+                | BinOp::I64ShrS
+                | BinOp::I64ShrU
+                | BinOp::I64Rotl
+                | BinOp::I64Rotr
+                | BinOp::F32Add
+                | BinOp::F32Sub
+                | BinOp::F32Mul
+                | BinOp::F32Div
+                | BinOp::F32Min
+                | BinOp::F32Max
+                | BinOp::F32Copysign
+                | BinOp::F64Add
+                | BinOp::F64Sub
+                | BinOp::F64Mul
+                | BinOp::F64Div
+                | BinOp::F64Min
+                | BinOp::F64Max
+                | BinOp::F64Copysign
+                | BinOp::I32Eq
+                | BinOp::I32Ne
+                | BinOp::I32LtS
+                | BinOp::I32LtU
+                | BinOp::I32GtS
+                | BinOp::I32GtU
+                | BinOp::I32LeS
+                | BinOp::I32LeU
+                | BinOp::I32GeS
+                | BinOp::I32GeU
+                | BinOp::I64Eq
+                | BinOp::I64Ne
+                | BinOp::I64LtS
+                | BinOp::I64LtU
+                | BinOp::I64GtS
+                | BinOp::I64GtU
+                | BinOp::I64LeS
+                | BinOp::I64LeU
+                | BinOp::I64GeS
+                | BinOp::I64GeU
+                | BinOp::F32Eq
+                | BinOp::F32Ne
+                | BinOp::F32Lt
+                | BinOp::F32Gt
+                | BinOp::F32Le
+                | BinOp::F32Ge
+                | BinOp::F64Eq
+                | BinOp::F64Ne
+                | BinOp::F64Lt
+                | BinOp::F64Gt
+                | BinOp::F64Le
+                | BinOp::F64Ge => false,
+            },
+
+            Self::Ternary(op, _) => match *op {
+                TernOp::Select => false,
+            },
         }
     }
 }

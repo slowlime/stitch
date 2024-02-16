@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 use std::ops::Neg;
 use std::rc::Rc;
-use std::array;
+use std::{array, iter, mem};
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use log::warn;
 use slotmap::SecondaryMap;
 
 use crate::ast::expr::{Value, ValueAttrs};
-use crate::ast::{ConstExpr, GlobalDef, GlobalId, Module};
-use crate::cfg::{BinOp, BlockId, Expr, FuncBody, LocalId, NulOp, Stmt, TernOp, UnOp};
+use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, Module, TableDef};
+use crate::cfg::{
+    BinOp, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
+};
 use crate::util::float::{F32, F64};
 
 use super::{Interpreter, SpecSignature};
@@ -155,6 +157,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         let ref mut stack = vec![];
 
         while let Some(stmt) = cfg.blocks[orig_block_id].body.get(stmt_idx) {
+            stmt_idx += 1;
             stack.clear();
 
             match stmt {
@@ -167,15 +170,230 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         self.process_expr(block_id, stack, expr)?;
                     }
                 }
-                Stmt::Call(..) => todo!(),
+                Stmt::Call(Call::Direct { args, .. }) => {
+                    for expr in args {
+                        self.process_expr(block_id, stack, expr)?;
+                    }
+                }
+                Stmt::Call(Call::Indirect { args, index, .. }) => {
+                    for expr in args.iter().chain(iter::once(&**index)) {
+                        self.process_expr(block_id, stack, expr)?;
+                    }
+                }
             }
 
-            todo!();
+            let mut block = &mut self.func.blocks[block_id];
+            let info = &mut self.blocks[block_id];
 
-            stmt_idx += 1;
+            match *stmt {
+                Stmt::Nop => {}
+
+                Stmt::Drop(_) => {
+                    let expr = stack.pop().unwrap();
+
+                    if expr.has_side_effect() {
+                        block.body.push(Stmt::Drop(expr));
+                    }
+                }
+
+                Stmt::LocalSet(local_id, _) => {
+                    let expr = stack.pop().unwrap();
+
+                    if let Some(value) = expr.to_value() {
+                        info.exit_env.locals[local_id] = value;
+                    } else {
+                        block.body.push(Stmt::LocalSet(local_id, expr));
+                    }
+                }
+
+                Stmt::GlobalSet(global_id, _) => {
+                    let expr = stack.pop().unwrap();
+
+                    if let Some(value) = expr.to_value() {
+                        info.exit_env.globals[global_id] = value;
+                    } else {
+                        block.body.push(Stmt::GlobalSet(global_id, expr));
+                    }
+                }
+
+                Stmt::Store(mem_arg, store, _) => {
+                    let value = stack.pop().unwrap();
+                    let base_addr = stack.pop().unwrap();
+
+                    if let Some((_, addr_attrs)) = base_addr.to_value() {
+                        ensure!(
+                            !addr_attrs.contains(ValueAttrs::CONST_PTR),
+                            "encountered a memory write via a constant pointer"
+                        );
+                    }
+
+                    block
+                        .body
+                        .push(Stmt::Store(mem_arg, store, Box::new([base_addr, value])));
+                }
+
+                Stmt::Call(Call::Direct {
+                    ret_local_id,
+                    func_id,
+                    ref args,
+                }) => {
+                    let args = stack.drain(stack.len() - args.len()..).collect();
+                    self.process_call(block_id, &mut stmt_idx, ret_local_id, func_id, args)?;
+                }
+
+                Stmt::Call(Call::Indirect {
+                    ret_local_id,
+                    ty_id,
+                    table_id,
+                    ref args,
+                    ..
+                }) => {
+                    let mut index = Some(stack.pop().unwrap());
+                    let mut args = stack.drain(stack.len() - args.len()..).collect();
+
+                    'spec: {
+                        let Some((idx, _)) = index.as_ref().unwrap().to_value() else {
+                            break 'spec;
+                        };
+
+                        match &self.interp.module.tables[table_id].def {
+                            TableDef::Import(_) => {}
+
+                            TableDef::Elems(elems) => {
+                                let idx = idx.to_u32().unwrap();
+                                let Some(&Some(func_id)) = elems.get(idx as usize) else {
+                                    break 'spec;
+                                };
+
+                                let actual_func_ty = self.interp.module.funcs[func_id].ty();
+                                let claimed_func_ty = self.interp.module.types[ty_id].as_func();
+
+                                if actual_func_ty != claimed_func_ty {
+                                    break 'spec;
+                                }
+
+                                index = None;
+                                let args = mem::take(&mut args);
+                                self.process_call(
+                                    block_id,
+                                    &mut stmt_idx,
+                                    ret_local_id,
+                                    func_id,
+                                    args,
+                                )?;
+                                block = &mut self.func.blocks[block_id];
+                            }
+                        }
+                    }
+
+                    if let Some(index) = index {
+                        block.body.push(Stmt::Call(Call::Indirect {
+                            ret_local_id,
+                            ty_id,
+                            table_id,
+                            args,
+                            index: Box::new(index),
+                        }));
+                    }
+                }
+            }
         }
 
-        todo!()
+        match &cfg.blocks[orig_block_id].term {
+            Terminator::Trap | Terminator::Br(_) | Terminator::Return(None) => {}
+            Terminator::If(expr, _) => self.process_expr(block_id, stack, expr)?,
+            Terminator::Switch(expr, _) => self.process_expr(block_id, stack, expr)?,
+            Terminator::Return(Some(expr)) => self.process_expr(block_id, stack, expr)?,
+        }
+
+        let info = &mut self.blocks[block_id];
+
+        match cfg.blocks[orig_block_id].term {
+            Terminator::Trap => {
+                self.func.blocks[block_id].term = Terminator::Trap;
+            }
+
+            Terminator::Br(orig_target_block_id) => {
+                // TODO: loops
+                let exit_env = info.exit_env.clone();
+                let target_block_id = self.add_block(orig_target_block_id, exit_env);
+                self.func.blocks[block_id].term = Terminator::Br(target_block_id);
+                self.tasks.push(Task(target_block_id));
+            }
+
+            Terminator::If(_, [orig_then_block_id, orig_else_block_id]) => {
+                // TODO: loops
+                let condition = stack.pop().unwrap();
+                let exit_env = info.exit_env.clone();
+
+                match condition
+                    .to_value()
+                    .map(|(value, _)| value.to_i32().unwrap())
+                {
+                    Some(0) => {
+                        let else_block_id = self.add_block(orig_else_block_id, exit_env);
+                        self.func.blocks[block_id].term = Terminator::Br(else_block_id);
+                        self.tasks.push(Task(else_block_id));
+                    }
+
+                    Some(_) => {
+                        let then_block_id = self.add_block(orig_then_block_id, exit_env);
+                        self.func.blocks[block_id].term = Terminator::Br(then_block_id);
+                        self.tasks.push(Task(then_block_id));
+                    }
+
+                    None => {
+                        let then_block_id = self.add_block(orig_then_block_id, exit_env.clone());
+                        let else_block_id = self.add_block(orig_else_block_id, exit_env.clone());
+                        self.func.blocks[block_id].term =
+                            Terminator::If(condition, [then_block_id, else_block_id]);
+                        self.tasks.push(Task(then_block_id));
+                        self.tasks.push(Task(else_block_id));
+                    }
+                }
+            }
+
+            Terminator::Switch(_, ref orig_block_ids) => {
+                // TODO: loops
+                let index = stack.pop().unwrap();
+                let exit_env = info.exit_env.clone();
+
+                let orig_target_block_id = index.to_value().map(|(value, _)| {
+                    let (&default_orig_block_id, orig_block_ids) =
+                        orig_block_ids.split_last().unwrap();
+
+                    orig_block_ids
+                        .get(value.to_u32().unwrap() as usize)
+                        .copied()
+                        .unwrap_or(default_orig_block_id)
+                });
+
+                if let Some(orig_block_id) = orig_target_block_id {
+                    let target_block_id = self.add_block(orig_block_id, exit_env);
+                    self.func.blocks[block_id].term = Terminator::Br(target_block_id);
+                    self.tasks.push(Task(target_block_id));
+                } else {
+                    let block_ids = orig_block_ids
+                        .iter()
+                        .map(|&orig_block_id| {
+                            let target_block_id = self.add_block(orig_block_id, exit_env.clone());
+                            self.tasks.push(Task(target_block_id));
+
+                            target_block_id
+                        })
+                        .collect();
+
+                    self.func.blocks[block_id].term = Terminator::Switch(index, block_ids);
+                }
+            }
+
+            Terminator::Return(ref expr) => {
+                let expr = expr.is_some().then(|| stack.pop().unwrap());
+                self.func.blocks[block_id].term = Terminator::Return(expr);
+            }
+        }
+
+        Ok(())
     }
 
     fn process_expr(
@@ -366,7 +584,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     Expr::Value(value, attrs)
                 }
 
-                // TODO
                 UnOp::Load(mem_arg, load) => {
                     if !attrs.contains(ValueAttrs::CONST_PTR) {
                         return None;
@@ -739,13 +956,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
         let result = 'result: {
             match op {
-                TernOp::Select => {
-                    match arg2 {
-                        Expr::Value(Value::I32(0), _) => break 'result arg1,
-                        Expr::Value(Value::I32(_), _) => break 'result arg0,
-                        _ => {}
-                    }
-                }
+                TernOp::Select => match arg2 {
+                    Expr::Value(Value::I32(0), _) => break 'result arg1,
+                    Expr::Value(Value::I32(_), _) => break 'result arg0,
+                    _ => {}
+                },
             }
 
             Expr::Ternary(op, Box::new([arg0, arg1, arg2]))
@@ -754,5 +969,16 @@ impl<'a, 'i> Specializer<'a, 'i> {
         stack.push(result);
 
         Ok(())
+    }
+
+    fn process_call(
+        &mut self,
+        block_id: BlockId,
+        stmt_idx: &mut usize,
+        ret_local_id: Option<LocalId>,
+        func_id: FuncId,
+        args: Vec<Expr>,
+    ) -> Result<()> {
+        todo!()
     }
 }
