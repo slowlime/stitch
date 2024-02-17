@@ -1,7 +1,8 @@
 use std::process::exit;
 use std::{env, fs};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use stitch::interp::Interpreter;
 use stitch::post::PostProc;
 use stitch::{encode, parse};
 
@@ -18,10 +19,10 @@ fn main() -> Result<()> {
     let input_path = args.next().unwrap();
     let output_path = args.next().unwrap();
 
-    let module_bytes = fs::read(&input_path)?;
-    let mut module = parse::parse(&module_bytes)?;
+    let module_bytes = fs::read(&input_path).context("could not read the input module")?;
+    let mut module = parse::parse(&module_bytes).context("could not parse the input module")?;
 
-    // TODO: Specializer::new(&mut module).process();
+    Interpreter::new(&mut module).process()?;
     PostProc::new(&mut module).process();
 
     let module = encode::encode(&mut module);
@@ -30,7 +31,7 @@ fn main() -> Result<()> {
         parse::parse(&module).unwrap();
     }
 
-    fs::write(&output_path, &module)?;
+    fs::write(&output_path, &module).context("could not save the result")?;
 
     Ok(())
 }
