@@ -1,14 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Neg;
 use std::rc::Rc;
 use std::{array, iter, mem};
 
 use anyhow::{ensure, Result};
 use log::warn;
-use slotmap::SecondaryMap;
+use slotmap::{Key, SecondaryMap};
 
 use crate::ast::expr::{Value, ValueAttrs};
-use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, Module, TableDef};
+use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, IntrinsicDecl, Module, TableDef};
 use crate::cfg::{
     BinOp, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
 };
@@ -52,6 +52,40 @@ impl Env {
         Self { globals, locals }
     }
 
+    fn merge(&mut self, other: &Self) -> bool {
+        fn merge_maps<K: Key>(
+            lhs_map: &mut SecondaryMap<K, (Value, ValueAttrs)>,
+            rhs_map: &SecondaryMap<K, (Value, ValueAttrs)>,
+        ) -> bool {
+            let mut changed = false;
+            let mut to_remove = vec![];
+
+            for (id, (lhs, lhs_attrs)) in &mut *lhs_map {
+                let new = rhs_map.get(id).and_then(|(rhs, rhs_attrs)| {
+                    lhs.meet(rhs)
+                        .map(|value| (value, lhs_attrs.meet(rhs_attrs)))
+                });
+
+                if let Some((new, new_attrs)) = new {
+                    changed = *lhs != new || changed;
+                    *lhs = new;
+                    *lhs_attrs = new_attrs;
+                } else {
+                    changed = true;
+                    to_remove.push(id);
+                }
+            }
+
+            for id in to_remove {
+                lhs_map.remove(id);
+            }
+
+            changed
+        }
+
+        merge_maps(&mut self.globals, &other.globals) | merge_maps(&mut self.locals, &other.locals)
+    }
+
     fn to_hashable(&self) -> HashableEnv {
         let mut result = HashableEnv {
             globals: self
@@ -84,6 +118,18 @@ struct BlockInfo {
     exit_env: Env,
 }
 
+enum Loop {
+    Kept(BlockId),
+    Unrolled,
+}
+
+impl Loop {
+    fn is_unrolled(&self) -> bool {
+        matches!(self, Self::Unrolled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Task(BlockId);
 
 pub struct Specializer<'a, 'i> {
@@ -93,7 +139,9 @@ pub struct Specializer<'a, 'i> {
     block_map: HashMap<(OrigBlockId, HashableEnv), BlockId>,
     blocks: SecondaryMap<BlockId, BlockInfo>,
     args: Vec<Option<(Value, ValueAttrs)>>,
-    tasks: Vec<Task>,
+    tasks: HashSet<Task>,
+    loop_headers: HashSet<OrigBlockId>,
+    loops: HashMap<OrigBlockId, Loop>,
 }
 
 impl<'a, 'i> Specializer<'a, 'i> {
@@ -103,6 +151,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         cfg: Rc<FuncBody>,
     ) -> Self {
         let func = FuncBody::new(cfg.ty.clone());
+        let loop_headers = cfg.loop_headers(&cfg.rpo());
 
         Self {
             interp,
@@ -111,41 +160,23 @@ impl<'a, 'i> Specializer<'a, 'i> {
             block_map: Default::default(),
             blocks: Default::default(),
             args,
-            tasks: vec![],
+            tasks: Default::default(),
+            loop_headers,
+            loops: Default::default(),
         }
     }
 
     pub fn run(mut self) -> Result<FuncBody> {
-        let entry_block_id = self.add_block(
+        self.process_branch(
             self.cfg.entry,
             Env::entry(&self.interp.module, &self.cfg, &self.args),
         );
-        self.tasks.push(Task(entry_block_id));
 
-        while let Some(Task(block_id)) = self.tasks.pop() {
+        while let Some(&Task(block_id)) = self.tasks.iter().next() {
             self.process_block(block_id)?;
         }
 
         Ok(self.func)
-    }
-
-    fn add_block(&mut self, orig_block_id: OrigBlockId, env: Env) -> BlockId {
-        *self
-            .block_map
-            .entry((orig_block_id, env.to_hashable()))
-            .or_insert_with(|| {
-                let block_id = self.func.blocks.insert(Default::default());
-                self.blocks.insert(
-                    block_id,
-                    BlockInfo {
-                        orig_block_id,
-                        entry_env: env,
-                        exit_env: Default::default(),
-                    },
-                );
-
-                block_id
-            })
     }
 
     fn process_block(&mut self, block_id: BlockId) -> Result<()> {
@@ -314,15 +345,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
             }
 
             Terminator::Br(orig_target_block_id) => {
-                // TODO: loops
                 let exit_env = info.exit_env.clone();
-                let target_block_id = self.add_block(orig_target_block_id, exit_env);
+                let target_block_id = self.process_branch(orig_target_block_id, exit_env);
                 self.func.blocks[block_id].term = Terminator::Br(target_block_id);
-                self.tasks.push(Task(target_block_id));
             }
 
             Terminator::If(_, [orig_then_block_id, orig_else_block_id]) => {
-                // TODO: loops
                 let condition = stack.pop().unwrap();
                 let exit_env = info.exit_env.clone();
 
@@ -331,30 +359,26 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     .map(|(value, _)| value.to_i32().unwrap())
                 {
                     Some(0) => {
-                        let else_block_id = self.add_block(orig_else_block_id, exit_env);
+                        let else_block_id = self.process_branch(orig_else_block_id, exit_env);
                         self.func.blocks[block_id].term = Terminator::Br(else_block_id);
-                        self.tasks.push(Task(else_block_id));
                     }
 
                     Some(_) => {
-                        let then_block_id = self.add_block(orig_then_block_id, exit_env);
+                        let then_block_id = self.process_branch(orig_then_block_id, exit_env);
                         self.func.blocks[block_id].term = Terminator::Br(then_block_id);
-                        self.tasks.push(Task(then_block_id));
                     }
 
                     None => {
-                        let then_block_id = self.add_block(orig_then_block_id, exit_env.clone());
-                        let else_block_id = self.add_block(orig_else_block_id, exit_env.clone());
+                        let then_block_id =
+                            self.process_branch(orig_then_block_id, exit_env.clone());
+                        let else_block_id = self.process_branch(orig_else_block_id, exit_env);
                         self.func.blocks[block_id].term =
                             Terminator::If(condition, [then_block_id, else_block_id]);
-                        self.tasks.push(Task(then_block_id));
-                        self.tasks.push(Task(else_block_id));
                     }
                 }
             }
 
             Terminator::Switch(_, ref orig_block_ids) => {
-                // TODO: loops
                 let index = stack.pop().unwrap();
                 let exit_env = info.exit_env.clone();
 
@@ -369,18 +393,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 });
 
                 if let Some(orig_block_id) = orig_target_block_id {
-                    let target_block_id = self.add_block(orig_block_id, exit_env);
+                    let target_block_id = self.process_branch(orig_block_id, exit_env);
                     self.func.blocks[block_id].term = Terminator::Br(target_block_id);
-                    self.tasks.push(Task(target_block_id));
                 } else {
                     let block_ids = orig_block_ids
                         .iter()
-                        .map(|&orig_block_id| {
-                            let target_block_id = self.add_block(orig_block_id, exit_env.clone());
-                            self.tasks.push(Task(target_block_id));
-
-                            target_block_id
-                        })
+                        .map(|&orig_block_id| self.process_branch(orig_block_id, exit_env.clone()))
                         .collect();
 
                     self.func.blocks[block_id].term = Terminator::Switch(index, block_ids);
@@ -974,11 +992,111 @@ impl<'a, 'i> Specializer<'a, 'i> {
     fn process_call(
         &mut self,
         block_id: BlockId,
-        stmt_idx: &mut usize,
+        _stmt_idx: &mut usize,
         ret_local_id: Option<LocalId>,
         func_id: FuncId,
         args: Vec<Expr>,
     ) -> Result<()> {
-        todo!()
+        if let Some(intrinsic) =
+            self.interp.module.funcs[func_id].get_intrinsic(&self.interp.module)
+        {
+            match intrinsic {
+                IntrinsicDecl::Specialize => {
+                    self.process_intr_specialize(block_id, ret_local_id.unwrap())?
+                }
+                IntrinsicDecl::Unknown => {
+                    self.process_intr_unknown(block_id, ret_local_id.unwrap(), func_id)?
+                }
+            }
+        } else {
+            // TODO: inlining
+            self.func.blocks[block_id]
+                .body
+                .push(Stmt::Call(Call::Direct {
+                    ret_local_id,
+                    func_id,
+                    args,
+                }));
+        }
+
+        Ok(())
+    }
+
+    fn process_intr_specialize(&mut self, block_id: BlockId, ret_local_id: LocalId) -> Result<()> {
+        warn!("encountered stitch/specialize during specialization");
+        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+            ret_local_id,
+            Expr::Value(Value::I32(0), Default::default()),
+        ));
+
+        Ok(())
+    }
+
+    fn process_intr_unknown(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+        func_id: FuncId,
+    ) -> Result<()> {
+        let val_ty = self.interp.module.funcs[func_id].ty().ret.as_ref().unwrap();
+        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+            ret_local_id,
+            Expr::Value(Value::default_for(val_ty), Default::default()),
+        ));
+
+        Ok(())
+    }
+
+    fn get_branch_target(&mut self, orig_block_id: OrigBlockId, env: Env) -> BlockId {
+        let is_loop_header = self.loop_headers.contains(&orig_block_id);
+
+        if is_loop_header {
+            if let Some(&Loop::Kept(block_id)) = self.loops.get(&orig_block_id) {
+                return block_id;
+            }
+        }
+
+        let block_map_key = (orig_block_id, env.to_hashable());
+
+        if let Some(&block_id) = self.block_map.get(&block_map_key) {
+            return block_id;
+        }
+
+        let block_id = self.func.blocks.insert(Default::default());
+        self.blocks.insert(
+            block_id,
+            BlockInfo {
+                orig_block_id,
+                entry_env: env.clone(),
+                exit_env: Default::default(),
+            },
+        );
+
+        if is_loop_header && !self.should_unroll(orig_block_id) {
+            self.loops.insert(orig_block_id, Loop::Kept(block_id));
+        } else {
+            self.block_map.insert(block_map_key, block_id);
+        }
+
+        self.tasks.insert(Task(block_id));
+
+        block_id
+    }
+
+    fn process_branch(&mut self, orig_block_id: OrigBlockId, env: Env) -> BlockId {
+        let block_id = self.get_branch_target(orig_block_id, env.clone());
+
+        if self.blocks[block_id].entry_env.merge(&env) {
+            self.tasks.insert(Task(block_id));
+        }
+
+        block_id
+    }
+
+    fn should_unroll(&self, orig_block_id: OrigBlockId) -> bool {
+        debug_assert!(self.loop_headers.contains(&orig_block_id));
+
+        // TODO
+        false
     }
 }

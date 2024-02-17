@@ -1,6 +1,7 @@
 mod dom_tree;
 mod dot;
 mod from_ast;
+mod loops;
 mod merge_blocks;
 mod predecessors;
 mod printer;
@@ -434,7 +435,6 @@ impl Call {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Value(Value, ValueAttrs),
-
     Nullary(NulOp),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<[Expr; 2]>),

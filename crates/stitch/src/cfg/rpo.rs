@@ -8,6 +8,16 @@ pub struct Rpo {
     pub idx: SecondaryMap<BlockId, usize>,
 }
 
+impl Rpo {
+    pub fn is_forward_edge(&self, from_block_id: BlockId, to_block_id: BlockId) -> bool {
+        self.idx.get(from_block_id).zip(self.idx.get(to_block_id)).is_some_and(|(&lhs, &rhs)| lhs < rhs)
+    }
+
+    pub fn is_backward_edge(&self, from_block_id: BlockId, to_block_id: BlockId) -> bool {
+        self.idx.get(from_block_id).zip(self.idx.get(to_block_id)).is_some_and(|(&lhs, &rhs)| lhs >= rhs)
+    }
+}
+
 impl FuncBody {
     pub fn rpo(&self) -> Rpo {
         struct Task {

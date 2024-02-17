@@ -36,6 +36,16 @@ impl Value {
         }
     }
 
+    pub fn meet(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::I32(lhs), Self::I32(rhs)) if lhs == rhs => Some(self.clone()),
+            (Self::I64(lhs), Self::I64(rhs)) if lhs == rhs => Some(self.clone()),
+            (Self::F32(lhs), Self::F32(rhs)) if lhs == rhs => Some(self.clone()),
+            (Self::F64(lhs), Self::F64(rhs)) if lhs == rhs => Some(self.clone()),
+            _ => None,
+        }
+    }
+
     pub fn to_i32(&self) -> Option<i32> {
         try_match!(*self, Self::I32(value) => value)
     }
