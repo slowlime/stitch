@@ -4,13 +4,13 @@ use std::rc::Rc;
 use std::{array, iter, mem};
 
 use anyhow::{ensure, Result};
-use log::warn;
+use log::{trace, warn};
 use slotmap::{Key, SecondaryMap};
 
 use crate::ast::expr::{Value, ValueAttrs};
 use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, IntrinsicDecl, Module, TableDef};
 use crate::cfg::{
-    BinOp, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
+    BinOp, Block, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
 };
 use crate::util::float::{F32, F64};
 
@@ -167,16 +167,32 @@ impl<'a, 'i> Specializer<'a, 'i> {
     }
 
     pub fn run(mut self) -> Result<FuncBody> {
-        self.process_branch(
+        self.process_locals();
+
+        self.func.entry = self.process_branch(
+            Default::default(),
             self.cfg.entry,
             Env::entry(&self.interp.module, &self.cfg, &self.args),
         );
 
         while let Some(&Task(block_id)) = self.tasks.iter().next() {
+            self.tasks.remove(&Task(block_id));
             self.process_block(block_id)?;
         }
 
         Ok(self.func)
+    }
+
+    fn process_locals(&mut self) {
+        self.func.locals = self.cfg.locals.clone();
+        self.func.params = self
+            .cfg
+            .params
+            .iter()
+            .enumerate()
+            .filter(|&(idx, _)| self.args[idx].is_none())
+            .map(|(_, &local_id)| local_id)
+            .collect();
     }
 
     fn process_block(&mut self, block_id: BlockId) -> Result<()> {
@@ -187,9 +203,15 @@ impl<'a, 'i> Specializer<'a, 'i> {
         let mut stmt_idx = 0;
         let ref mut stack = vec![];
 
+        trace!("specializing a block {orig_block_id:?} (to {block_id:?})");
+
         while let Some(stmt) = cfg.blocks[orig_block_id].body.get(stmt_idx) {
+            trace!(
+                "processing stmt {stmt_idx}/{}: {stmt}",
+                cfg.blocks[orig_block_id].body.len()
+            );
             stmt_idx += 1;
-            stack.clear();
+            debug_assert!(stack.is_empty());
 
             match stmt {
                 Stmt::Nop => {}
@@ -231,8 +253,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     let expr = stack.pop().unwrap();
 
                     if let Some(value) = expr.to_value() {
-                        info.exit_env.locals[local_id] = value;
+                        info.exit_env.locals.insert(local_id, value);
                     } else {
+                        info.exit_env.locals.remove(local_id);
                         block.body.push(Stmt::LocalSet(local_id, expr));
                     }
                 }
@@ -330,6 +353,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
             }
         }
 
+        trace!(
+            "processing a terminator: {}",
+            cfg.blocks[orig_block_id].term
+        );
+
         match &cfg.blocks[orig_block_id].term {
             Terminator::Trap | Terminator::Br(_) | Terminator::Return(None) => {}
             Terminator::If(expr, _) => self.process_expr(block_id, stack, expr)?,
@@ -346,7 +374,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
             Terminator::Br(orig_target_block_id) => {
                 let exit_env = info.exit_env.clone();
-                let target_block_id = self.process_branch(orig_target_block_id, exit_env);
+                let target_block_id = self.process_branch(block_id, orig_target_block_id, exit_env);
                 self.func.blocks[block_id].term = Terminator::Br(target_block_id);
             }
 
@@ -359,19 +387,22 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     .map(|(value, _)| value.to_i32().unwrap())
                 {
                     Some(0) => {
-                        let else_block_id = self.process_branch(orig_else_block_id, exit_env);
+                        let else_block_id =
+                            self.process_branch(block_id, orig_else_block_id, exit_env);
                         self.func.blocks[block_id].term = Terminator::Br(else_block_id);
                     }
 
                     Some(_) => {
-                        let then_block_id = self.process_branch(orig_then_block_id, exit_env);
+                        let then_block_id =
+                            self.process_branch(block_id, orig_then_block_id, exit_env);
                         self.func.blocks[block_id].term = Terminator::Br(then_block_id);
                     }
 
                     None => {
                         let then_block_id =
-                            self.process_branch(orig_then_block_id, exit_env.clone());
-                        let else_block_id = self.process_branch(orig_else_block_id, exit_env);
+                            self.process_branch(block_id, orig_then_block_id, exit_env.clone());
+                        let else_block_id =
+                            self.process_branch(block_id, orig_else_block_id, exit_env);
                         self.func.blocks[block_id].term =
                             Terminator::If(condition, [then_block_id, else_block_id]);
                     }
@@ -393,12 +424,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 });
 
                 if let Some(orig_block_id) = orig_target_block_id {
-                    let target_block_id = self.process_branch(orig_block_id, exit_env);
+                    let target_block_id = self.process_branch(block_id, orig_block_id, exit_env);
                     self.func.blocks[block_id].term = Terminator::Br(target_block_id);
                 } else {
                     let block_ids = orig_block_ids
                         .iter()
-                        .map(|&orig_block_id| self.process_branch(orig_block_id, exit_env.clone()))
+                        .map(|&orig_block_id| {
+                            self.process_branch(block_id, orig_block_id, exit_env.clone())
+                        })
                         .collect();
 
                     self.func.blocks[block_id].term = Terminator::Switch(index, block_ids);
@@ -406,6 +439,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
             }
 
             Terminator::Return(ref expr) => {
+                self.flush_globals(block_id);
                 let expr = expr.is_some().then(|| stack.pop().unwrap());
                 self.func.blocks[block_id].term = Terminator::Return(expr);
             }
@@ -424,9 +458,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
         while let Some(&mut (ref mut subexpr_idx, expr)) = tasks.last_mut() {
             if let Some(subexpr) = expr.nth_subexpr(*subexpr_idx) {
+                trace!("processing a subexpr (#{subexpr_idx}) of {expr}");
                 *subexpr_idx += 1;
                 tasks.push((0, subexpr));
             } else {
+                trace!("processing an expr: {expr}");
+
                 match *expr {
                     Expr::Value(value, attrs) => stack.push(Expr::Value(value, attrs)),
                     Expr::Nullary(op) => self.process_nul_op(block_id, stack, op)?,
@@ -434,6 +471,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     Expr::Binary(op, _) => self.process_bin_op(block_id, stack, op)?,
                     Expr::Ternary(op, _) => self.process_tern_op(block_id, stack, op)?,
                 }
+
+                tasks.pop().unwrap();
             }
         }
 
@@ -463,11 +502,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(())
     }
 
-    fn process_un_op(&mut self, block_id: BlockId, stack: &mut Vec<Expr>, op: UnOp) -> Result<()> {
-        let info = &mut self.blocks[block_id];
+    fn process_un_op(&mut self, _block_id: BlockId, stack: &mut Vec<Expr>, op: UnOp) -> Result<()> {
         let arg = stack.pop().unwrap();
 
-        let mut try_process = || -> Option<Expr> {
+        let try_process = || -> Option<Expr> {
             let &Expr::Value(value, attrs) = &arg else {
                 return None;
             };
@@ -595,12 +633,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 UnOp::I64Extend8S => Expr::Value(Value::I64(value.to_i64()? as i8 as i64), attrs),
                 UnOp::I64Extend16S => Expr::Value(Value::I64(value.to_i64()? as i16 as i64), attrs),
                 UnOp::I64Extend32S => Expr::Value(Value::I64(value.to_i64()? as i32 as i64), attrs),
-
-                UnOp::LocalTee(local_id) => {
-                    info.exit_env.locals.insert(local_id, (value, attrs));
-
-                    Expr::Value(value, attrs)
-                }
 
                 UnOp::Load(mem_arg, load) => {
                     if !attrs.contains(ValueAttrs::CONST_PTR) {
@@ -1085,10 +1117,22 @@ impl<'a, 'i> Specializer<'a, 'i> {
         block_id
     }
 
-    fn process_branch(&mut self, orig_block_id: OrigBlockId, env: Env) -> BlockId {
+    fn process_branch(
+        &mut self,
+        from_block_id: BlockId,
+        orig_block_id: OrigBlockId,
+        env: Env,
+    ) -> BlockId {
         let block_id = self.get_branch_target(orig_block_id, env.clone());
+        trace!("processing a branch to {orig_block_id:?} -> {block_id:?}");
 
         if self.blocks[block_id].entry_env.merge(&env) {
+            trace!("the entry environment has changed");
+            Self::flush_globals_in(
+                &self.blocks[from_block_id].entry_env,
+                &self.blocks[block_id].exit_env,
+                &mut self.func.blocks[block_id],
+            );
             self.tasks.insert(Task(block_id));
         }
 
@@ -1102,15 +1146,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
         false
     }
 
-    fn flush_globals(&mut self, block_id: BlockId) {
-        let info = &self.blocks[block_id];
-        let flushed_globals = info
-            .exit_env
+    fn flush_globals_in(entry_env: &Env, exit_env: &Env, block: &mut Block) {
+        let flushed_globals = exit_env
             .globals
             .iter()
             .filter(|&(global_id, (exit_value, _))| {
-                !info
-                    .entry_env
+                !entry_env
                     .globals
                     .get(global_id)
                     .is_some_and(|(entry_value, _)| exit_value == entry_value)
@@ -1118,10 +1159,19 @@ impl<'a, 'i> Specializer<'a, 'i> {
             .collect::<Vec<_>>();
 
         for (global_id, &(value, attrs)) in flushed_globals {
-            self.func.blocks[block_id]
+            block
                 .body
                 .push(Stmt::GlobalSet(global_id, Expr::Value(value, attrs)));
         }
+    }
+
+    fn flush_globals(&mut self, block_id: BlockId) {
+        let info = &self.blocks[block_id];
+        Self::flush_globals_in(
+            &info.entry_env,
+            &info.exit_env,
+            &mut self.func.blocks[block_id],
+        );
     }
 
     fn assume_clobbered_globals(&mut self, block_id: BlockId) {

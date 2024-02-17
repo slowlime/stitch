@@ -50,12 +50,16 @@ pub enum ParseError {
         name: String,
     },
 
-    #[error("element #{element_idx} (segment #{segment_idx}) stored at #{idx} is out of range for table #{table_idx}")]
+    #[error(
+        "element #{element_idx} (segment #{segment_idx}) stored at #{idx} is out of range \
+        for table #{table_idx} of size {table_size}"
+    )]
     TableElemOutOfRange {
         element_idx: usize,
         segment_idx: usize,
         idx: usize,
         table_idx: usize,
+        table_size: usize,
     },
 
     #[error(
@@ -579,6 +583,7 @@ impl Parser {
                         segment_idx,
                         idx,
                         table_idx: table_idx as usize,
+                        table_size: elems.len(),
                     });
                 }
 

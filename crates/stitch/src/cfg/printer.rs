@@ -128,8 +128,6 @@ impl Display for UnOp {
             Self::I64Extend16S => write!(f, "i64.extend16_s"),
             Self::I64Extend32S => write!(f, "i64.extend32_s"),
 
-            Self::LocalTee(local_id) => write!(f, "local.tee {local_id:?}"),
-
             Self::Load(mem_arg, load) => write!(f, "{load} {mem_arg}"),
             Self::MemoryGrow(mem_id) => write!(f, "memory.grow {mem_id:?}"),
         }

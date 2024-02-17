@@ -295,8 +295,6 @@ pub enum UnOp {
     I64Extend16S,
     I64Extend32S,
 
-    LocalTee(LocalId),
-
     Load(MemArg, Load),
     MemoryGrow(MemoryId),
 }
@@ -514,8 +512,6 @@ impl Expr {
 
                 UnOp::I64Extend8S | UnOp::I64Extend16S | UnOp::I64Extend32S => ValType::I64.into(),
 
-                UnOp::LocalTee(local_id) => ExprTy::Local(local_id),
-
                 UnOp::Load(_, load) => match load {
                     Load::I32(_) => ValType::I32.into(),
                     Load::I64(_) => ValType::I64.into(),
@@ -696,7 +692,6 @@ impl Expr {
                 | UnOp::I64Extend8S
                 | UnOp::I64Extend16S
                 | UnOp::I64Extend32S => false,
-                UnOp::LocalTee(_) => true,
                 UnOp::Load(_, _) => false,
                 UnOp::MemoryGrow(_) => true,
             },

@@ -400,7 +400,6 @@ impl Translator<'_> {
                     UnOp::I64Extend8S => AstUnOp::I64Extend8S,
                     UnOp::I64Extend16S => AstUnOp::I64Extend16S,
                     UnOp::I64Extend32S => AstUnOp::I64Extend32S,
-                    UnOp::LocalTee(local_id) => AstUnOp::LocalTee(self.translate_local(local_id)),
 
                     UnOp::Load(mem_arg, load) => match load {
                         Load::I32(I32Load::Four) => AstUnOp::I32Load(mem_arg),

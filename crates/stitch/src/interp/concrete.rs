@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::{array, str};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use log::trace;
 use slotmap::{Key, SecondaryMap};
 
 use crate::ast::expr::{Value, ValueAttrs};
@@ -18,7 +19,7 @@ use crate::util::float::{F32, F64};
 
 use super::Interpreter;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Task<'a> {
     Expr(&'a Expr),
     Call(&'a Call),
@@ -108,6 +109,17 @@ impl Interpreter<'_> {
             let func = Rc::clone(&self.cfgs[frame.func_id]);
             let block = &func.blocks[frame.block_id];
 
+            trace!(
+                "func {func_id:?}, block {:?}, stmt {}/{}: {}",
+                frame.block_id,
+                frame.next_stmt,
+                block.body.len(),
+                match block.body.get(frame.next_stmt) {
+                    Some(stmt) => stmt as &dyn std::fmt::Display,
+                    None => &block.term as &dyn std::fmt::Display,
+                },
+            );
+
             match block.body.get(frame.next_stmt) {
                 Some(stmt) => match stmt {
                     Stmt::Nop => {}
@@ -129,7 +141,7 @@ impl Interpreter<'_> {
             let frame = frames.last_mut().unwrap();
             frame.next_stmt += 1;
 
-            if let Some(stmt) = block.body.get(frame.next_stmt) {
+            if let Some(stmt) = block.body.get(frame.next_stmt - 1) {
                 match *stmt {
                     Stmt::Nop => {}
 
@@ -140,6 +152,7 @@ impl Interpreter<'_> {
                     Stmt::LocalSet(local_id, _) => {
                         let value = frame.stack.pop().unwrap();
                         frame.locals[local_id] = value;
+                        trace!("locals[{local_id:?}] <- {}", Expr::Value(value.0, value.1));
                     }
 
                     Stmt::GlobalSet(global_id, _) => {
@@ -188,7 +201,7 @@ impl Interpreter<'_> {
 
                     Terminator::Return(_) => {
                         let mut frame = frames.pop().unwrap();
-                        let ret_local_id = frames.pop().unwrap().ret_local_id;
+                        let ret_local_id = frame.ret_local_id;
                         let value = ret_local_id.map(|_| frame.stack.pop().unwrap());
 
                         match frames.last_mut() {
@@ -328,7 +341,14 @@ impl Interpreter<'_> {
         let frame = frames.last_mut().unwrap();
 
         match op {
-            NulOp::LocalGet(local_id) => frame.stack.push(*frame.locals.get(local_id).unwrap()),
+            NulOp::LocalGet(local_id) => {
+                let value = frame.locals[local_id];
+                frame.stack.push(value);
+                trace!(
+                    "frame.locals[{local_id:?}] -> {}",
+                    Expr::Value(value.0, value.1)
+                );
+            }
 
             NulOp::GlobalGet(global_id) => {
                 match self.module.globals[global_id].def {
@@ -459,12 +479,6 @@ impl Interpreter<'_> {
             UnOp::I64Extend8S => (Value::I64(arg.unwrap_u64() as i8 as i64), arg_attrs),
             UnOp::I64Extend16S => (Value::I64(arg.unwrap_u64() as i16 as i64), arg_attrs),
             UnOp::I64Extend32S => (Value::I64(arg.unwrap_u64() as i32 as i64), arg_attrs),
-
-            UnOp::LocalTee(local_id) => {
-                frame.locals[local_id] = (arg, arg_attrs);
-
-                (arg, arg_attrs)
-            }
 
             UnOp::Load(mem_arg, load) => {
                 let base_addr = arg.unwrap_u32();
@@ -626,22 +640,10 @@ impl Interpreter<'_> {
                 meet_attrs,
             ),
 
-            BinOp::F32Add => (
-                Value::F32(lhs.unwrap_f32() + rhs.unwrap_f32()),
-                meet_attrs,
-            ),
-            BinOp::F32Sub => (
-                Value::F32(lhs.unwrap_f32() - rhs.unwrap_f32()),
-                meet_attrs,
-            ),
-            BinOp::F32Mul => (
-                Value::F32(lhs.unwrap_f32() * rhs.unwrap_f32()),
-                meet_attrs,
-            ),
-            BinOp::F32Div => (
-                Value::F32(lhs.unwrap_f32() / rhs.unwrap_f32()),
-                meet_attrs,
-            ),
+            BinOp::F32Add => (Value::F32(lhs.unwrap_f32() + rhs.unwrap_f32()), meet_attrs),
+            BinOp::F32Sub => (Value::F32(lhs.unwrap_f32() - rhs.unwrap_f32()), meet_attrs),
+            BinOp::F32Mul => (Value::F32(lhs.unwrap_f32() * rhs.unwrap_f32()), meet_attrs),
+            BinOp::F32Div => (Value::F32(lhs.unwrap_f32() / rhs.unwrap_f32()), meet_attrs),
             BinOp::F32Min => (
                 Value::F32(lhs.unwrap_f32().min(rhs.unwrap_f32())),
                 meet_attrs,
@@ -655,22 +657,10 @@ impl Interpreter<'_> {
                 meet_attrs,
             ),
 
-            BinOp::F64Add => (
-                Value::F64(lhs.unwrap_f64() + rhs.unwrap_f64()),
-                meet_attrs,
-            ),
-            BinOp::F64Sub => (
-                Value::F64(lhs.unwrap_f64() - rhs.unwrap_f64()),
-                meet_attrs,
-            ),
-            BinOp::F64Mul => (
-                Value::F64(lhs.unwrap_f64() * rhs.unwrap_f64()),
-                meet_attrs,
-            ),
-            BinOp::F64Div => (
-                Value::F64(lhs.unwrap_f64() / rhs.unwrap_f64()),
-                meet_attrs,
-            ),
+            BinOp::F64Add => (Value::F64(lhs.unwrap_f64() + rhs.unwrap_f64()), meet_attrs),
+            BinOp::F64Sub => (Value::F64(lhs.unwrap_f64() - rhs.unwrap_f64()), meet_attrs),
+            BinOp::F64Mul => (Value::F64(lhs.unwrap_f64() * rhs.unwrap_f64()), meet_attrs),
+            BinOp::F64Div => (Value::F64(lhs.unwrap_f64() / rhs.unwrap_f64()), meet_attrs),
             BinOp::F64Min => (
                 Value::F64(lhs.unwrap_f64().min(rhs.unwrap_f64())),
                 meet_attrs,
@@ -886,6 +876,8 @@ impl Interpreter<'_> {
         let ret_local_id = call.ret_local_id();
 
         if let Some(intrinsic) = self.module.funcs[func_id].get_intrinsic(&self.module) {
+            trace!("evaluating an intrinsic {intrinsic}");
+
             match intrinsic {
                 IntrinsicDecl::Specialize => self.eval_intr_specialize(frames, args)?,
                 IntrinsicDecl::Unknown => self.eval_intr_unknown(frames, func_id)?,
@@ -981,6 +973,7 @@ impl Interpreter<'_> {
             })
             .collect();
 
+        trace!("function to specialize: {func_id:?}");
         let spec_func_id = self.specialize(func_id, args)?;
 
         let table = &mut self.module.tables[self.module.default_table];
@@ -1006,6 +999,7 @@ impl Interpreter<'_> {
 
                 _ => {
                     elems.push(Some(spec_func_id));
+                    table.ty.limits.min = table.ty.limits.min.max(elems.len().try_into().unwrap());
 
                     elems.len() - 1
                 }

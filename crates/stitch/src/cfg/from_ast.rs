@@ -588,16 +588,10 @@ impl<'a> Translator<'a> {
             AstUnOp::I64Extend16S => push!(I64Extend16S),
             AstUnOp::I64Extend32S => push!(I64Extend32S),
 
-            AstUnOp::LocalSet(local_id) => {
+            AstUnOp::LocalSet(local_id) | AstUnOp::LocalTee(local_id) => {
                 let local_id = self.get_local(local_id);
 
                 self.push_stmt(Stmt::LocalSet(local_id, inner))
-            }
-
-            AstUnOp::LocalTee(local_id) => {
-                let local_id = self.get_local(local_id);
-
-                push!(LocalTee(local_id))
             }
 
             AstUnOp::GlobalSet(global_id) => self.push_stmt(Stmt::GlobalSet(global_id, inner)),
