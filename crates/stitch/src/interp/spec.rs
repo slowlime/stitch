@@ -1010,6 +1010,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
             }
         } else {
             // TODO: inlining
+            self.flush_globals(block_id);
             self.func.blocks[block_id]
                 .body
                 .push(Stmt::Call(Call::Direct {
@@ -1017,6 +1018,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     func_id,
                     args,
                 }));
+            self.assume_clobbered_globals(block_id);
         }
 
         Ok(())
@@ -1098,5 +1100,41 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
         // TODO
         false
+    }
+
+    fn flush_globals(&mut self, block_id: BlockId) {
+        let info = &self.blocks[block_id];
+        let flushed_globals = info
+            .exit_env
+            .globals
+            .iter()
+            .filter(|&(global_id, (exit_value, _))| {
+                !info
+                    .entry_env
+                    .globals
+                    .get(global_id)
+                    .is_some_and(|(entry_value, _)| exit_value == entry_value)
+            })
+            .collect::<Vec<_>>();
+
+        for (global_id, &(value, attrs)) in flushed_globals {
+            self.func.blocks[block_id]
+                .body
+                .push(Stmt::GlobalSet(global_id, Expr::Value(value, attrs)));
+        }
+    }
+
+    fn assume_clobbered_globals(&mut self, block_id: BlockId) {
+        let info = &mut self.blocks[block_id];
+        let clobbered_global_ids = info
+            .exit_env
+            .globals
+            .keys()
+            .filter(|&global_id| self.interp.module.globals[global_id].ty.mutable)
+            .collect::<Vec<_>>();
+
+        for global_id in clobbered_global_ids {
+            info.exit_env.globals.remove(global_id);
+        }
     }
 }

@@ -101,8 +101,8 @@ impl<'a> Interpreter<'a> {
         ensure!(
             args.len() == func.ty().params.len(),
             "invalid number of arguments for function: expected {}, got {}",
+            func.ty().params.len(),
             args.len(),
-            func.ty().params.len()
         );
         ensure!(
             args.iter()
