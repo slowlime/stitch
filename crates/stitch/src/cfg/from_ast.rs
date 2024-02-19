@@ -2,6 +2,7 @@ use std::array;
 use std::iter;
 use std::mem;
 
+use log::trace;
 use slotmap::{Key, SecondaryMap};
 
 use crate::ast::expr::{
@@ -24,6 +25,7 @@ use super::{BinOp, Block, BlockId, FuncBody, LocalId, NulOp, Terminator, TernOp,
 
 impl FuncBody {
     pub fn from_ast(module: &Module, func: &AstFunc) -> Self {
+        trace!("translating an AST to a CFG");
         let translator = Translator {
             module,
             ast: func,

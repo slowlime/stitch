@@ -149,8 +149,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
         interp: &'i mut Interpreter<'a>,
         SpecSignature { args, .. }: SpecSignature,
         cfg: Rc<FuncBody>,
+        func: FuncBody,
     ) -> Self {
-        let func = FuncBody::new(cfg.ty.clone());
         let loop_headers = cfg.loop_headers(&cfg.rpo());
 
         Self {
@@ -179,6 +179,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
             self.tasks.remove(&Task(block_id));
             self.process_block(block_id)?;
         }
+
+        self.func.remove_unreachable_blocks();
+        self.func.merge_blocks();
 
         Ok(self.func)
     }
@@ -264,8 +267,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     let expr = stack.pop().unwrap();
 
                     if let Some(value) = expr.to_value() {
-                        info.exit_env.globals[global_id] = value;
+                        info.exit_env.globals.insert(global_id, value);
                     } else {
+                        info.exit_env.globals.remove(global_id);
                         block.body.push(Stmt::GlobalSet(global_id, expr));
                     }
                 }
@@ -1032,38 +1036,114 @@ impl<'a, 'i> Specializer<'a, 'i> {
         if let Some(intrinsic) =
             self.interp.module.funcs[func_id].get_intrinsic(&self.interp.module)
         {
-            match intrinsic {
+            let processed = match intrinsic {
+                IntrinsicDecl::ArgCount => {
+                    self.process_intr_arg_count(block_id, ret_local_id.unwrap())?
+                }
+                IntrinsicDecl::ArgLen => {
+                    self.process_intr_arg_len(block_id, ret_local_id.unwrap(), &args)?
+                }
+                IntrinsicDecl::ArgRead => {
+                    self.process_intr_arg_read(block_id, ret_local_id.unwrap())?
+                }
                 IntrinsicDecl::Specialize => {
                     self.process_intr_specialize(block_id, ret_local_id.unwrap())?
                 }
                 IntrinsicDecl::Unknown => {
                     self.process_intr_unknown(block_id, ret_local_id.unwrap(), func_id)?
                 }
+                IntrinsicDecl::PrintValue => self.process_intr_print_value()?,
+                IntrinsicDecl::PrintStr => self.process_intr_print_str()?,
+            };
+
+            if processed {
+                return Ok(());
             }
-        } else {
-            // TODO: inlining
-            self.flush_globals(block_id);
-            self.func.blocks[block_id]
-                .body
-                .push(Stmt::Call(Call::Direct {
-                    ret_local_id,
-                    func_id,
-                    args,
-                }));
-            self.assume_clobbered_globals(block_id);
         }
+
+        // TODO: inlining
+        self.flush_globals(block_id);
+        self.func.blocks[block_id]
+            .body
+            .push(Stmt::Call(Call::Direct {
+                ret_local_id,
+                func_id,
+                args,
+            }));
+        self.assume_clobbered_globals(block_id);
 
         Ok(())
     }
 
-    fn process_intr_specialize(&mut self, block_id: BlockId, ret_local_id: LocalId) -> Result<()> {
-        warn!("encountered stitch/specialize during specialization");
+    fn process_intr_arg_count(&mut self, block_id: BlockId, ret_local_id: LocalId) -> Result<bool> {
+        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+            ret_local_id,
+            Expr::Value(
+                Value::I32(u32::try_from(self.interp.args.len()).unwrap() as i32),
+                Default::default(),
+            ),
+        ));
+
+        Ok(true)
+    }
+
+    fn process_intr_arg_len(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+        args: &Vec<Expr>,
+    ) -> Result<bool> {
+        let Some(idx) = args[0].to_value().map(|(value, _)| value.to_u32().unwrap()) else {
+            return Ok(false);
+        };
+        let Some(arg) = self.interp.args.get(idx as usize) else {
+            warn!(
+                "while processing {}: an interpreter argument index {idx} is out of bounds (provided {})",
+                IntrinsicDecl::ArgLen,
+                self.interp.args.len(),
+            );
+
+            return Ok(false);
+        };
+        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+            ret_local_id,
+            Expr::Value(
+                Value::I32(u32::try_from(arg.len()).unwrap() as i32),
+                Default::default(),
+            ),
+        ));
+
+        Ok(true)
+    }
+
+    fn process_intr_arg_read(&mut self, block_id: BlockId, ret_local_id: LocalId) -> Result<bool> {
+        warn!(
+            "encountered {} during specialization",
+            IntrinsicDecl::ArgRead,
+        );
         self.func.blocks[block_id].body.push(Stmt::LocalSet(
             ret_local_id,
             Expr::Value(Value::I32(0), Default::default()),
         ));
 
-        Ok(())
+        Ok(true)
+    }
+
+    fn process_intr_specialize(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+    ) -> Result<bool> {
+        warn!(
+            "encountered {} during specialization",
+            IntrinsicDecl::Specialize,
+        );
+        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+            ret_local_id,
+            Expr::Value(Value::I32(0), Default::default()),
+        ));
+
+        Ok(true)
     }
 
     fn process_intr_unknown(
@@ -1071,14 +1151,32 @@ impl<'a, 'i> Specializer<'a, 'i> {
         block_id: BlockId,
         ret_local_id: LocalId,
         func_id: FuncId,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let val_ty = self.interp.module.funcs[func_id].ty().ret.as_ref().unwrap();
         self.func.blocks[block_id].body.push(Stmt::LocalSet(
             ret_local_id,
             Expr::Value(Value::default_for(val_ty), Default::default()),
         ));
 
-        Ok(())
+        Ok(true)
+    }
+
+    fn process_intr_print_value(&mut self) -> Result<bool> {
+        warn!(
+            "encountered {} during specialization",
+            IntrinsicDecl::PrintValue,
+        );
+
+        Ok(false)
+    }
+
+    fn process_intr_print_str(&mut self) -> Result<bool> {
+        warn!(
+            "encountered {} during specialization",
+            IntrinsicDecl::PrintStr,
+        );
+
+        Ok(false)
     }
 
     fn get_branch_target(&mut self, orig_block_id: OrigBlockId, env: Env) -> BlockId {

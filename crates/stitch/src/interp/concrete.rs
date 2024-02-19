@@ -1,9 +1,10 @@
+use std::io::Write;
 use std::ops::Neg;
 use std::rc::Rc;
 use std::{array, str};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use log::trace;
+use log::{info, trace};
 use slotmap::{Key, SecondaryMap};
 
 use crate::ast::expr::{Value, ValueAttrs};
@@ -90,6 +91,11 @@ struct Frame {
 }
 
 impl Frame {
+    fn set_local(&mut self, local_id: LocalId, value: (Value, ValueAttrs)) {
+        trace!("frame.locals[{local_id:?}] <- {}", Expr::Value(value.0, value.1));
+        self.locals[local_id] = value;
+    }
+
     fn jump(&mut self, block_id: BlockId) {
         self.block_id = block_id;
         self.next_stmt = 0;
@@ -110,7 +116,8 @@ impl Interpreter<'_> {
             let block = &func.blocks[frame.block_id];
 
             trace!(
-                "func {func_id:?}, block {:?}, stmt {}/{}: {}",
+                "func {:?}, block {:?}, stmt {}/{}: {}",
+                frame.func_id,
                 frame.block_id,
                 frame.next_stmt,
                 block.body.len(),
@@ -120,7 +127,11 @@ impl Interpreter<'_> {
                 },
             );
 
-            match block.body.get(frame.next_stmt) {
+            let frame = frames.last_mut().unwrap();
+            let next_stmt = frame.next_stmt;
+            frame.next_stmt += 1;
+
+            match block.body.get(next_stmt) {
                 Some(stmt) => match stmt {
                     Stmt::Nop => {}
                     Stmt::Drop(expr) => self.eval(frames, expr)?,
@@ -139,9 +150,8 @@ impl Interpreter<'_> {
             }
 
             let frame = frames.last_mut().unwrap();
-            frame.next_stmt += 1;
 
-            if let Some(stmt) = block.body.get(frame.next_stmt - 1) {
+            if let Some(stmt) = block.body.get(next_stmt) {
                 match *stmt {
                     Stmt::Nop => {}
 
@@ -151,8 +161,7 @@ impl Interpreter<'_> {
 
                     Stmt::LocalSet(local_id, _) => {
                         let value = frame.stack.pop().unwrap();
-                        frame.locals[local_id] = value;
-                        trace!("locals[{local_id:?}] <- {}", Expr::Value(value.0, value.1));
+                        frame.set_local(local_id, value);
                     }
 
                     Stmt::GlobalSet(global_id, _) => {
@@ -161,18 +170,30 @@ impl Interpreter<'_> {
                         match self.module.globals[global_id].def {
                             GlobalDef::Import(_) => bail!("cannot assign to an imported global"),
                             GlobalDef::Value(ref mut expr) => {
-                                *expr = ConstExpr::Value(value, attrs)
+                                *expr = ConstExpr::Value(value, attrs);
+                                trace!("globals[{global_id:?}] <- {}", Expr::Value(value, attrs));
                             }
                         }
                     }
 
                     Stmt::Store(mem_arg, store, _) => {
-                        let (value, _) = frame.stack.pop().unwrap();
+                        let (value, attrs) = frame.stack.pop().unwrap();
                         let base_addr = frame.stack.pop().unwrap().0.unwrap_u32();
                         let start = (base_addr + mem_arg.offset) as usize;
                         let range = start..start + store.dst_size();
                         let bytes = self.module.get_mem_mut(mem_arg.mem_id, range)?;
                         store.store(bytes, value);
+                        trace!(
+                            "{store} {} to 0x{base_addr:x} + {offset}: [0x{start:x}..0x{end:x}] <- [{bytes}]",
+                            Expr::Value(value, attrs),
+                            offset = mem_arg.offset,
+                            end = start + store.dst_size(),
+                            bytes = bytes
+                                .iter()
+                                .map(|b| format!("{b:02x} "))
+                                .collect::<String>()
+                                .trim_end(),
+                        );
                     }
 
                     Stmt::Call(..) => continue 'frame,
@@ -204,10 +225,16 @@ impl Interpreter<'_> {
                         let ret_local_id = frame.ret_local_id;
                         let value = ret_local_id.map(|_| frame.stack.pop().unwrap());
 
+                        trace!(
+                            "returning from {:?} (name = {:?}) with {value:?}",
+                            frame.func_id,
+                            self.module.funcs[frame.func_id].name(),
+                        );
+
                         match frames.last_mut() {
                             Some(frame) => {
                                 if let Some(ret_local_id) = ret_local_id {
-                                    frame.locals[ret_local_id] = value.unwrap();
+                                    frame.set_local(ret_local_id, value.unwrap());
                                 }
                             }
 
@@ -293,6 +320,11 @@ impl Interpreter<'_> {
         };
 
         frame.jump(func.entry);
+        trace!(
+            "pushing frame #{}: {func_id:?} (name = {:?})",
+            frames.len() + 1,
+            self.module.funcs[func_id].name(),
+        );
         frames.push(frame);
 
         Ok(())
@@ -355,7 +387,8 @@ impl Interpreter<'_> {
                     GlobalDef::Import(_) => bail!("cannot evaluate an imported global"),
 
                     GlobalDef::Value(ConstExpr::Value(value, attrs)) => {
-                        frame.stack.push((value, attrs))
+                        frame.stack.push((value, attrs));
+                        trace!("globals[{global_id:?}] -> {}", Expr::Value(value, attrs));
                     }
 
                     GlobalDef::Value(ConstExpr::GlobalGet(_)) => {
@@ -486,8 +519,20 @@ impl Interpreter<'_> {
                 let range = start..start + load.src_size();
                 let bytes = self.module.get_mem(mem_arg.mem_id, range)?;
                 let value = load.load(bytes);
+                let attrs = arg_attrs.deref_attrs();
+                trace!(
+                    "{load} {} from 0x{base_addr:x} + {offset}: [0x{start:x}..0x{end:x}] -> [{bytes}]",
+                    Expr::Value(value, attrs),
+                    offset = mem_arg.offset,
+                    end = start + load.src_size(),
+                    bytes = bytes
+                        .iter()
+                        .map(|b| format!("{b:02x} "))
+                        .collect::<String>()
+                        .trim_end(),
+                );
 
-                (value, arg_attrs.deref_attrs())
+                (value, attrs)
             }
 
             UnOp::MemoryGrow(mem_id) => {
@@ -535,7 +580,7 @@ impl Interpreter<'_> {
                 lhs_attrs.addsub_attrs(&rhs_attrs),
             ),
             BinOp::I32Sub => (
-                Value::I32(lhs.unwrap_i32().wrapping_add(rhs.unwrap_i32())),
+                Value::I32(lhs.unwrap_i32().wrapping_sub(rhs.unwrap_i32())),
                 lhs_attrs.addsub_attrs(&rhs_attrs),
             ),
             BinOp::I32Mul => (
@@ -879,19 +924,95 @@ impl Interpreter<'_> {
             trace!("evaluating an intrinsic {intrinsic}");
 
             match intrinsic {
+                IntrinsicDecl::ArgCount => self.eval_intr_arg_count(frames)?,
+                IntrinsicDecl::ArgLen => self.eval_intr_arg_len(frames, args)?,
+                IntrinsicDecl::ArgRead => self.eval_intr_arg_read(frames, args)?,
                 IntrinsicDecl::Specialize => self.eval_intr_specialize(frames, args)?,
                 IntrinsicDecl::Unknown => self.eval_intr_unknown(frames, func_id)?,
+                IntrinsicDecl::PrintValue => self.eval_intr_print_value(args)?,
+                IntrinsicDecl::PrintStr => self.eval_intr_print_str(args)?,
             }
 
             let frame = frames.last_mut().unwrap();
 
             if let Some(ret_local_id) = ret_local_id {
                 let ret_value = frame.stack.pop().unwrap();
-                frame.locals[ret_local_id] = ret_value;
+                frame.set_local(ret_local_id, ret_value);
             }
         } else {
             self.push_frame(frames, func_id, args, ret_local_id)?;
         }
+
+        Ok(())
+    }
+
+    fn eval_intr_arg_count(&mut self, frames: &mut Vec<Frame>) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        frame.stack.push((
+            Value::I32(u32::try_from(self.args.len()).unwrap() as i32),
+            Default::default(),
+        ));
+
+        Ok(())
+    }
+
+    fn eval_intr_arg_len(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let idx = args[0].0.unwrap_u32() as usize;
+        let arg = self.args.get(idx).with_context(|| {
+            anyhow!(
+                "an interpreter argument index {idx} is out of bounds (provided {})",
+                self.args.len(),
+            )
+        })?;
+        let frame = frames.last_mut().unwrap();
+        frame.stack.push((
+            Value::I32(u32::try_from(arg.len()).unwrap() as i32),
+            Default::default(),
+        ));
+
+        Ok(())
+    }
+
+    fn eval_intr_arg_read(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let [idx, buf, size, offset] = array::from_fn(|i| args[i].0.unwrap_u32());
+        let arg = self.args.get(idx as usize).with_context(|| {
+            anyhow!(
+                "an interpreter argument index {idx} is out of bounds (provided {})",
+                self.args.len(),
+            )
+        })?;
+        let arg = arg.get(offset as usize..).with_context(|| {
+            anyhow!(
+                "an offset {offset} is out of bounds for the argument #{idx} of length {}",
+                arg.len(),
+            )
+        })?;
+        ensure!(
+            !self.module.default_mem.is_null(),
+            "the module does not define a memory"
+        );
+
+        let write_count = self
+            .module
+            .get_mem_mut(
+                self.module.default_mem,
+                (buf as usize)..((buf + size) as usize),
+            )
+            .context("could not write the argument value")?
+            .write(arg)?;
+
+        let frame = frames.last_mut().unwrap();
+        frame
+            .stack
+            .push((Value::I32(write_count as i32), Default::default()));
 
         Ok(())
     }
@@ -1030,6 +1151,38 @@ impl Interpreter<'_> {
             Value::default_for(&val_ty),
             ValueAttrs::default() | ValueAttrs::UNKNOWN,
         ));
+
+        Ok(())
+    }
+
+    fn eval_intr_print_value(&mut self, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
+        let intr = IntrinsicDecl::PrintValue;
+
+        match args[0].0 {
+            Value::I32(value) => info!("{intr}: {value}"),
+            Value::I64(value) => info!("{intr}: {value}"),
+            Value::F32(value) => info!("{intr}: {value}"),
+            Value::F64(value) => info!("{intr}: {value}"),
+        }
+
+        Ok(())
+    }
+
+    fn eval_intr_print_str(&mut self, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
+        let [addr, len] = array::from_fn(|i| args[i].0.unwrap_u32() as usize);
+        ensure!(
+            !self.module.default_mem.is_null(),
+            "the module does not define a memory",
+        );
+        let bytes = self
+            .module
+            .get_mem(self.module.default_mem, addr..addr + len)
+            .context("could not read the string")?;
+        info!(
+            "{}: {}",
+            IntrinsicDecl::PrintStr,
+            String::from_utf8_lossy(bytes)
+        );
 
         Ok(())
     }

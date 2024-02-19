@@ -37,15 +37,43 @@ new_key_type! {
 pub enum IntrinsicDecl {
     Specialize,
     Unknown,
+    ArgCount,
+    ArgLen,
+    ArgRead,
+    PrintValue,
+    PrintStr,
 }
 
 impl IntrinsicDecl {
     pub fn check_ty(&self, func_ty: &FuncType) -> Result<(), String> {
         match self {
+            Self::ArgCount if func_ty.params.is_empty() && func_ty.ret == Some(ValType::I32) => {
+                Ok(())
+            }
+            Self::ArgCount => Err("[] -> [i32]".into()),
+
+            Self::ArgLen
+                if func_ty.params.len() == 1
+                    && func_ty.params[0] == ValType::I32
+                    && func_ty.ret == Some(ValType::I32) =>
+            {
+                Ok(())
+            }
+            Self::ArgLen => Err("[i32] -> [i32]".into()),
+
+            Self::ArgRead
+                if func_ty.params.len() == 4
+                    && func_ty.params.iter().all(|ty| *ty == ValType::I32)
+                    && func_ty.ret == Some(ValType::I32) =>
+            {
+                Ok(())
+            }
+            Self::ArgRead => Err("[i32 i32 i32 i32] -> [i32]".into()),
+
             Self::Specialize
                 if func_ty.params.len() >= 3
-                    && func_ty.ret == Some(ValType::I32)
-                    && func_ty.params[0..3].iter().all(|ty| *ty == ValType::I32) =>
+                    && func_ty.params[0..3].iter().all(|ty| *ty == ValType::I32)
+                    && func_ty.ret == Some(ValType::I32) =>
             {
                 Ok(())
             }
@@ -53,6 +81,18 @@ impl IntrinsicDecl {
 
             Self::Unknown if func_ty.params.is_empty() && func_ty.ret.is_some() => Ok(()),
             Self::Unknown => Err("[] -> [t]".into()),
+
+            Self::PrintValue if func_ty.params.len() == 1 && func_ty.ret.is_none() => Ok(()),
+            Self::PrintValue => Err("[t] -> []".into()),
+
+            Self::PrintStr
+                if func_ty.params.len() == 2
+                    && func_ty.params.iter().all(|ty| *ty == ValType::I32)
+                    && func_ty.ret.is_none() =>
+            {
+                Ok(())
+            }
+            Self::PrintStr => Err("[i32 i32] -> []".into()),
         }
     }
 }
@@ -65,6 +105,11 @@ impl Display for IntrinsicDecl {
             match self {
                 Self::Specialize => "specialize",
                 Self::Unknown => "unknown",
+                Self::ArgCount => "arg-count",
+                Self::ArgLen => "arg-len",
+                Self::ArgRead => "arg-read",
+                Self::PrintValue => "print-value",
+                Self::PrintStr => "print-str",
             }
         )
     }
@@ -81,6 +126,7 @@ pub enum MemError {
 
 #[derive(Debug, Default, Clone)]
 pub struct Module {
+    pub name: Option<String>,
     pub types: BiSlotMap<TypeId, Type>,
     pub funcs: SlotMap<FuncId, Func>,
     pub tables: SlotMap<TableId, Table>,
@@ -106,8 +152,13 @@ impl Module {
         };
 
         Some(match name {
+            "arg-count" => IntrinsicDecl::ArgCount,
+            "arg-len" => IntrinsicDecl::ArgLen,
+            "arg-read" => IntrinsicDecl::ArgRead,
             "specialize" => IntrinsicDecl::Specialize,
             "unknown" => IntrinsicDecl::Unknown,
+            "print-value" => IntrinsicDecl::PrintValue,
+            "print-str" => IntrinsicDecl::PrintStr,
             _ => return None,
         })
     }

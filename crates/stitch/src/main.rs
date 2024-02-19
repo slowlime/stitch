@@ -11,18 +11,19 @@ fn main() -> Result<()> {
 
     let mut args = env::args_os().skip(1);
 
-    if args.len() != 2 {
-        eprintln!("Usage: stitch <input wasm module> <output module>");
+    if args.len() < 2 {
+        eprintln!("Usage: stitch <input wasm module> <output module> [<arg>...]");
         exit(2);
     }
 
     let input_path = args.next().unwrap();
     let output_path = args.next().unwrap();
+    let args = args.map(|arg| arg.into_encoded_bytes()).collect();
 
     let module_bytes = fs::read(&input_path).context("could not read the input module")?;
     let mut module = parse::parse(&module_bytes).context("could not parse the input module")?;
 
-    Interpreter::new(&mut module).process()?;
+    Interpreter::new(&mut module, args).process()?;
     PostProc::new(&mut module).process();
 
     let module = encode::encode(&mut module);

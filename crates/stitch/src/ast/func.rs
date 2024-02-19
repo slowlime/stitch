@@ -38,16 +38,42 @@ impl Func {
     pub fn body_mut(&mut self) -> Option<&mut FuncBody> {
         try_match!(self, Self::Body(body) => body)
     }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Import(import) => import.name(),
+            Self::Body(body) => body.name(),
+        }
+    }
+
+    pub fn set_name(&mut self, name: Option<String>) {
+        match self {
+            Self::Import(import) => import.set_name(name),
+            Self::Body(body) => body.set_name(name),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct FuncImport {
+    pub name: Option<String>,
     pub ty: FuncType,
     pub import_id: ImportId,
 }
 
+impl FuncImport {
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_ref().map(String::as_str)
+    }
+
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.name = name;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FuncBody {
+    pub name: Option<String>,
     pub ty: FuncType,
     pub locals: SlotMap<LocalId, ValType>,
     pub params: Vec<LocalId>,
@@ -64,11 +90,20 @@ impl FuncBody {
         };
 
         Self {
+            name: None,
             ty,
             locals: Default::default(),
             params: Default::default(),
             blocks,
             main_block: body,
         }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_ref().map(String::as_str)
+    }
+
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.name = name;
     }
 }

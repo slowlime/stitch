@@ -1,11 +1,12 @@
 use std::mem;
 use std::ops::Range;
 
-use log::{log_enabled, trace};
+use log::{log_enabled, trace, warn};
 use slotmap::SlotMap;
 use thiserror::Error;
 use wasmparser::{
-    BinaryReaderError, CompositeType, ExternalKind, Operator, Payload, SubType, WasmFeatures,
+    BinaryReaderError, CompositeType, ExternalKind, Name, NameSectionReader, Naming, Operator,
+    Payload, SubType, WasmFeatures,
 };
 
 use crate::ast::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, Value};
@@ -221,6 +222,7 @@ impl Parser {
         match &import.desc {
             ast::ImportDesc::Func(ty_idx) => {
                 self.add_func(ast::Func::Import(ast::func::FuncImport {
+                    name: None,
                     ty: self.module.types[*ty_idx].as_func().clone(),
                     import_id: id,
                 }));
@@ -369,6 +371,30 @@ impl Parser {
                         .validate(&func)?;
                 }
 
+                Payload::CustomSection(reader) if reader.name() == "name" => {
+                    for name in NameSectionReader::new(reader.data(), reader.data_offset()) {
+                        match name? {
+                            Name::Module { name, .. } => {
+                                self.module.name = Some(name.into());
+                            }
+
+                            Name::Function(names) => {
+                                for name in names {
+                                    let Naming { index, name } = name?;
+
+                                    if let Some(&func_id) = self.funcs.get(index as usize) {
+                                        self.module.funcs[func_id].set_name(Some(name.into()));
+                                    } else {
+                                        warn!("the name section contains a name for a non-existent function #{index}");
+                                    }
+                                }
+                            }
+
+                            _ => {}
+                        }
+                    }
+                }
+
                 Payload::CustomSection(_) => {}
 
                 Payload::End(offset) => {
@@ -440,7 +466,7 @@ impl Parser {
     }
 
     fn parse_funcs(&mut self, reader: wasmparser::FunctionSectionReader<'_>) -> Result<()> {
-        let mut idx = 0;
+        let mut idx = self.funcs.len();
         for result in reader {
             let func_ty_idx = result?;
             let ty = self.module.types[self.types[func_ty_idx as usize]]

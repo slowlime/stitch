@@ -414,7 +414,6 @@ impl<'a> BodyEncoder<'a, '_> {
     }
 
     fn block(&mut self, block: &Block) {
-        trace!("encoding block {block}");
         self.block_depths
             .insert(block.id, self.block_stack.len() as u32);
         self.block_stack.push(block.id);
@@ -429,8 +428,6 @@ impl<'a> BodyEncoder<'a, '_> {
 
     fn expr(&mut self, expr: &Expr) {
         use wasm_encoder::Instruction;
-
-        trace!("encoding expr {expr}");
 
         match expr {
             Expr::Value(value, _) => self.nullary(match value {

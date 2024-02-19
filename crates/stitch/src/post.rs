@@ -4,7 +4,7 @@ use log::warn;
 
 use crate::ast::expr::{make_visitor, NulOp, UnOp};
 use crate::ast::ty::Type;
-use crate::ast::{Expr, FuncId, Module, TableDef};
+use crate::ast::{Expr, Func, FuncId, ImportId, Module, TableDef};
 
 pub struct PostProc<'a> {
     module: &'a mut Module,
@@ -29,17 +29,26 @@ impl<'a> PostProc<'a> {
             .filter(|(_, func)| func.get_intrinsic(&self.module).is_some())
             .map(|(func_id, _)| func_id)
             .collect::<HashSet<_>>();
-        let import_ids = self
+        let mut import_ids = self
             .module
             .imports
             .keys()
             .filter(|&import_id| self.module.get_intrinsic(import_id).is_some())
             .collect::<HashSet<_>>();
 
-        fn check_expr<'a>(func_ids: &'a mut HashSet<FuncId>) -> impl FnMut(&Expr) -> bool + 'a {
+        fn check_expr<'a>(
+            module: &'a Module,
+            func_ids: &'a mut HashSet<FuncId>,
+            import_ids: &'a mut HashSet<ImportId>,
+        ) -> impl FnMut(&Expr) -> bool + 'a {
             move |expr: &Expr| match expr {
                 Expr::Call(func_id, _) if func_ids.remove(func_id) => {
                     warn!("Expr::Call references an intrinsic");
+                    import_ids.remove(match &module.funcs[*func_id] {
+                        Func::Import(import) => &import.import_id,
+                        _ => unreachable!(),
+                    });
+
                     true
                 }
 
@@ -51,7 +60,11 @@ impl<'a> PostProc<'a> {
             let Some(body) = func.body() else { continue };
 
             for expr in &body.main_block.body {
-                expr.all(&mut check_expr(&mut func_ids));
+                expr.all(&mut check_expr(
+                    &self.module,
+                    &mut func_ids,
+                    &mut import_ids,
+                ));
             }
         }
 

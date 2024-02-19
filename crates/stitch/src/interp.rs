@@ -53,15 +53,17 @@ pub struct Interpreter<'a> {
     spec_sigs: HashMap<SpecSignature, SpecializedFunc>,
     spec_funcs: SparseSecondaryMap<FuncId, SpecSignature>,
     cfgs: SparseSecondaryMap<FuncId, Rc<FuncBody>>,
+    args: Vec<Vec<u8>>,
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn new(module: &'a mut Module) -> Self {
+    pub fn new(module: &'a mut Module, args: Vec<Vec<u8>>) -> Self {
         Self {
             module,
             spec_sigs: Default::default(),
             spec_funcs: Default::default(),
             cfgs: Default::default(),
+            args,
         }
     }
 
@@ -175,10 +177,12 @@ impl<'a> Interpreter<'a> {
         self.spec_funcs.insert(func_id, spec_sig.clone());
 
         let func = Rc::clone(func);
-        let body = Specializer::new(self, spec_sig.clone(), func).run()?;
+        let body = Specializer::new(self, spec_sig.clone(), func, body).run()?;
+        trace!("cfg:\n{body}");
 
         *self.module.funcs[func_id].body_mut().unwrap() = body.to_ast();
         *self.spec_sigs.get_mut(&spec_sig).unwrap() = SpecializedFunc::Finished(func_id);
+        self.cfgs.insert(func_id, Rc::new(body));
 
         Ok(func_id)
     }
