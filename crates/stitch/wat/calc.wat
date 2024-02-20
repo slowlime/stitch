@@ -20,6 +20,10 @@
     (param $name-len i32)
     (param $arg0 i32)
     (result i32))
+  (func $stitch-const-ptr
+    (import "stitch" "const-ptr")
+    (param $ptr i32)
+    (result i32))
   (func $stitch-print-value
     (import "stitch" "print-value")
     (param $value i64))
@@ -27,6 +31,9 @@
     (import "stitch" "print-str")
     (param $str i32)
     (param $len i32))
+  (func $stitch-is-specializing
+    (import "stitch" "is-specializing")
+    (result i32))
 
   (table $func-table 16 funcref)
   (elem $func-table (i32.const 1) $interpret)
@@ -98,10 +105,19 @@
         (i32.const 1) ;; $interpret
         (i32.const 0) ;; "specialized"
         (i32.const 11)
-        (local.get $sp)))
+        (call $stitch-const-ptr
+          (local.get $sp))))
     (call $stitch-print-value
       (call_indirect (result i64)
         (local.get $specialized-idx))))
+
+  (func $print-str (param $str i32) (param $len i32)
+    (if
+      (call $stitch-is-specializing)
+      (then
+        (call $stitch-print-str
+          (local.get $str)
+          (local.get $len)))))
 
   (func $malloc (param $size i32) (result i32)
     (local $new-size i32)
@@ -128,7 +144,7 @@
               (local.get $extra-pages))
             (i32.const -1)))
         ;; not enough memory
-        (call $stitch-print-str
+        (call $print-str
           (i32.const 0x1030)
           (i32.const 17))
         (unreachable)))
@@ -198,7 +214,7 @@
         (call $vec-len
           (local.get $vec)))
       (then
-        (call $stitch-print-str
+        (call $print-str
           (i32.const 0x1041)
           (i32.const 40))
         (unreachable)))
@@ -264,7 +280,7 @@
             (local.get $vec)))
         (local.get $size))
       (then
-        (call $stitch-print-str
+        (call $print-str
           (i32.const 0x1069)
           (i32.const 39))
         (unreachable)))
@@ -287,7 +303,7 @@
             (local.get $vec)))
         (i32.const 8))
       (then
-        (call $stitch-print-str
+        (call $print-str
           (i32.const 0x1069)
           (i32.const 39))
         (unreachable)))
@@ -510,7 +526,7 @@
         (call $parser-is-eof
           (local.get $parser))
         (then
-          (call $stitch-print-str
+          (call $print-str
             (i32.const 0x1090)
             (i32.const 14))
           (unreachable)))
@@ -528,7 +544,7 @@
               (local.get $parser)
               ;; ')'
               (i32.const 41)))
-          (call $stitch-print-str
+          (call $print-str
             (i32.const 0x109e)
             (i32.const 12))
           (unreachable)))
@@ -553,7 +569,7 @@
             (local.get $parser))
           (return)))
 
-      (call $stitch-print-str
+      (call $print-str
         (i32.const 0x10aa)
         (i32.const 20))
       (unreachable)))
@@ -635,7 +651,7 @@
           (local.get $ptr)
           (local.get $result)))
       (else
-        (call $stitch-print-str
+        (call $print-str
           (i32.const 0x10aa)
           (i32.const 20))
         (unreachable))))
@@ -682,7 +698,7 @@
                           (i32.load
                             (local.get $ops-vec))
                           (local.get $pc))))
-                    (call $stitch-print-str
+                    (call $print-str
                       (i32.add
                         (i32.const 0x1101)
                         (local.get $op))
@@ -778,7 +794,7 @@
           (br $loop))
 
         ;; illegal operation
-        (call $stitch-print-str
+        (call $print-str
           (i32.const 0x10be)
           (i32.const 17))
         (unreachable)))
@@ -790,7 +806,7 @@
         (i32.const 8))
       (then
         ;; the stack is empty or contains more than one integer
-        (call $stitch-print-str
+        (call $print-str
           (i32.const 0x10cf)
           (i32.const 50))
         (unreachable)))

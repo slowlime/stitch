@@ -1052,8 +1052,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 IntrinsicDecl::Unknown => {
                     self.process_intr_unknown(block_id, ret_local_id.unwrap(), func_id)?
                 }
+                IntrinsicDecl::ConstPtr => {
+                    self.process_intr_const_ptr(block_id, ret_local_id.unwrap(), &args)?
+                }
                 IntrinsicDecl::PrintValue => self.process_intr_print_value()?,
                 IntrinsicDecl::PrintStr => self.process_intr_print_str()?,
+                IntrinsicDecl::IsSpecializing => {
+                    self.process_intr_is_specializing(block_id, ret_local_id.unwrap())?
+                }
             };
 
             if processed {
@@ -1161,6 +1167,18 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(true)
     }
 
+    fn process_intr_const_ptr(&mut self, block_id: BlockId, ret_local_id: LocalId, args: &Vec<Expr>) -> Result<bool> {
+        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+            ret_local_id,
+            match args[0].to_value() {
+                Some((value, attrs)) => Expr::Value(value, attrs | ValueAttrs::CONST_PTR),
+                None => args[0].clone(),
+            },
+        ));
+
+        Ok(true)
+    }
+
     fn process_intr_print_value(&mut self) -> Result<bool> {
         warn!(
             "encountered {} during specialization",
@@ -1177,6 +1195,15 @@ impl<'a, 'i> Specializer<'a, 'i> {
         );
 
         Ok(false)
+    }
+
+    fn process_intr_is_specializing(&mut self, block_id: BlockId, ret_local_id: LocalId) -> Result<bool> {
+        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+            ret_local_id,
+            Expr::Value(Value::I32(1), Default::default()),
+        ));
+
+        Ok(true)
     }
 
     fn get_branch_target(&mut self, orig_block_id: OrigBlockId, env: Env) -> BlockId {
