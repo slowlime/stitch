@@ -21,6 +21,7 @@ use crate::util::try_match;
 pub use self::dom_tree::DomTree;
 pub use self::predecessors::Predecessors;
 pub use self::rpo::Rpo;
+pub use self::loops::Loops;
 
 new_key_type! {
     pub struct LocalId;

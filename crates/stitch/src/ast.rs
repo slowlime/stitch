@@ -41,9 +41,11 @@ pub enum IntrinsicDecl {
     Specialize,
     Unknown,
     ConstPtr,
+    PropagateLoad,
     PrintValue,
     PrintStr,
     IsSpecializing,
+    Unroll,
 }
 
 impl IntrinsicDecl {
@@ -84,11 +86,14 @@ impl IntrinsicDecl {
             Self::Unknown if func_ty.params.is_empty() && func_ty.ret.is_some() => Ok(()),
             Self::Unknown => Err("[] -> [t]".into()),
 
-            Self::ConstPtr
+            Self::ConstPtr | Self::PropagateLoad
                 if func_ty.params.len() == 1
                     && func_ty.params[0] == ValType::I32
-                    && func_ty.ret == Some(ValType::I32) => Ok(()),
-            Self::ConstPtr => Err("[i32] -> [i32]".into()),
+                    && func_ty.ret == Some(ValType::I32) =>
+            {
+                Ok(())
+            }
+            Self::ConstPtr | Self::PropagateLoad => Err("[i32] -> [i32]".into()),
 
             Self::PrintValue if func_ty.params.len() == 1 && func_ty.ret.is_none() => Ok(()),
             Self::PrintValue => Err("[t] -> []".into()),
@@ -102,8 +107,15 @@ impl IntrinsicDecl {
             }
             Self::PrintStr => Err("[i32 i32] -> []".into()),
 
-            Self::IsSpecializing if func_ty.params.is_empty() && func_ty.ret == Some(ValType::I32) => Ok(()),
+            Self::IsSpecializing
+                if func_ty.params.is_empty() && func_ty.ret == Some(ValType::I32) =>
+            {
+                Ok(())
+            }
             Self::IsSpecializing => Err("[] -> [i32]".into()),
+
+            Self::Unroll if func_ty.params.is_empty() && func_ty.ret.is_none() => Ok(()),
+            Self::Unroll => Err("[] -> []".into()),
         }
     }
 }
@@ -120,9 +132,11 @@ impl Display for IntrinsicDecl {
                 Self::Specialize => "specialize",
                 Self::Unknown => "unknown",
                 Self::ConstPtr => "const-ptr",
+                Self::PropagateLoad => "propagate-load",
                 Self::PrintValue => "print-value",
                 Self::PrintStr => "print-str",
                 Self::IsSpecializing => "is-specializing",
+                Self::Unroll => "unroll",
             }
         )
     }
@@ -171,9 +185,11 @@ impl Module {
             "specialize" => IntrinsicDecl::Specialize,
             "unknown" => IntrinsicDecl::Unknown,
             "const-ptr" => IntrinsicDecl::ConstPtr,
+            "propagate-load" => IntrinsicDecl::PropagateLoad,
             "print-value" => IntrinsicDecl::PrintValue,
             "print-str" => IntrinsicDecl::PrintStr,
             "is-specializing" => IntrinsicDecl::IsSpecializing,
+            "unroll" => IntrinsicDecl::Unroll,
             _ => return None,
         })
     }

@@ -3,14 +3,15 @@ use std::ops::Neg;
 use std::rc::Rc;
 use std::{array, iter, mem};
 
-use anyhow::{ensure, Result};
+use anyhow::{anyhow, ensure, Result};
 use log::{trace, warn};
-use slotmap::{Key, SecondaryMap};
+use slotmap::{Key, SecondaryMap, SparseSecondaryMap};
 
 use crate::ast::expr::{Value, ValueAttrs};
 use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, IntrinsicDecl, Module, TableDef};
 use crate::cfg::{
-    BinOp, Block, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
+    BinOp, Block, BlockId, Call, Expr, FuncBody, LocalId, Loops, NulOp, Stmt, Terminator, TernOp,
+    UnOp,
 };
 use crate::util::float::{F32, F64};
 
@@ -43,11 +44,20 @@ impl Env {
                 GlobalDef::Value(ConstExpr::GlobalGet(_)) => None,
             })
             .collect();
-        let locals = args
+
+        let mut locals: SecondaryMap<_, _> = cfg
+            .locals
             .iter()
-            .zip(&cfg.params)
-            .filter_map(|(arg, &local_id)| arg.map(|value| (local_id, value)))
+            .map(|(local_id, val_ty)| (local_id, (Value::default_for(val_ty), Default::default())))
             .collect();
+
+        for (arg, &local_id) in args.iter().zip(&cfg.params) {
+            if let &Some(value) = arg {
+                locals[local_id] = value;
+            } else {
+                locals.remove(local_id);
+            }
+        }
 
         Self { globals, locals }
     }
@@ -118,19 +128,13 @@ struct BlockInfo {
     exit_env: Env,
 }
 
-enum Loop {
-    Kept(BlockId),
-    Unrolled,
-}
-
-impl Loop {
-    fn is_unrolled(&self) -> bool {
-        matches!(self, Self::Unrolled)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Task(BlockId);
+
+enum UnrollDecision {
+    No(BlockId),
+    Yes,
+}
 
 pub struct Specializer<'a, 'i> {
     interp: &'i mut Interpreter<'a>,
@@ -140,8 +144,8 @@ pub struct Specializer<'a, 'i> {
     blocks: SecondaryMap<BlockId, BlockInfo>,
     args: Vec<Option<(Value, ValueAttrs)>>,
     tasks: HashSet<Task>,
-    loop_headers: HashSet<OrigBlockId>,
-    loops: HashMap<OrigBlockId, Loop>,
+    loops: Loops,
+    unroll_decisions: SparseSecondaryMap<OrigBlockId, UnrollDecision>,
 }
 
 impl<'a, 'i> Specializer<'a, 'i> {
@@ -151,7 +155,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
         cfg: Rc<FuncBody>,
         func: FuncBody,
     ) -> Self {
-        let loop_headers = cfg.loop_headers(&cfg.rpo());
+        let rpo = cfg.rpo();
+        let preds = cfg.predecessors();
+        let dom_tree = cfg.dom_tree(&preds, &rpo);
+        let loops = cfg.loops(&preds, &rpo, &dom_tree);
 
         Self {
             interp,
@@ -161,8 +168,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
             blocks: Default::default(),
             args,
             tasks: Default::default(),
-            loop_headers,
-            loops: Default::default(),
+            loops,
+            unroll_decisions: Default::default(),
         }
     }
 
@@ -170,7 +177,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
         self.process_locals();
 
         self.func.entry = self.process_branch(
-            Default::default(),
             self.cfg.entry,
             Env::entry(&self.interp.module, &self.cfg, &self.args),
         );
@@ -207,6 +213,17 @@ impl<'a, 'i> Specializer<'a, 'i> {
         let ref mut stack = vec![];
 
         trace!("specializing a block {orig_block_id:?} (to {block_id:?})");
+        trace!("locals:");
+
+        for (local_id, &(value, attrs)) in &info.exit_env.locals {
+            trace!("  {local_id:?} = {}", Expr::Value(value, attrs));
+        }
+
+        trace!("globals:");
+
+        for (global_id, &(value, attrs)) in &info.exit_env.globals {
+            trace!("  {global_id:?} = {}", Expr::Value(value, attrs));
+        }
 
         while let Some(stmt) = cfg.blocks[orig_block_id].body.get(stmt_idx) {
             trace!(
@@ -248,7 +265,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     let expr = stack.pop().unwrap();
 
                     if expr.has_side_effect() {
+                        trace!("emitting Stmt::Drop for {expr}: has a side effect");
                         block.body.push(Stmt::Drop(expr));
+                    } else {
+                        trace!("dropping {expr} from the output block: side-effect free");
                     }
                 }
 
@@ -256,8 +276,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     let expr = stack.pop().unwrap();
 
                     if let Some(value) = expr.to_value() {
+                        trace!("set exit_env.locals[{local_id:?}] <- {expr}");
                         info.exit_env.locals.insert(local_id, value);
                     } else {
+                        trace!("forgetting exit_env.locals[{local_id:?}]: {expr} is not a value");
                         info.exit_env.locals.remove(local_id);
                         block.body.push(Stmt::LocalSet(local_id, expr));
                     }
@@ -267,8 +289,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     let expr = stack.pop().unwrap();
 
                     if let Some(value) = expr.to_value() {
+                        trace!("set exit_env.globals[{global_id:?}] <- {expr}");
                         info.exit_env.globals.insert(global_id, value);
                     } else {
+                        trace!("forgetting exit_env.globals[{global_id:?}]: {expr} is not a value");
                         info.exit_env.globals.remove(global_id);
                         block.body.push(Stmt::GlobalSet(global_id, expr));
                     }
@@ -296,7 +320,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     ref args,
                 }) => {
                     let args = stack.drain(stack.len() - args.len()..).collect();
-                    self.process_call(block_id, &mut stmt_idx, ret_local_id, func_id, args)?;
+                    self.process_call(
+                        orig_block_id,
+                        block_id,
+                        &mut stmt_idx,
+                        ret_local_id,
+                        func_id,
+                        args,
+                    )?;
                 }
 
                 Stmt::Call(Call::Indirect {
@@ -333,6 +364,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                                 index = None;
                                 let args = mem::take(&mut args);
                                 self.process_call(
+                                    orig_block_id,
                                     block_id,
                                     &mut stmt_idx,
                                     ret_local_id,
@@ -345,6 +377,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     }
 
                     if let Some(index) = index {
+                        trace!("could not resolve an indirect call target");
                         block.body.push(Stmt::Call(Call::Indirect {
                             ret_local_id,
                             ty_id,
@@ -352,6 +385,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
                             args,
                             index: Box::new(index),
                         }));
+
+                        if let Some(ret_local_id) = ret_local_id {
+                            trace!(
+                                "forgetting exit_env.locals[{ret_local_id:?}]: \
+                                holds the return value of an indirect call"
+                            );
+                            self.blocks[block_id].exit_env.locals.remove(ret_local_id);
+                        }
                     }
                 }
             }
@@ -378,7 +419,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
             Terminator::Br(orig_target_block_id) => {
                 let exit_env = info.exit_env.clone();
-                let target_block_id = self.process_branch(block_id, orig_target_block_id, exit_env);
+                let target_block_id = self.process_branch(orig_target_block_id, exit_env);
                 self.func.blocks[block_id].term = Terminator::Br(target_block_id);
             }
 
@@ -391,22 +432,19 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     .map(|(value, _)| value.to_i32().unwrap())
                 {
                     Some(0) => {
-                        let else_block_id =
-                            self.process_branch(block_id, orig_else_block_id, exit_env);
+                        let else_block_id = self.process_branch(orig_else_block_id, exit_env);
                         self.func.blocks[block_id].term = Terminator::Br(else_block_id);
                     }
 
                     Some(_) => {
-                        let then_block_id =
-                            self.process_branch(block_id, orig_then_block_id, exit_env);
+                        let then_block_id = self.process_branch(orig_then_block_id, exit_env);
                         self.func.blocks[block_id].term = Terminator::Br(then_block_id);
                     }
 
                     None => {
                         let then_block_id =
-                            self.process_branch(block_id, orig_then_block_id, exit_env.clone());
-                        let else_block_id =
-                            self.process_branch(block_id, orig_else_block_id, exit_env);
+                            self.process_branch(orig_then_block_id, exit_env.clone());
+                        let else_block_id = self.process_branch(orig_else_block_id, exit_env);
                         self.func.blocks[block_id].term =
                             Terminator::If(condition, [then_block_id, else_block_id]);
                     }
@@ -428,14 +466,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 });
 
                 if let Some(orig_block_id) = orig_target_block_id {
-                    let target_block_id = self.process_branch(block_id, orig_block_id, exit_env);
+                    let target_block_id = self.process_branch(orig_block_id, exit_env);
                     self.func.blocks[block_id].term = Terminator::Br(target_block_id);
                 } else {
                     let block_ids = orig_block_ids
                         .iter()
-                        .map(|&orig_block_id| {
-                            self.process_branch(block_id, orig_block_id, exit_env.clone())
-                        })
+                        .map(|&orig_block_id| self.process_branch(orig_block_id, exit_env.clone()))
                         .collect();
 
                     self.func.blocks[block_id].term = Terminator::Switch(index, block_ids);
@@ -475,6 +511,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     Expr::Binary(op, _) => self.process_bin_op(block_id, stack, op)?,
                     Expr::Ternary(op, _) => self.process_tern_op(block_id, stack, op)?,
                 }
+
+                trace!("pushed {}", stack.last().unwrap());
 
                 tasks.pop().unwrap();
             }
@@ -1027,15 +1065,23 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
     fn process_call(
         &mut self,
+        orig_block_id: OrigBlockId,
         block_id: BlockId,
         _stmt_idx: &mut usize,
         ret_local_id: Option<LocalId>,
         func_id: FuncId,
         args: Vec<Expr>,
     ) -> Result<()> {
+        trace!(
+            "processing a call: {ret_local_id:?} <- {func_id:?} ({:?}) with {} args",
+            self.interp.module.funcs[func_id].name(),
+            args.len(),
+        );
+
         if let Some(intrinsic) =
             self.interp.module.funcs[func_id].get_intrinsic(&self.interp.module)
         {
+            trace!("processing an intrinsic {intrinsic}");
             let processed = match intrinsic {
                 IntrinsicDecl::ArgCount => {
                     self.process_intr_arg_count(block_id, ret_local_id.unwrap())?
@@ -1055,11 +1101,15 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 IntrinsicDecl::ConstPtr => {
                     self.process_intr_const_ptr(block_id, ret_local_id.unwrap(), &args)?
                 }
+                IntrinsicDecl::PropagateLoad => {
+                    self.process_intr_propagate_load(block_id, ret_local_id.unwrap(), &args)?
+                }
                 IntrinsicDecl::PrintValue => self.process_intr_print_value()?,
                 IntrinsicDecl::PrintStr => self.process_intr_print_str()?,
                 IntrinsicDecl::IsSpecializing => {
                     self.process_intr_is_specializing(block_id, ret_local_id.unwrap())?
                 }
+                IntrinsicDecl::Unroll => self.process_intr_unroll(orig_block_id)?,
             };
 
             if processed {
@@ -1069,6 +1119,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
         // TODO: inlining
         self.flush_globals(block_id);
+        trace!("emitting a direct call to {func_id:?}");
         self.func.blocks[block_id]
             .body
             .push(Stmt::Call(Call::Direct {
@@ -1077,6 +1128,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 args,
             }));
         self.assume_clobbered_globals(block_id);
+
+        if let Some(ret_local_id) = ret_local_id {
+            trace!(
+                "forgetting exit_env.locals[{ret_local_id:?}]: \
+                holds the return value of a call"
+            );
+            self.blocks[block_id].exit_env.locals.remove(ret_local_id);
+        }
 
         Ok(())
     }
@@ -1167,11 +1226,33 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(true)
     }
 
-    fn process_intr_const_ptr(&mut self, block_id: BlockId, ret_local_id: LocalId, args: &Vec<Expr>) -> Result<bool> {
+    fn process_intr_const_ptr(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+        args: &Vec<Expr>,
+    ) -> Result<bool> {
         self.func.blocks[block_id].body.push(Stmt::LocalSet(
             ret_local_id,
             match args[0].to_value() {
                 Some((value, attrs)) => Expr::Value(value, attrs | ValueAttrs::CONST_PTR),
+                None => args[0].clone(),
+            },
+        ));
+
+        Ok(true)
+    }
+
+    fn process_intr_propagate_load(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+        args: &Vec<Expr>,
+    ) -> Result<bool> {
+        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+            ret_local_id,
+            match args[0].to_value() {
+                Some((value, attrs)) => Expr::Value(value, attrs | ValueAttrs::PROPAGATE_LOAD),
                 None => args[0].clone(),
             },
         ));
@@ -1197,7 +1278,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(false)
     }
 
-    fn process_intr_is_specializing(&mut self, block_id: BlockId, ret_local_id: LocalId) -> Result<bool> {
+    fn process_intr_is_specializing(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+    ) -> Result<bool> {
         self.func.blocks[block_id].body.push(Stmt::LocalSet(
             ret_local_id,
             Expr::Value(Value::I32(1), Default::default()),
@@ -1206,11 +1291,26 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(true)
     }
 
+    fn process_intr_unroll(&mut self, orig_block_id: OrigBlockId) -> Result<bool> {
+        let loop_header = self
+            .loops
+            .members
+            .get(orig_block_id)
+            .ok_or_else(|| anyhow!("encountered {} outside a loop", IntrinsicDecl::Unroll))?;
+        trace!("marking {loop_header:?} for unrolling due to an intrinsic in {orig_block_id:?}");
+        self.unroll_decisions
+            .insert(orig_block_id, UnrollDecision::Yes);
+
+        Ok(true)
+    }
+
     fn get_branch_target(&mut self, orig_block_id: OrigBlockId, env: Env) -> BlockId {
-        let is_loop_header = self.loop_headers.contains(&orig_block_id);
+        let is_loop_header = self.loops.loop_headers.contains(&orig_block_id);
 
         if is_loop_header {
-            if let Some(&Loop::Kept(block_id)) = self.loops.get(&orig_block_id) {
+            if let Some(&UnrollDecision::No(block_id)) = self.unroll_decisions.get(orig_block_id) {
+                trace!("the branch target for {orig_block_id:?}: {block_id:?} (negative unroll decision)");
+
                 return block_id;
             }
         }
@@ -1218,6 +1318,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
         let block_map_key = (orig_block_id, env.to_hashable());
 
         if let Some(&block_id) = self.block_map.get(&block_map_key) {
+            trace!("the branch target for {orig_block_id:?}: {block_id:?} (cached)");
+
             return block_id;
         }
 
@@ -1231,10 +1333,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
             },
         );
 
-        if is_loop_header && !self.should_unroll(orig_block_id) {
-            self.loops.insert(orig_block_id, Loop::Kept(block_id));
-        } else {
-            self.block_map.insert(block_map_key, block_id);
+        trace!("the branch target for {orig_block_id:?}: {block_id:?} (created)");
+        self.block_map.insert(block_map_key, block_id);
+
+        if is_loop_header {
+            self.unroll_decisions
+                .entry(orig_block_id)
+                .unwrap()
+                .or_insert(UnrollDecision::No(block_id));
         }
 
         self.tasks.insert(Task(block_id));
@@ -1242,33 +1348,29 @@ impl<'a, 'i> Specializer<'a, 'i> {
         block_id
     }
 
-    fn process_branch(
-        &mut self,
-        from_block_id: BlockId,
-        orig_block_id: OrigBlockId,
-        env: Env,
-    ) -> BlockId {
+    fn process_branch(&mut self, orig_block_id: OrigBlockId, env: Env) -> BlockId {
         let block_id = self.get_branch_target(orig_block_id, env.clone());
         trace!("processing a branch to {orig_block_id:?} -> {block_id:?}");
 
-        if self.blocks[block_id].entry_env.merge(&env) {
+        let block_env = &mut self.blocks[block_id].entry_env;
+        let old_env_key = block_env.to_hashable();
+
+        if block_env.merge(&env) {
             trace!("the entry environment has changed");
-            Self::flush_globals_in(
-                &self.blocks[from_block_id].entry_env,
-                &self.blocks[block_id].exit_env,
-                &mut self.func.blocks[block_id],
-            );
+            let new_env_key = block_env.to_hashable();
+            self.block_map.remove(&(orig_block_id, old_env_key));
+            self.block_map
+                .insert((orig_block_id, new_env_key), block_id);
+            // FIXME: flush everything separately after specialization
+            //Self::flush_globals_in(
+            //    &self.blocks[from_block_id].entry_env,
+            //    &self.blocks[block_id].exit_env,
+            //    &mut self.func.blocks[block_id],
+            //);
             self.tasks.insert(Task(block_id));
         }
 
         block_id
-    }
-
-    fn should_unroll(&self, orig_block_id: OrigBlockId) -> bool {
-        debug_assert!(self.loop_headers.contains(&orig_block_id));
-
-        // TODO
-        false
     }
 
     fn flush_globals_in(entry_env: &Env, exit_env: &Env, block: &mut Block) {

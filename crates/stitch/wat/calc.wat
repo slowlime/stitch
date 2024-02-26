@@ -24,6 +24,10 @@
     (import "stitch" "const-ptr")
     (param $ptr i32)
     (result i32))
+  (func $stitch-propagate-load
+    (import "stitch" "propagate-load")
+    (param $ptr i32)
+    (result i32))
   (func $stitch-print-value
     (import "stitch" "print-value")
     (param $value i64))
@@ -34,6 +38,8 @@
   (func $stitch-is-specializing
     (import "stitch" "is-specializing")
     (result i32))
+  (func $stitch-unroll
+    (import "stitch" "unroll"))
 
   (table $func-table 16 funcref)
   (elem $func-table (i32.const 1) $interpret)
@@ -105,8 +111,9 @@
         (i32.const 1) ;; $interpret
         (i32.const 0) ;; "specialized"
         (i32.const 11)
-        (call $stitch-const-ptr
-          (local.get $sp))))
+        (call $stitch-propagate-load
+          (call $stitch-const-ptr
+            (local.get $sp)))))
     (call $stitch-print-value
       (call_indirect (result i64)
         (local.get $specialized-idx))))
@@ -681,6 +688,8 @@
 
     (block $process-ops
       (loop $loop
+        (call $stitch-unroll)
+
         (block $div
           (block $mul
             (block $sub

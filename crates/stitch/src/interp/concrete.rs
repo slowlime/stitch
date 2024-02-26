@@ -930,9 +930,11 @@ impl Interpreter<'_> {
                 IntrinsicDecl::Specialize => self.eval_intr_specialize(frames, args)?,
                 IntrinsicDecl::Unknown => self.eval_intr_unknown(frames, func_id)?,
                 IntrinsicDecl::ConstPtr => self.eval_intr_const_ptr(frames, args)?,
+                IntrinsicDecl::PropagateLoad => self.eval_intr_propagate_load(frames, args)?,
                 IntrinsicDecl::PrintValue => self.eval_intr_print_value(args)?,
                 IntrinsicDecl::PrintStr => self.eval_intr_print_str(args)?,
                 IntrinsicDecl::IsSpecializing => self.eval_intr_is_specializing(frames)?,
+                IntrinsicDecl::Unroll => self.eval_intr_unroll()?,
             }
 
             let frame = frames.last_mut().unwrap();
@@ -1164,6 +1166,13 @@ impl Interpreter<'_> {
         Ok(())
     }
 
+    fn eval_intr_propagate_load(&mut self, frames: &mut Vec<Frame>, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        frame.stack.push((args[0].0, args[0].1 | ValueAttrs::PROPAGATE_LOAD));
+
+        Ok(())
+    }
+
     fn eval_intr_print_value(&mut self, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
         let intr = IntrinsicDecl::PrintValue;
 
@@ -1200,6 +1209,10 @@ impl Interpreter<'_> {
         let frame = frames.last_mut().unwrap();
         frame.stack.push((Value::I32(0), Default::default()));
 
+        Ok(())
+    }
+
+    fn eval_intr_unroll(&mut self) -> Result<()> {
         Ok(())
     }
 }
