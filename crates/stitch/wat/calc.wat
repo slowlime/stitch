@@ -735,10 +735,10 @@
                   (br $loop))
 
                 ;; OP_ADD
-                (local.set $lhs
+                (local.set $rhs
                   (call $vec-pop-i64
                     (local.get $sp)))
-                (local.set $rhs
+                (local.set $lhs
                   (call $vec-pop-i64
                     (local.get $sp)))
                 (i64.store
@@ -751,10 +751,10 @@
                 (br $loop))
 
               ;; OP_SUB
-              (local.set $lhs
+              (local.set $rhs
                 (call $vec-pop-i64
                   (local.get $sp)))
-              (local.set $rhs
+              (local.set $lhs
                 (call $vec-pop-i64
                   (local.get $sp)))
               (i64.store
@@ -767,10 +767,10 @@
               (br $loop))
 
             ;; OP_MUL
-            (local.set $lhs
+            (local.set $rhs
               (call $vec-pop-i64
                 (local.get $sp)))
-            (local.set $rhs
+            (local.set $lhs
               (call $vec-pop-i64
                 (local.get $sp)))
             (i64.store
@@ -783,10 +783,10 @@
             (br $loop))
 
           ;; OP_DIV
-          (local.set $lhs
+          (local.set $rhs
             (call $vec-pop-i64
               (local.get $sp)))
-          (local.set $rhs
+          (local.set $lhs
             (call $vec-pop-i64
               (local.get $sp)))
           (i64.store
