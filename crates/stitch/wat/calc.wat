@@ -38,8 +38,6 @@
   (func $stitch-is-specializing
     (import "stitch" "is-specializing")
     (result i32))
-  (func $stitch-unroll
-    (import "stitch" "unroll"))
 
   (table $func-table 16 funcref)
   (elem $func-table (i32.const 1) $interpret)
@@ -688,8 +686,6 @@
 
     (block $process-ops
       (loop $loop
-        (call $stitch-unroll)
-
         (block $div
           (block $mul
             (block $sub

@@ -934,7 +934,6 @@ impl Interpreter<'_> {
                 IntrinsicDecl::PrintValue => self.eval_intr_print_value(args)?,
                 IntrinsicDecl::PrintStr => self.eval_intr_print_str(args)?,
                 IntrinsicDecl::IsSpecializing => self.eval_intr_is_specializing(frames)?,
-                IntrinsicDecl::Unroll => self.eval_intr_unroll()?,
             }
 
             let frame = frames.last_mut().unwrap();
@@ -1209,10 +1208,6 @@ impl Interpreter<'_> {
         let frame = frames.last_mut().unwrap();
         frame.stack.push((Value::I32(0), Default::default()));
 
-        Ok(())
-    }
-
-    fn eval_intr_unroll(&mut self) -> Result<()> {
         Ok(())
     }
 }
