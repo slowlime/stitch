@@ -99,6 +99,17 @@ impl FuncBody {
         }
     }
 
+    pub fn with_locals(ty: FuncType) -> Self {
+        let mut body = Self::new(ty);
+
+        for val_ty in &body.ty.params {
+            let local_id = body.locals.insert(val_ty.clone());
+            body.params.push(local_id);
+        }
+
+        body
+    }
+
     pub fn name(&self) -> Option<&str> {
         self.name.as_ref().map(String::as_str)
     }

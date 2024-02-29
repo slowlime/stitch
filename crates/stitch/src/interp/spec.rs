@@ -197,9 +197,6 @@ impl BlockInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Task(BlockId);
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum BlockMapKey {
     Regular {
@@ -280,7 +277,7 @@ pub struct Specializer<'a, 'i> {
     block_map: HashMap<BlockMapKey, BlockId>,
     blocks: SecondaryMap<BlockId, BlockInfo>,
     args: Vec<Option<(Value, ValueAttrs)>>,
-    tasks: HashSet<Task>,
+    tasks: HashSet<BlockId>,
     local_map: HashMap<(FuncCtxId, LocalId), LocalId>,
     func_ctxs: SlotMap<FuncCtxId, FuncCtx>,
     func_ctx_map: HashMap<FuncCtx, FuncCtxId>,
@@ -332,8 +329,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
             BlockKind::Regular,
         );
 
-        while let Some(&Task(block_id)) = self.tasks.iter().next() {
-            self.tasks.remove(&Task(block_id));
+        while let Some(&block_id) = self.tasks.iter().next() {
+            self.tasks.remove(&block_id);
             self.process_block(block_id)?;
         }
 
@@ -1801,7 +1798,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
         trace!("the branch target for {func_id:?}/{orig_block_id:?}: {block_id:?} (created)");
         self.block_map.insert(block_map_key, block_id);
-        self.tasks.insert(Task(block_id));
+        self.tasks.insert(block_id);
 
         block_id
     }
@@ -1855,7 +1852,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
             let new_block_map_key = block_info.block_map_key();
             self.block_map.remove(&old_block_map_key);
             self.block_map.insert(new_block_map_key, block_id);
-            self.tasks.insert(Task(block_id));
+            self.tasks.insert(block_id);
         }
 
         block_id

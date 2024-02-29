@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+mod replace_intrinsics;
 
-use log::warn;
+use std::collections::HashSet;
 
 use crate::ast::expr::{make_visitor, NulOp, UnOp};
 use crate::ast::ty::Type;
-use crate::ast::{Expr, Func, FuncId, ImportId, Module, TableDef};
+use crate::ast::{Expr, IntrinsicDecl, Module};
 
 pub struct PostProc<'a> {
     module: &'a mut Module,
@@ -16,74 +16,42 @@ impl<'a> PostProc<'a> {
     }
 
     pub fn process(mut self) {
-        // FIXME: replace intrinsics with dummy functions
-        // self.remove_intrinsics();
+        self.replace_intrinsics();
         self.insert_func_types();
         self.remove_unused_locals();
     }
 
-    fn remove_intrinsics(&mut self) {
-        let mut func_ids = self
+    fn replace_intrinsics(&mut self) {
+        let intrinsics = self
             .module
             .funcs
             .iter()
-            .filter(|(_, func)| func.get_intrinsic(&self.module).is_some())
-            .map(|(func_id, _)| func_id)
+            .filter_map(|(func_id, func)| Some(func_id).zip(func.get_intrinsic(&self.module)))
             .collect::<HashSet<_>>();
-        let mut import_ids = self
+
+        for (func_id, intrinsic) in intrinsics {
+            match intrinsic {
+                IntrinsicDecl::ArgCount => self.replace_intr_arg_count(func_id),
+                IntrinsicDecl::ArgLen => self.replace_intr_arg_len(func_id),
+                IntrinsicDecl::ArgRead => self.replace_intr_arg_read(func_id),
+                IntrinsicDecl::Specialize => self.replace_intr_specialize(func_id),
+                IntrinsicDecl::Unknown => self.replace_intr_unknown(func_id),
+                IntrinsicDecl::ConstPtr => self.replace_intr_const_ptr(func_id),
+                IntrinsicDecl::PropagateLoad => self.replace_intr_propagate_load(func_id),
+                IntrinsicDecl::PrintValue => self.replace_intr_print_value(func_id),
+                IntrinsicDecl::PrintStr => self.replace_intr_print_str(func_id),
+                IntrinsicDecl::IsSpecializing => self.replace_intr_is_specializing(func_id),
+                IntrinsicDecl::Inline => self.replace_intr_inline(func_id),
+                IntrinsicDecl::NoInline => self.replace_intr_no_inline(func_id),
+            }
+        }
+
+        let import_ids = self
             .module
             .imports
             .keys()
             .filter(|&import_id| self.module.get_intrinsic(import_id).is_some())
-            .collect::<HashSet<_>>();
-
-        fn check_expr<'a>(
-            module: &'a Module,
-            func_ids: &'a mut HashSet<FuncId>,
-            import_ids: &'a mut HashSet<ImportId>,
-        ) -> impl FnMut(&Expr) -> bool + 'a {
-            move |expr: &Expr| match expr {
-                Expr::Call(func_id, _) if func_ids.remove(func_id) => {
-                    warn!("Expr::Call references an intrinsic");
-                    import_ids.remove(match &module.funcs[*func_id] {
-                        Func::Import(import) => &import.import_id,
-                        _ => unreachable!(),
-                    });
-
-                    true
-                }
-
-                _ => true,
-            }
-        }
-
-        for func in self.module.funcs.values() {
-            let Some(body) = func.body() else { continue };
-
-            for expr in &body.main_block.body {
-                expr.all(&mut check_expr(
-                    &self.module,
-                    &mut func_ids,
-                    &mut import_ids,
-                ));
-            }
-        }
-
-        for table in self.module.tables.values() {
-            let TableDef::Elems(elems) = &table.def else {
-                continue;
-            };
-
-            for func_id in elems.iter().flatten() {
-                if func_ids.remove(func_id) {
-                    warn!("a table contains a reference to an intrinsic");
-                }
-            }
-        }
-
-        self.module
-            .funcs
-            .retain(|func_id, _| !func_ids.contains(&func_id));
+            .collect::<Vec<_>>();
         self.module
             .imports
             .retain(|import_id, _| !import_ids.contains(&import_id));

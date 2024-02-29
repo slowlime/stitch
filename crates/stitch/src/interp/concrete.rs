@@ -1113,20 +1113,27 @@ impl Interpreter<'_> {
         let idx = match elems
             .iter_mut()
             .enumerate()
+            .skip(1)
             .find(|(_, elem)| elem.is_none())
         {
             Some((idx, elem)) => {
+                trace!("replacing an empty function table slot {idx} with the specialized function id");
                 *elem = Some(spec_func_id);
 
                 idx
             }
 
             None => match table.ty.limits.max {
-                Some(max) if elems.len() + 1 > max as usize => {
+                Some(max) if 2.max(elems.len() + 1) > max as usize => {
                     bail!("cannot grow a table past its maximum size")
                 }
 
                 _ => {
+                    if elems.is_empty() {
+                        elems.push(None);
+                    }
+
+                    trace!("growing the function table to insert the specialized function id");
                     elems.push(Some(spec_func_id));
                     table.ty.limits.min = table.ty.limits.min.max(elems.len().try_into().unwrap());
 

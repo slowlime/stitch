@@ -33,7 +33,7 @@ new_key_type! {
     pub struct BlockId;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IntrinsicDecl {
     ArgCount,
     ArgLen,
