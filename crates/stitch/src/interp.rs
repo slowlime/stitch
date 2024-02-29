@@ -1,16 +1,16 @@
 mod concrete;
 mod spec;
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use anyhow::{bail, ensure, Result};
+use hashbrown::{HashSet, HashMap};
 use log::trace;
 use slotmap::SparseSecondaryMap;
 
 use crate::ast::expr::{Value, ValueAttrs};
 use crate::ast::ty::ValType;
-use crate::ast::{self, ExportDef, Func, FuncId, Module};
+use crate::ast::{self, ExportDef, Func, FuncId, GlobalId, Module};
 use crate::cfg::FuncBody;
 use crate::interp::spec::Specializer;
 
@@ -54,6 +54,7 @@ pub struct Interpreter<'a> {
     spec_funcs: SparseSecondaryMap<FuncId, SpecSignature>,
     cfgs: SparseSecondaryMap<FuncId, Rc<FuncBody>>,
     args: Vec<Vec<u8>>,
+    const_global_ids: HashSet<GlobalId>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -64,6 +65,7 @@ impl<'a> Interpreter<'a> {
             spec_funcs: Default::default(),
             cfgs: Default::default(),
             args,
+            const_global_ids: Default::default(),
         }
     }
 

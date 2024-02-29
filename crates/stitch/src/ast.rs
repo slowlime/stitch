@@ -46,6 +46,7 @@ pub enum IntrinsicDecl {
     PrintStr,
     IsSpecializing,
     Inline,
+    NoInline,
 }
 
 impl IntrinsicDecl {
@@ -114,14 +115,14 @@ impl IntrinsicDecl {
             }
             Self::IsSpecializing => Err("[] -> [i32]".into()),
 
-            Self::Inline
+            Self::Inline | Self::NoInline
                 if func_ty.params.len() == 1
                     && func_ty.params[0] == ValType::I32
                     && func_ty.ret == Some(ValType::I32) =>
             {
                 Ok(())
             }
-            Self::Inline => Err("[i32] -> [i32]".into()),
+            Self::Inline | Self::NoInline => Err("[i32] -> [i32]".into()),
         }
     }
 }
@@ -143,6 +144,7 @@ impl Display for IntrinsicDecl {
                 Self::PrintStr => "print-str",
                 Self::IsSpecializing => "is-specializing",
                 Self::Inline => "inline",
+                Self::NoInline => "no-inline",
             }
         )
     }
@@ -196,6 +198,7 @@ impl Module {
             "print-str" => IntrinsicDecl::PrintStr,
             "is-specializing" => IntrinsicDecl::IsSpecializing,
             "inline" => IntrinsicDecl::Inline,
+            "no-inline" => IntrinsicDecl::NoInline,
             _ => return None,
         })
     }

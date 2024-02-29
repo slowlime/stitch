@@ -38,6 +38,7 @@ impl Env {
         module: &Module,
         cfg: &FuncBody,
         args: &[Option<(Value, ValueAttrs)>],
+        const_global_ids: &HashSet<GlobalId>,
         map_local: F,
     ) -> Self
     where
@@ -49,7 +50,11 @@ impl Env {
             .filter_map(|(global_id, global)| match global.def {
                 GlobalDef::Import(_) => None,
                 GlobalDef::Value(ConstExpr::Value(value, attrs)) => {
-                    Some((global_id, (value, attrs)))
+                    if !global.ty.mutable || const_global_ids.contains(&global_id) {
+                        Some((global_id, (value, attrs)))
+                    } else {
+                        None
+                    }
                 }
                 GlobalDef::Value(ConstExpr::GlobalGet(_)) => None,
             })
@@ -230,6 +235,27 @@ enum InlineMode {
     Inline,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum InlineDisposition {
+    #[default]
+    Allow,
+
+    Force,
+    Deny,
+}
+
+impl From<ValueAttrs> for InlineDisposition {
+    fn from(attrs: ValueAttrs) -> Self {
+        if attrs.contains(ValueAttrs::NO_INLINE) {
+            Self::Deny
+        } else if attrs.contains(ValueAttrs::INLINE) {
+            Self::Force
+        } else {
+            Self::Allow
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ParentCtx {
     func_ctx_id: FuncCtxId,
@@ -295,9 +321,13 @@ impl<'a, 'i> Specializer<'a, 'i> {
             None,
             func_ctx_id,
             cfg.entry,
-            Env::entry(&self.interp.module, &cfg, &self.args, |local_id| {
-                self.local_map[&(func_ctx_id, local_id)]
-            }),
+            Env::entry(
+                &self.interp.module,
+                &cfg,
+                &self.args,
+                &self.interp.const_global_ids,
+                |local_id| self.local_map[&(func_ctx_id, local_id)],
+            ),
             0,
             BlockKind::Regular,
         );
@@ -477,7 +507,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         .map(|ret_local_id| self.local_map[&(info.func_ctx_id, ret_local_id)]);
                     let args = stack.drain(stack.len() - args.len()..).collect();
 
-                    if self.process_call(block_id, stmt_idx, ret_local_id, func_id, args, false)? {
+                    if self.process_call(
+                        block_id,
+                        stmt_idx,
+                        ret_local_id,
+                        func_id,
+                        args,
+                        Default::default(),
+                    )? {
                         skip_terminator = true;
                         break;
                     }
@@ -538,7 +575,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                                     ret_local_id,
                                     func_id,
                                     args,
-                                    idx_attrs.contains(ValueAttrs::INLINE),
+                                    InlineDisposition::from(idx_attrs),
                                 )? {
                                     skip_terminator = true;
                                     break 'body;
@@ -1336,7 +1373,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         ret_local_id: Option<LocalId>,
         func_id: FuncId,
         args: Vec<Expr>,
-        force_inline: bool,
+        inline_disposition: InlineDisposition,
     ) -> Result<bool> {
         trace!(
             "processing a call: {ret_local_id:?} <- {func_id:?} ({:?}) with {} args",
@@ -1378,6 +1415,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 IntrinsicDecl::Inline => {
                     self.process_intr_inline(block_id, ret_local_id.unwrap(), &args)?
                 }
+                IntrinsicDecl::NoInline => {
+                    self.process_intr_no_inline(block_id, ret_local_id.unwrap(), &args)?
+                }
             };
 
             if processed {
@@ -1386,13 +1426,29 @@ impl<'a, 'i> Specializer<'a, 'i> {
         }
 
         let inline_mode = if self.interp.module.funcs[func_id].is_import() {
+            trace!("not inlining {func_id:?}: this is an imported function");
+
             InlineMode::No
-        } else if !self.is_recursive_call(block_id, func_id, &args) || force_inline {
+        } else if inline_disposition == InlineDisposition::Deny {
+            trace!("not inlining {func_id:?}: denied via an attribute");
+
+            InlineMode::No
+        } else if !self.is_recursive_call(block_id, func_id, &args) {
+            trace!("inlining {func_id:?}: the call is not recursive");
+
             InlineMode::Inline
-        } else if self.blocks[block_id].kind != BlockKind::Canonical {
-            InlineMode::Outline
-        } else {
+        } else if inline_disposition == InlineDisposition::Force {
+            trace!("inlining {func_id:?}: forced via an attribute");
+
+            InlineMode::Inline
+        } else if self.blocks[block_id].kind == BlockKind::Canonical {
+            trace!("not inlining {func_id:?}: the recursive call site is in a canonical block");
+
             InlineMode::No
+        } else {
+            trace!("outlining {func_id:?}: the call is recursive");
+
+            InlineMode::Outline
         };
 
         match inline_mode {
@@ -1655,7 +1711,37 @@ impl<'a, 'i> Specializer<'a, 'i> {
             block_id,
             ret_local_id,
             match args[0].to_value() {
-                Some((value, attrs)) => Expr::Value(value, attrs | ValueAttrs::INLINE),
+                Some((value, mut attrs)) => {
+                    attrs |= ValueAttrs::INLINE;
+                    attrs.remove(ValueAttrs::NO_INLINE);
+
+                    Expr::Value(value, attrs)
+                }
+
+                None => args[0].clone(),
+            },
+        );
+
+        Ok(true)
+    }
+
+    fn process_intr_no_inline(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+        args: &Vec<Expr>,
+    ) -> Result<bool> {
+        self.set_local(
+            block_id,
+            ret_local_id,
+            match args[0].to_value() {
+                Some((value, mut attrs)) => {
+                    attrs |= ValueAttrs::NO_INLINE;
+                    attrs.remove(ValueAttrs::INLINE);
+
+                    Expr::Value(value, attrs)
+                }
+
                 None => args[0].clone(),
             },
         );

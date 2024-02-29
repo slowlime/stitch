@@ -78,6 +78,7 @@ bitflags! {
         const PROPAGATE_LOAD = 1 << 1;
         const UNKNOWN = 1 << 2;
         const INLINE = 1 << 3;
+        const NO_INLINE = 1 << 4;
     }
 }
 

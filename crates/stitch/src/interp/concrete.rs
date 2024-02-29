@@ -938,6 +938,7 @@ impl Interpreter<'_> {
                 IntrinsicDecl::PrintStr => self.eval_intr_print_str(args)?,
                 IntrinsicDecl::IsSpecializing => self.eval_intr_is_specializing(frames)?,
                 IntrinsicDecl::Inline => self.eval_intr_inline(frames, args)?,
+                IntrinsicDecl::NoInline => self.eval_intr_no_inline(frames, args)?,
             }
 
             let frame = frames.last_mut().unwrap();
@@ -1233,11 +1234,25 @@ impl Interpreter<'_> {
         args: Vec<(Value, ValueAttrs)>,
     ) -> Result<()> {
         let frame = frames.last_mut().unwrap();
-        frame
-            .stack
-            .push((args[0].0, args[0].1 | ValueAttrs::INLINE));
+        let (value, mut attrs) = args[0];
+        attrs |= ValueAttrs::INLINE;
+        attrs.remove(ValueAttrs::NO_INLINE);
+        frame.stack.push((value, attrs));
 
         Ok(())
     }
 
+    fn eval_intr_no_inline(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        let (value, mut attrs) = args[0];
+        attrs |= ValueAttrs::NO_INLINE;
+        attrs.remove(ValueAttrs::INLINE);
+        frame.stack.push((value, attrs));
+
+        Ok(())
+    }
 }

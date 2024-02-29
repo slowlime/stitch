@@ -38,9 +38,13 @@
   (func $stitch-is-specializing
     (import "stitch" "is-specializing")
     (result i32))
+  (func $stitch-no-inline
+    (import "stitch" "no-inline")
+    (param $func-idx i32)
+    (result i32))
 
   (table $func-table 16 funcref)
-  (elem $func-table (i32.const 1) $interpret)
+  (elem $func-table (i32.const 1) $interpret $vec-push)
 
   (global $heap-end (mut i32) (i32.const 0x8000))
   (global $stack-ptr (mut i32) (i32.const 0x1000))
@@ -107,7 +111,7 @@
     (local.set $specialized-idx
       (call $stitch-specialize-i32
         (i32.const 1) ;; $interpret
-        (i32.const 0) ;; "specialized"
+        (i32.const 0x1000) ;; "specialized"
         (i32.const 11)
         (call $stitch-propagate-load
           (call $stitch-const-ptr
@@ -667,6 +671,7 @@
     (local $op i32)
     (local $lhs i64)
     (local $rhs i64)
+    (local $vec-push i32)
 
     ;; stack layout:
     ;; @0 stack: 12 bytes
@@ -683,6 +688,9 @@
       (local.get $sp)
       (i32.const 12)
       (i32.const 0))
+    (local.set $vec-push
+      (call $stitch-no-inline
+        (i32.const 2)))
 
     (block $process-ops
       (loop $loop
@@ -724,9 +732,10 @@
                             (local.get $ops-vec))
                           (local.get $pc)))))
                   (i64.store
-                    (call $vec-push
+                    (call_indirect (param i32 i32) (result i32)
                       (local.get $sp)
-                      (i32.const 8))
+                      (i32.const 8)
+                      (local.get $vec-push))
                     (local.get $lhs))
                   (local.set $pc
                     (i32.add
@@ -742,9 +751,10 @@
                   (call $vec-pop-i64
                     (local.get $sp)))
                 (i64.store
-                  (call $vec-push
+                  (call_indirect (param i32 i32) (result i32)
                     (local.get $sp)
-                    (i32.const 8))
+                    (i32.const 8)
+                    (local.get $vec-push))
                   (i64.add
                     (local.get $lhs)
                     (local.get $rhs)))
@@ -758,9 +768,10 @@
                 (call $vec-pop-i64
                   (local.get $sp)))
               (i64.store
-                (call $vec-push
+                (call_indirect (param i32 i32) (result i32)
                   (local.get $sp)
-                  (i32.const 8))
+                  (i32.const 8)
+                  (local.get $vec-push))
                 (i64.sub
                   (local.get $lhs)
                   (local.get $rhs)))
@@ -774,9 +785,10 @@
               (call $vec-pop-i64
                 (local.get $sp)))
             (i64.store
-              (call $vec-push
+              (call_indirect (param i32 i32) (result i32)
                 (local.get $sp)
-                (i32.const 8))
+                (i32.const 8)
+                (local.get $vec-push))
               (i64.mul
                 (local.get $lhs)
                 (local.get $rhs)))
@@ -790,9 +802,10 @@
             (call $vec-pop-i64
               (local.get $sp)))
           (i64.store
-            (call $vec-push
+            (call_indirect (param i32 i32) (result i32)
               (local.get $sp)
-              (i32.const 8))
+              (i32.const 8)
+              (local.get $vec-push))
             (i64.div_s
               (local.get $lhs)
               (local.get $rhs)))
