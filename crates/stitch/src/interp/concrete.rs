@@ -92,7 +92,10 @@ struct Frame {
 
 impl Frame {
     fn set_local(&mut self, local_id: LocalId, value: (Value, ValueAttrs)) {
-        trace!("frame.locals[{local_id:?}] <- {}", Expr::Value(value.0, value.1));
+        trace!(
+            "frame.locals[{local_id:?}] <- {}",
+            Expr::Value(value.0, value.1)
+        );
         self.locals[local_id] = value;
     }
 
@@ -1158,16 +1161,28 @@ impl Interpreter<'_> {
         Ok(())
     }
 
-    fn eval_intr_const_ptr(&mut self, frames: &mut Vec<Frame>, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
+    fn eval_intr_const_ptr(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
         let frame = frames.last_mut().unwrap();
-        frame.stack.push((args[0].0, args[0].1 | ValueAttrs::CONST_PTR));
+        frame
+            .stack
+            .push((args[0].0, args[0].1 | ValueAttrs::CONST_PTR));
 
         Ok(())
     }
 
-    fn eval_intr_propagate_load(&mut self, frames: &mut Vec<Frame>, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
+    fn eval_intr_propagate_load(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
         let frame = frames.last_mut().unwrap();
-        frame.stack.push((args[0].0, args[0].1 | ValueAttrs::PROPAGATE_LOAD));
+        frame
+            .stack
+            .push((args[0].0, args[0].1 | ValueAttrs::PROPAGATE_LOAD));
 
         Ok(())
     }

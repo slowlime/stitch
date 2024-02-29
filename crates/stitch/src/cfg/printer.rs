@@ -324,11 +324,18 @@ impl Display for Terminator {
 impl Display for FuncBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let rpo = self.rpo();
+        let preds = self.predecessors();
 
         for (idx, block_id) in rpo.order.into_iter().enumerate() {
             let block = &self.blocks[block_id];
 
-            write!(f, "{}{block_id:?}:\n", if idx > 0 { "\n\n" } else { "" })?;
+            write!(
+                f,
+                "{}{block_id:?}: predecessors {:?}, name {:?}\n",
+                if idx > 0 { "\n\n" } else { "" },
+                &preds[block_id],
+                block.name,
+            )?;
 
             for stmt in &block.body {
                 write!(f, "  {stmt}\n")?;

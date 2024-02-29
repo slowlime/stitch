@@ -1,3 +1,4 @@
+use log::trace;
 use slotmap::SecondaryMap;
 
 use super::{BlockId, FuncBody};
@@ -16,7 +17,14 @@ impl FuncBody {
             }
         }
 
-        self.blocks
-            .retain(|block_id, _| reachable.contains_key(block_id));
+        self.blocks.retain(|block_id, _| {
+            let contains_key = reachable.contains_key(block_id);
+
+            if !contains_key {
+                trace!("removing {block_id:?}");
+            }
+
+            contains_key
+        });
     }
 }

@@ -91,7 +91,11 @@ impl Translator<'_> {
             for &pred_block_id in &self.preds[block_id] {
                 if self.rpo.idx[block_id] <= self.rpo.idx[pred_block_id] {
                     // backward edge
-                    assert!(self.dom_tree.dominates(block_id, pred_block_id));
+                    assert!(
+                        self.dom_tree.dominates(block_id, pred_block_id),
+                        "in the backedge {block_id:?} <- {pred_block_id:?}, \
+                        the target does not dominate the predecessor: irreducible control flow"
+                    );
                     self.loop_headers.insert(block_id, ());
                 } else {
                     // forward edge

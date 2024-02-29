@@ -3,8 +3,8 @@ use std::iter;
 
 use bitflags::bitflags;
 
-use crate::util::{try_match, Indent};
 use crate::util::float::{F32, F64};
+use crate::util::{try_match, Indent};
 
 use super::ty::{BlockType, ValType};
 use super::{BlockId, FuncId, GlobalId, LocalId, MemoryId, TableId, TypeId};

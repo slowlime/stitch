@@ -19,9 +19,9 @@ use crate::ast::{FuncId, GlobalId, MemoryId, TableId, TypeId};
 use crate::util::try_match;
 
 pub use self::dom_tree::DomTree;
+pub use self::loops::Loops;
 pub use self::predecessors::Predecessors;
 pub use self::rpo::Rpo;
-pub use self::loops::Loops;
 
 new_key_type! {
     pub struct LocalId;
@@ -843,6 +843,7 @@ impl Terminator {
 
 #[derive(Debug, Default, Clone)]
 pub struct Block {
+    pub name: Option<String>,
     pub body: Vec<Stmt>,
     pub term: Terminator,
 }

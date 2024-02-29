@@ -1039,7 +1039,11 @@ impl<'a> Translator<'a> {
             args.reverse();
 
             let ret_local_id = ret_ty.map(|val_ty| self.func.locals.insert(val_ty));
-            let call = Call::Direct { ret_local_id, func_id, args };
+            let call = Call::Direct {
+                ret_local_id,
+                func_id,
+                args,
+            };
             let result = self.push_stmt(Stmt::Call(call));
             self.task_results.push(result);
         }

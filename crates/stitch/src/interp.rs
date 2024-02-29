@@ -141,15 +141,8 @@ impl<'a> Interpreter<'a> {
             return self.specialize(spec_sig.orig_func_id, spec_sig.args);
         }
 
-        let Some(func) = func.body() else {
-            bail!("cannot specialize an imported function");
-        };
-
-        let func = &*self
-            .cfgs
-            .entry(func_id)
-            .unwrap()
-            .or_insert_with(|| Rc::new(FuncBody::from_ast(self.module, func)));
+        ensure!(!func.is_import(), "cannot specialize an imported function");
+        let func = self.get_cfg(func_id).unwrap();
 
         let mut func_ty = func.ty.clone();
         func_ty.params.retain({
@@ -176,8 +169,7 @@ impl<'a> Interpreter<'a> {
             .insert(spec_sig.clone(), SpecializedFunc::Pending(func_id));
         self.spec_funcs.insert(func_id, spec_sig.clone());
 
-        let func = Rc::clone(func);
-        let body = Specializer::new(self, spec_sig.clone(), func, body).run()?;
+        let body = Specializer::new(self, spec_sig.clone(), body).run()?;
         trace!("cfg:\n{body}");
 
         *self.module.funcs[func_id].body_mut().unwrap() = body.to_ast();
@@ -185,5 +177,13 @@ impl<'a> Interpreter<'a> {
         self.cfgs.insert(func_id, Rc::new(body));
 
         Ok(func_id)
+    }
+
+    fn get_cfg(&mut self, func_id: FuncId) -> Option<Rc<FuncBody>> {
+        let body = self.module.funcs[func_id].body()?;
+
+        Some(Rc::clone(self.cfgs.entry(func_id).unwrap().or_insert_with(
+            || Rc::new(FuncBody::from_ast(&self.module, body)),
+        )))
     }
 }

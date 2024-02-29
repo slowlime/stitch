@@ -48,7 +48,6 @@ impl FuncBody {
         idom.insert(self.entry, self.entry);
 
         let mut changed = true;
-        trace!("idom={idom:?}");
 
         while changed {
             changed = false;
@@ -86,8 +85,6 @@ impl FuncBody {
                 if idom.insert(block_id, new_idom) != Some(new_idom) {
                     changed = true;
                 }
-
-                trace!("idom={idom:?}");
             }
         }
 
