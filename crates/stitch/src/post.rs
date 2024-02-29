@@ -16,7 +16,8 @@ impl<'a> PostProc<'a> {
     }
 
     pub fn process(mut self) {
-        self.remove_intrinsics();
+        // FIXME: replace intrinsics with dummy functions
+        // self.remove_intrinsics();
         self.insert_func_types();
         self.remove_unused_locals();
     }

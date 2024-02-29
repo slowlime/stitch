@@ -771,6 +771,8 @@ impl<'a> BodyEncoder<'a, '_> {
                     self.expr(expr);
                 }
 
+                trace!("{func_id:?}");
+
                 self.nullary(Instruction::Call(self.encoder.funcs[*func_id] as u32));
             }
 

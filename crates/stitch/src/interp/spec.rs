@@ -477,7 +477,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         .map(|ret_local_id| self.local_map[&(info.func_ctx_id, ret_local_id)]);
                     let args = stack.drain(stack.len() - args.len()..).collect();
 
-                    if self.process_call(block_id, stmt_idx, ret_local_id, func_id, args)? {
+                    if self.process_call(block_id, stmt_idx, ret_local_id, func_id, args, false)? {
                         skip_terminator = true;
                         break;
                     }
@@ -496,7 +496,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     let mut args = stack.drain(stack.len() - args.len()..).collect();
 
                     'spec: {
-                        let Some((idx, _)) = index.as_ref().unwrap().to_value() else {
+                        let Some((idx, idx_attrs)) = index.as_ref().unwrap().to_value() else {
+                            trace!(
+                                "could not resolve an indirect call target: index {} is not a value",
+                                index.as_ref().unwrap(),
+                            );
                             break 'spec;
                         };
 
@@ -506,6 +510,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                             TableDef::Elems(elems) => {
                                 let idx = idx.to_u32().unwrap();
                                 let Some(&Some(func_id)) = elems.get(idx as usize) else {
+                                    trace!(
+                                        "could not resolve an indirect call target: \
+                                        index {idx} is out of bounds"
+                                    );
                                     break 'spec;
                                 };
 
@@ -513,6 +521,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
                                 let claimed_func_ty = self.interp.module.types[ty_id].as_func();
 
                                 if actual_func_ty != claimed_func_ty {
+                                    trace!(
+                                        "could not resolve an indirect call target: \
+                                        claimed function type ({claimed_func_ty}) differs from \
+                                        the actual type {actual_func_ty}"
+                                    );
                                     break 'spec;
                                 }
 
@@ -525,6 +538,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                                     ret_local_id,
                                     func_id,
                                     args,
+                                    idx_attrs.contains(ValueAttrs::INLINE),
                                 )? {
                                     skip_terminator = true;
                                     break 'body;
@@ -536,7 +550,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     }
 
                     if let Some(index) = index {
-                        trace!("could not resolve an indirect call target");
+                        trace!("emitting an indirect call");
                         block.body.push(Stmt::Call(Call::Indirect {
                             ret_local_id,
                             ty_id,
@@ -1322,6 +1336,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         ret_local_id: Option<LocalId>,
         func_id: FuncId,
         args: Vec<Expr>,
+        force_inline: bool,
     ) -> Result<bool> {
         trace!(
             "processing a call: {ret_local_id:?} <- {func_id:?} ({:?}) with {} args",
@@ -1360,6 +1375,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 IntrinsicDecl::IsSpecializing => {
                     self.process_intr_is_specializing(block_id, ret_local_id.unwrap())?
                 }
+                IntrinsicDecl::Inline => {
+                    self.process_intr_inline(block_id, ret_local_id.unwrap(), &args)?
+                }
             };
 
             if processed {
@@ -1369,7 +1387,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
         let inline_mode = if self.interp.module.funcs[func_id].is_import() {
             InlineMode::No
-        } else if !self.is_recursive_call(block_id, func_id, &args) {
+        } else if !self.is_recursive_call(block_id, func_id, &args) || force_inline {
             InlineMode::Inline
         } else if self.blocks[block_id].kind != BlockKind::Canonical {
             InlineMode::Outline
@@ -1622,6 +1640,24 @@ impl<'a, 'i> Specializer<'a, 'i> {
             block_id,
             ret_local_id,
             Expr::Value(Value::I32(1), Default::default()),
+        );
+
+        Ok(true)
+    }
+
+    fn process_intr_inline(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+        args: &Vec<Expr>,
+    ) -> Result<bool> {
+        self.set_local(
+            block_id,
+            ret_local_id,
+            match args[0].to_value() {
+                Some((value, attrs)) => Expr::Value(value, attrs | ValueAttrs::INLINE),
+                None => args[0].clone(),
+            },
         );
 
         Ok(true)
