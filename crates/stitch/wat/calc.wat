@@ -24,6 +24,10 @@
     (import "stitch" "const-ptr")
     (param $ptr i32)
     (result i32))
+  (func $stitch-symbolic-ptr
+    (import "stitch" "symbolic-ptr")
+    (param $ptr i32)
+    (result i32))
   (func $stitch-propagate-load
     (import "stitch" "propagate-load")
     (param $ptr i32)
@@ -230,8 +234,9 @@
 
     (call $memcpy
       (local.tee $new-buf
-        (call $malloc
-          (local.get $new-cap)))
+        (call $stitch-symbolic-ptr
+          (call $malloc
+            (local.get $new-cap))))
       (i32.load
         (local.get $vec))
       (call $vec-len
@@ -681,16 +686,18 @@
 
     (global.set $stack-ptr
       (local.tee $sp
-        (i32.sub
-          (global.get $stack-ptr)
-          (i32.const 12))))
+        (call $stitch-symbolic-ptr
+          (i32.sub
+            (global.get $stack-ptr)
+            (i32.const 12)))))
     (call $memset
       (local.get $sp)
       (i32.const 12)
       (i32.const 0))
-    (local.set $vec-push
-      (call $stitch-no-inline
-        (i32.const 2)))
+    ;; (local.set $vec-push
+    ;;   (call $stitch-no-inline
+    ;;     (i32.const 2)))
+    (local.set $vec-push (i32.const 2))
 
     (block $process-ops
       (loop $loop

@@ -27,84 +27,99 @@ type OrigBlockId = BlockId;
 
 #[derive(Debug, Default, Clone, Eq)]
 struct MemSlice {
-    // FIXME: negative offsets
-    // invariant: bytes.len() == init.len()
+    // invariant: bytes.len() == init.len() ≥ zero_idx ∧ zero_idx ≤ |isize::MIN|
     bytes: Vec<u8>,
     init: BitVec,
+    zero_idx: usize,
 }
 
 impl MemSlice {
-    fn reserve(&mut self, size: usize) {
-        self.bytes
-            .extend(iter::repeat(0).take(size.saturating_sub(self.bytes.len())));
-        self.init
-            .extend(iter::repeat(false).take(size.saturating_sub(self.init.len())));
+    /// Reserves enough space to make `idx` accessible.
+    fn reserve(&mut self, idx: isize) {
+        if idx < 0 && idx.unsigned_abs() > self.zero_idx {
+            let extra = idx.unsigned_abs() - self.zero_idx;
+            self.bytes.splice(..0, iter::repeat(0).take(extra));
+            self.init.splice(..0, iter::repeat(false).take(extra));
+        } else if idx >= 0 && self.zero_idx + idx as usize >= self.bytes.len() {
+            let extra = self.zero_idx + idx as usize + 1 - self.bytes.len();
+            self.bytes.extend(iter::repeat(0).take(extra));
+            self.init.extend(iter::repeat(false).take(extra));
+        }
     }
 
-    fn reserve_for_bound(&mut self, end_bound: Bound<&usize>) {
-        match end_bound {
-            Bound::Included(&idx) => self.reserve(idx + 1),
-            Bound::Excluded(&idx) => self.reserve(idx),
+    fn reserve_range<R: RangeBounds<isize>>(&mut self, range: R) {
+        match range.start_bound() {
+            Bound::Included(&idx) => self.reserve(idx),
+            Bound::Excluded(&idx) => self.reserve(idx.checked_add(1).unwrap()),
+            Bound::Unbounded => panic!("the start bound is infinite"),
+        }
+
+        match range.end_bound() {
+            Bound::Included(&idx) => self.reserve(idx),
+            Bound::Excluded(&idx) => self.reserve(idx.checked_sub(1).unwrap()),
             Bound::Unbounded => panic!("the end bound is infinite"),
         }
     }
 
-    fn read(&self, range: Range<usize>) -> Option<&[u8]> {
+    fn translate_range(&self, Range { start, end }: Range<isize>) -> Option<Range<usize>> {
+        Some(Range {
+            start: self.zero_idx.checked_add_signed(start)?,
+            end: self.zero_idx.checked_add_signed(end)?,
+        })
+    }
+
+    fn read(&self, range: Range<isize>) -> Option<&[u8]> {
+        let range = self.translate_range(range)?;
         self.init[range.clone()].all().then(|| &self.bytes[range])
     }
 
-    fn read_u8(&self, offset: usize) -> Option<u8> {
+    fn read_u8(&self, offset: isize) -> Option<u8> {
         Some(self.read(offset..offset + 1)?[0])
     }
 
-    fn read_u16(&self, offset: usize) -> Option<u16> {
+    fn read_u16(&self, offset: isize) -> Option<u16> {
         Some(u16::from_le_bytes(
             self.read(offset..offset + 2)?.try_into().unwrap(),
         ))
     }
 
-    fn read_u32(&self, offset: usize) -> Option<u32> {
+    fn read_u32(&self, offset: isize) -> Option<u32> {
         Some(u32::from_le_bytes(
             self.read(offset..offset + 4)?.try_into().unwrap(),
         ))
     }
 
-    fn read_u64(&self, offset: usize) -> Option<u64> {
+    fn read_u64(&self, offset: isize) -> Option<u64> {
         Some(u64::from_le_bytes(
             self.read(offset..offset + 8)?.try_into().unwrap(),
         ))
     }
 
-    fn write(&mut self, range: Range<usize>) -> &mut [u8] {
-        self.reserve_for_bound(range.end_bound());
+    fn write(&mut self, range: Range<isize>) -> &mut [u8] {
+        self.reserve_range(range.clone());
+        let range = self.translate_range(range).unwrap();
         self.init[range.clone()].fill(true);
 
         &mut self.bytes[range]
     }
 
-    fn init_size(&self) -> usize {
-        self.init.last_one().map(|idx| idx + 1).unwrap_or(0)
-    }
-
     fn merge(&mut self, other: &Self) -> bool {
-        let mut changed = self
-            .init
-            .iter_ones()
-            .all(|idx| other.init.get(idx).is_some_and(|rhs| *rhs));
-        self.init &= &other.init;
+        let mut changed = false;
 
-        let mut remaining = &self.init[..];
-        let mut offset = 0;
-
-        while let Some(mut idx) = remaining.first_one() {
-            idx += offset;
-
-            if self.bytes[idx] != other.bytes[idx] {
-                changed = true;
-                self.init.set(idx, false);
-                remaining = &self.init[idx + 1..];
-                offset = idx + 1;
+        for (idx, bit) in self.init.iter_mut().enumerate().filter(|(_, bit)| **bit) {
+            if let Some(other_idx) = other
+                .zero_idx
+                .checked_add_signed((idx - self.zero_idx) as isize)
+            {
+                if other.init.get(other_idx).is_some_and(|rhs| *rhs) {
+                    if self.bytes[idx] == other.bytes[other_idx] {
+                        continue;
+                    }
+                }
             }
+
+            changed = true;
+            bit.commit(false);
         }
 
         changed
@@ -113,18 +128,32 @@ impl MemSlice {
 
 impl PartialEq for MemSlice {
     fn eq(&self, other: &Self) -> bool {
-        if self.init.last_one() != other.init.last_one() {
+        if self.zero_idx > other.zero_idx {
+            return other == self;
+        }
+
+        let other_offset = other.zero_idx - self.zero_idx;
+
+        if other.init[..other_offset].any() {
             return false;
         }
 
-        let init_size = self.init_size();
+        let self_last_one = self.init.last_one();
 
-        if self.init[0..init_size] != other.init[0..init_size] {
+        if other.init.last_one().map(|idx| idx - other.zero_idx)
+            != self_last_one.map(|idx| idx - self.zero_idx)
+        {
             return false;
         }
 
-        for idx in self.init[0..init_size].iter_ones() {
-            if self.bytes[idx] != other.bytes[idx] {
+        let init_size = self_last_one.map(|idx| idx + 1).unwrap_or(0);
+
+        if self.init[..init_size] != other.init[other_offset..other_offset + init_size] {
+            return false;
+        }
+
+        for idx in self.init[..init_size].iter_ones() {
+            if self.bytes[idx] != other.bytes[idx + other_offset] {
                 return false;
             }
         }
@@ -135,8 +164,11 @@ impl PartialEq for MemSlice {
 
 impl Hash for MemSlice {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let init_size = self.init_size();
-        self.init[0..init_size].hash(state);
+        self.init
+            .first_one()
+            .zip(self.init.last_one())
+            .map(|(start, end)| &self.init[start..=end])
+            .hash(state);
 
         for idx in self.init.iter_ones() {
             self.bytes[idx].hash(state);
@@ -380,10 +412,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
     pub fn new(
         interp: &'i mut Interpreter<'a>,
         SpecSignature { orig_func_id, args }: SpecSignature,
-        mut func: FuncBody,
+        func: FuncBody,
     ) -> Self {
-        func.blocks.clear();
-
         Self {
             interp,
             orig_func_id,
@@ -454,6 +484,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
     }
 
     fn process_entry(&mut self) {
+        self.func.blocks[self.func.entry].body.clear();
+
         let func_ctx_id = self.add_func_ctx(FuncCtx {
             parent: None,
             func_id: self.orig_func_id,
@@ -692,7 +724,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 }
 
                 Stmt::Store(mem_arg, store, _) => {
-                    let value = stack.pop().unwrap();
+                    let value = Self::convert_expr(&self.symbolic_ptrs, stack.pop().unwrap());
                     let base_addr = stack.pop().unwrap();
 
                     if let Some((_, addr_attrs)) = base_addr.to_value() {
@@ -702,14 +734,31 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         );
                     }
 
-                    block.body.push(Stmt::Store(
-                        mem_arg,
-                        store,
-                        Box::new([
-                            Self::convert_expr(&self.symbolic_ptrs, base_addr),
-                            Self::convert_expr(&self.symbolic_ptrs, value),
-                        ]),
-                    ));
+                    let mut emit_store = true;
+
+                    if let (Some((Value::Ptr(Ptr { id, offset, .. }), _)), Some((value, _))) =
+                        (base_addr.to_value(), value.to_value())
+                    {
+                        let id = id as usize;
+                        let start = offset.wrapping_add_unsigned(mem_arg.offset) as isize;
+
+                        if let Some(end) = start.checked_add_unsigned(store.dst_size()) {
+                            for _ in info.exit_env.mem.len()..=id {
+                                info.exit_env.mem.push(Default::default());
+                            }
+
+                            store.store(info.exit_env.mem[id].write(start..end), value);
+                            emit_store = false;
+                        }
+                    }
+
+                    if emit_store {
+                        block.body.push(Stmt::Store(
+                            mem_arg,
+                            store,
+                            Box::new([Self::convert_expr(&self.symbolic_ptrs, base_addr), value]),
+                        ));
+                    }
                 }
 
                 Stmt::Call(Call::Direct {
@@ -804,16 +853,18 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     if let Some(index) = index {
                         trace!("emitting an indirect call");
                         self.flush_global_env(block_id);
-                        self.func.blocks[block_id].body.push(Stmt::Call(Call::Indirect {
-                            ret_local_id,
-                            ty_id,
-                            table_id,
-                            args: args
-                                .into_iter()
-                                .map(|arg| Self::convert_expr(&self.symbolic_ptrs, arg))
-                                .collect(),
-                            index: Box::new(index),
-                        }));
+                        self.func.blocks[block_id]
+                            .body
+                            .push(Stmt::Call(Call::Indirect {
+                                ret_local_id,
+                                ty_id,
+                                table_id,
+                                args: args
+                                    .into_iter()
+                                    .map(|arg| Self::convert_expr(&self.symbolic_ptrs, arg))
+                                    .collect(),
+                                index: Box::new(index),
+                            }));
                         self.assume_clobbered_env(block_id);
 
                         if let Some(ret_local_id) = ret_local_id {
@@ -1071,10 +1122,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
     fn process_un_op(
         &mut self,
-        _block_id: BlockId,
+        block_id: BlockId,
         stack: &mut Vec<Expr<()>>,
         op: UnOp,
     ) -> Result<()> {
+        let info = &mut self.blocks[block_id];
         let arg = stack.pop().unwrap();
 
         let try_process = || -> Option<Expr<()>> {
@@ -1206,27 +1258,37 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 UnOp::I64Extend16S => Expr::Value(Value::I64(value.to_i64()? as i16 as i64), attrs),
                 UnOp::I64Extend32S => Expr::Value(Value::I64(value.to_i64()? as i32 as i64), attrs),
 
-                UnOp::Load(mem_arg, load) => {
-                    if !attrs.contains(ValueAttrs::CONST_PTR) {
-                        return None;
+                UnOp::Load(mem_arg, load) => match value {
+                    Value::I32(base_addr) if attrs.contains(ValueAttrs::CONST_PTR) => {
+                        let base_addr = base_addr as u32;
+                        let start = (base_addr + mem_arg.offset) as usize;
+                        let range = start..start + load.src_size();
+
+                        let bytes = match self.interp.module.get_mem(mem_arg.mem_id, range) {
+                            Ok(bytes) => bytes,
+
+                            Err(e) => {
+                                warn!("encountered an error while specializing a constant memory load: {e}");
+
+                                return None;
+                            }
+                        };
+
+                        Expr::Value(load.load(bytes).lift_ptr(), attrs.deref_attrs())
                     }
 
-                    let base_addr = value.to_u32()?;
-                    let start = (base_addr + mem_arg.offset) as usize;
-                    let range = start..start + load.src_size();
+                    Value::Ptr(Ptr { id, offset, .. })
+                        if mem_arg.mem_id == self.interp.module.default_mem =>
+                    {
+                        let start = offset.wrapping_add_unsigned(mem_arg.offset) as isize;
+                        let range = start..start.checked_add_unsigned(load.src_size())?;
+                        let bytes = info.exit_env.mem.get(id as usize)?.read(range)?;
 
-                    let bytes = match self.interp.module.get_mem(mem_arg.mem_id, range) {
-                        Ok(bytes) => bytes,
+                        Expr::Value(load.load(bytes).lift_ptr(), attrs.deref_attrs())
+                    }
 
-                        Err(e) => {
-                            warn!("encountered an error while specializing a constant memory load: {e}");
-
-                            return None;
-                        }
-                    };
-
-                    Expr::Value(load.load(bytes).lift_ptr(), attrs.deref_attrs())
-                }
+                    _ => return None,
+                },
 
                 UnOp::MemoryGrow(_mem_id) => return None,
             })
@@ -2254,6 +2316,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     debug_assert_eq!(idx_iter.next().unwrap(), idx + i + 1);
                 }
 
+                let start = (idx - mem_slice.zero_idx) as isize;
+
                 target_block.get().body.push(Stmt::Store(
                     MemArg {
                         mem_id,
@@ -2266,12 +2330,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         Expr::Value(
                             match store {
                                 Store::I64(_) => {
-                                    Value::I64(mem_slice.read_u64(idx).unwrap() as i64)
+                                    Value::I64(mem_slice.read_u64(start).unwrap() as i64)
                                 }
                                 Store::I32(store) => Value::I32(match store {
-                                    I32Store::Four => mem_slice.read_u32(idx).unwrap() as i32,
-                                    I32Store::Two => mem_slice.read_u16(idx).unwrap() as i32,
-                                    I32Store::One => mem_slice.read_u8(idx).unwrap() as i32,
+                                    I32Store::Four => mem_slice.read_u32(start).unwrap() as i32,
+                                    I32Store::Two => mem_slice.read_u16(start).unwrap() as i32,
+                                    I32Store::One => mem_slice.read_u8(start).unwrap() as i32,
                                 }),
                                 _ => unreachable!(),
                             },
