@@ -37,6 +37,7 @@ impl<'a> PostProc<'a> {
                 IntrinsicDecl::Specialize => self.replace_intr_specialize(func_id),
                 IntrinsicDecl::Unknown => self.replace_intr_unknown(func_id),
                 IntrinsicDecl::ConstPtr => self.replace_intr_const_ptr(func_id),
+                IntrinsicDecl::SymbolicPtr => self.replace_intr_symbolic_ptr(func_id),
                 IntrinsicDecl::PropagateLoad => self.replace_intr_propagate_load(func_id),
                 IntrinsicDecl::PrintValue => self.replace_intr_print_value(func_id),
                 IntrinsicDecl::PrintStr => self.replace_intr_print_str(func_id),

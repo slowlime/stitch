@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
 
-use crate::ast::expr::Value;
+use crate::ast::expr::format_value;
 
 use super::{
     BinOp, Call, Expr, FuncBody, I32Load, I32Store, I64Load, I64Store, Load, NulOp, Stmt, Store,
@@ -264,20 +264,10 @@ impl Display for Call {
     }
 }
 
-impl Display for Expr {
+impl<E> Display for Expr<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Value(value, attrs) => {
-                match value {
-                    Value::I32(value) => write!(f, "(i32.const {value}")?,
-                    Value::I64(value) => write!(f, "(i64.const {value}")?,
-                    Value::F32(value) => write!(f, "(f32.const {value}")?,
-                    Value::F64(value) => write!(f, "(f64.const {value}")?,
-                }
-
-                write!(f, " {attrs:?})")?;
-            }
-
+            Self::Value(value, attrs) => write!(f, "{}", format_value(value, *attrs))?,
             Self::Nullary(op) => write!(f, "({op})")?,
             Self::Unary(op, expr) => write!(f, "({op} {expr})")?,
             Self::Binary(op, exprs) => write!(f, "({op} {} {})", exprs[0], exprs[1])?,

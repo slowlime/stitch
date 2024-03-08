@@ -13,7 +13,7 @@ use std::{iter, slice};
 
 use slotmap::{new_key_type, SlotMap};
 
-use crate::ast::expr::{MemArg, Value, ValueAttrs};
+use crate::ast::expr::{MemArg, Never, Value, ValueAttrs};
 use crate::ast::ty::{FuncType, ValType};
 use crate::ast::{FuncId, GlobalId, MemoryId, TableId, TypeId};
 use crate::util::try_match;
@@ -119,7 +119,7 @@ impl Load {
         }
     }
 
-    pub fn load(&self, src: &[u8]) -> Value {
+    pub fn load(&self, src: &[u8]) -> Value<Never> {
         match self {
             Self::I32(load) => Value::I32(load.load(src)),
             Self::I64(load) => Value::I64(load.load(src)),
@@ -198,7 +198,7 @@ impl Store {
         }
     }
 
-    pub fn store(&self, dst: &mut [u8], value: Value) {
+    pub fn store(&self, dst: &mut [u8], value: Value<Never>) {
         match *self {
             Self::I32(store) => store.store(dst, value.to_i32().unwrap()),
             Self::I64(store) => store.store(dst, value.to_i64().unwrap()),
@@ -432,17 +432,32 @@ impl Call {
 }
 
 #[derive(Debug, Clone)]
-pub enum Expr {
-    Value(Value, ValueAttrs),
+pub enum Expr<E = Never> {
+    Value(Value<E>, ValueAttrs),
     Nullary(NulOp),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<[Expr; 2]>),
     Ternary(TernOp, Box<[Expr; 3]>),
 }
 
-impl Expr {
-    pub fn to_value(&self) -> Option<(Value, ValueAttrs)> {
+impl<E> Expr<E> {
+    pub fn to_value(&self) -> Option<(Value<E>, ValueAttrs)> where E: Copy {
         try_match!(*self, Self::Value(value, attrs) => (value, attrs))
+    }
+}
+
+impl Expr {
+    pub fn any<F>(&self, predicate: &mut F) -> bool
+    where
+        F: FnMut(&Self) -> bool,
+    {
+        predicate(self)
+            || (match self {
+                Self::Value(..) | Self::Nullary(_) => true,
+                Self::Unary(_, expr) => expr.any(predicate),
+                Self::Binary(_, exprs) => exprs.iter().any(|expr| expr.any(predicate)),
+                Self::Ternary(_, exprs) => exprs.iter().any(|expr| expr.any(predicate)),
+            })
     }
 
     pub fn ty(&self) -> ExprTy {
@@ -631,7 +646,7 @@ impl Expr {
     }
 
     pub fn has_side_effect(&self) -> bool {
-        match self {
+        self.any(&mut |expr| match expr {
             Self::Value(..) => false,
 
             Self::Nullary(op) => match *op {
@@ -775,12 +790,12 @@ impl Expr {
             Self::Ternary(op, _) => match *op {
                 TernOp::Select => false,
             },
-        }
+        })
     }
 }
 
-impl From<(Value, ValueAttrs)> for Expr {
-    fn from((value, attrs): (Value, ValueAttrs)) -> Self {
+impl<E> From<(Value<E>, ValueAttrs)> for Expr<E> {
+    fn from((value, attrs): (Value<E>, ValueAttrs)) -> Self {
         Self::Value(value, attrs)
     }
 }

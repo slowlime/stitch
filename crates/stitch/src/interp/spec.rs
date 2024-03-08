@@ -1,15 +1,19 @@
-use std::ops::Neg;
+use std::hash::{Hash, Hasher};
+use std::ops::{Bound, Neg, Range, RangeBounds};
 use std::{array, fmt, iter, mem};
 
 use anyhow::{ensure, Result};
+use bitvec::prelude::*;
 use hashbrown::{HashMap, HashSet};
 use log::{trace, warn};
-use slotmap::{new_key_type, Key, SecondaryMap, SlotMap};
+use slotmap::{new_key_type, Key, SecondaryMap, SlotMap, SparseSecondaryMap};
 
-use crate::ast::expr::{Value, ValueAttrs};
-use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, IntrinsicDecl, Module, TableDef};
+use crate::ast::expr::{format_value, MemArg, Ptr, Value, ValueAttrs};
+use crate::ast::ty::ValType;
+use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, IntrinsicDecl, MemoryId, TableDef};
 use crate::cfg::{
-    BinOp, Block, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
+    BinOp, Block, BlockId, Call, Expr, FuncBody, I32Store, I64Store, LocalId, NulOp, Stmt, Store,
+    Terminator, TernOp, UnOp,
 };
 use crate::util::float::{F32, F64};
 
@@ -21,73 +25,146 @@ new_key_type! {
 
 type OrigBlockId = BlockId;
 
+#[derive(Debug, Default, Clone, Eq)]
+struct MemSlice {
+    // FIXME: negative offsets
+    // invariant: bytes.len() == init.len()
+    bytes: Vec<u8>,
+    init: BitVec,
+}
+
+impl MemSlice {
+    fn reserve(&mut self, size: usize) {
+        self.bytes
+            .extend(iter::repeat(0).take(size.saturating_sub(self.bytes.len())));
+        self.init
+            .extend(iter::repeat(false).take(size.saturating_sub(self.init.len())));
+    }
+
+    fn reserve_for_bound(&mut self, end_bound: Bound<&usize>) {
+        match end_bound {
+            Bound::Included(&idx) => self.reserve(idx + 1),
+            Bound::Excluded(&idx) => self.reserve(idx),
+            Bound::Unbounded => panic!("the end bound is infinite"),
+        }
+    }
+
+    fn read(&self, range: Range<usize>) -> Option<&[u8]> {
+        self.init[range.clone()].all().then(|| &self.bytes[range])
+    }
+
+    fn read_u8(&self, offset: usize) -> Option<u8> {
+        Some(self.read(offset..offset + 1)?[0])
+    }
+
+    fn read_u16(&self, offset: usize) -> Option<u16> {
+        Some(u16::from_le_bytes(
+            self.read(offset..offset + 2)?.try_into().unwrap(),
+        ))
+    }
+
+    fn read_u32(&self, offset: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(
+            self.read(offset..offset + 4)?.try_into().unwrap(),
+        ))
+    }
+
+    fn read_u64(&self, offset: usize) -> Option<u64> {
+        Some(u64::from_le_bytes(
+            self.read(offset..offset + 8)?.try_into().unwrap(),
+        ))
+    }
+
+    fn write(&mut self, range: Range<usize>) -> &mut [u8] {
+        self.reserve_for_bound(range.end_bound());
+        self.init[range.clone()].fill(true);
+
+        &mut self.bytes[range]
+    }
+
+    fn init_size(&self) -> usize {
+        self.init.last_one().map(|idx| idx + 1).unwrap_or(0)
+    }
+
+    fn merge(&mut self, other: &Self) -> bool {
+        let mut changed = self
+            .init
+            .iter_ones()
+            .all(|idx| other.init.get(idx).is_some_and(|rhs| *rhs));
+        self.init &= &other.init;
+
+        let mut remaining = &self.init[..];
+        let mut offset = 0;
+
+        while let Some(mut idx) = remaining.first_one() {
+            idx += offset;
+
+            if self.bytes[idx] != other.bytes[idx] {
+                changed = true;
+                self.init.set(idx, false);
+                remaining = &self.init[idx + 1..];
+                offset = idx + 1;
+            }
+        }
+
+        changed
+    }
+}
+
+impl PartialEq for MemSlice {
+    fn eq(&self, other: &Self) -> bool {
+        if self.init.last_one() != other.init.last_one() {
+            return false;
+        }
+
+        let init_size = self.init_size();
+
+        if self.init[0..init_size] != other.init[0..init_size] {
+            return false;
+        }
+
+        for idx in self.init[0..init_size].iter_ones() {
+            if self.bytes[idx] != other.bytes[idx] {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl Hash for MemSlice {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let init_size = self.init_size();
+        self.init[0..init_size].hash(state);
+
+        for idx in self.init.iter_ones() {
+            self.bytes[idx].hash(state);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct HashableEnv {
-    globals: Vec<(GlobalId, (Value, ValueAttrs))>,
-    locals: Vec<(LocalId, (Value, ValueAttrs))>,
+    globals: Vec<(GlobalId, (Value<()>, ValueAttrs))>,
+    locals: Vec<(LocalId, (Value<()>, ValueAttrs))>,
+    mem: Vec<MemSlice>,
 }
 
 #[derive(Debug, Default, Clone)]
 struct Env {
-    globals: SecondaryMap<GlobalId, (Value, ValueAttrs)>,
-    locals: SecondaryMap<LocalId, (Value, ValueAttrs)>,
+    globals: SecondaryMap<GlobalId, (Value<()>, ValueAttrs)>,
+    locals: SecondaryMap<LocalId, (Value<()>, ValueAttrs)>,
+    mem: Vec<MemSlice>,
 }
 
 impl Env {
-    fn entry<F>(
-        module: &Module,
-        cfg: &FuncBody,
-        args: &[Option<(Value, ValueAttrs)>],
-        const_global_ids: &HashSet<GlobalId>,
-        map_local: F,
-    ) -> Self
-    where
-        F: Fn(LocalId) -> LocalId,
-    {
-        let globals = module
-            .globals
-            .iter()
-            .filter_map(|(global_id, global)| match global.def {
-                GlobalDef::Import(_) => None,
-                GlobalDef::Value(ConstExpr::Value(value, attrs)) => {
-                    if !global.ty.mutable || const_global_ids.contains(&global_id) {
-                        Some((global_id, (value, attrs)))
-                    } else {
-                        None
-                    }
-                }
-                GlobalDef::Value(ConstExpr::GlobalGet(_)) => None,
-            })
-            .collect();
-
-        let mut locals: SecondaryMap<_, _> = cfg
-            .locals
-            .iter()
-            .map(|(local_id, val_ty)| {
-                (
-                    map_local(local_id),
-                    (Value::default_for(val_ty), Default::default()),
-                )
-            })
-            .collect();
-
-        for (local_id, arg) in cfg.params.iter().copied().map(map_local).zip(args) {
-            if let &Some(value) = arg {
-                locals[local_id] = value;
-            } else {
-                locals.remove(local_id);
-            }
-        }
-
-        Self { globals, locals }
-    }
-
     fn merge(&mut self, other: &Self) -> bool {
         fn merge_maps<K: Key>(
-            lhs_map: &mut SecondaryMap<K, (Value, ValueAttrs)>,
-            rhs_map: &SecondaryMap<K, (Value, ValueAttrs)>,
-        ) -> bool {
-            let mut changed = false;
+            changed: &mut bool,
+            lhs_map: &mut SecondaryMap<K, (Value<()>, ValueAttrs)>,
+            rhs_map: &SecondaryMap<K, (Value<()>, ValueAttrs)>,
+        ) {
             let mut to_remove = vec![];
 
             for (id, (lhs, lhs_attrs)) in &mut *lhs_map {
@@ -101,12 +178,12 @@ impl Env {
                         trace!("merge_maps: {id:?} changed");
                     }
 
-                    changed = *lhs != new || changed;
+                    *changed = *lhs != new || *changed;
                     *lhs = new;
                     *lhs_attrs = new_attrs;
                 } else {
                     trace!("merge_maps: {id:?} removed");
-                    changed = true;
+                    *changed = true;
                     to_remove.push(id);
                 }
             }
@@ -114,11 +191,19 @@ impl Env {
             for id in to_remove {
                 lhs_map.remove(id);
             }
-
-            changed
         }
 
-        merge_maps(&mut self.globals, &other.globals) | merge_maps(&mut self.locals, &other.locals)
+        let mut changed = false;
+        merge_maps(&mut changed, &mut self.globals, &other.globals);
+        merge_maps(&mut changed, &mut self.locals, &other.locals);
+
+        let empty_slice = MemSlice::default();
+
+        for (idx, lhs) in self.mem.iter_mut().enumerate() {
+            changed |= lhs.merge(other.mem.get(idx).unwrap_or(&empty_slice));
+        }
+
+        changed
     }
 
     fn to_hashable(&self) -> HashableEnv {
@@ -133,6 +218,7 @@ impl Env {
                 .iter()
                 .map(|(local_id, &value)| (local_id, value))
                 .collect(),
+            mem: self.mem.clone(),
         };
 
         result
@@ -270,17 +356,24 @@ struct FuncCtx {
     shape: Vec<bool>,
 }
 
+trait BlockProvider {
+    fn get(&mut self) -> &mut Block;
+}
+
 pub struct Specializer<'a, 'i> {
     interp: &'i mut Interpreter<'a>,
     orig_func_id: FuncId,
     func: FuncBody,
     block_map: HashMap<BlockMapKey, BlockId>,
     blocks: SecondaryMap<BlockId, BlockInfo>,
-    args: Vec<Option<(Value, ValueAttrs)>>,
+    args: Vec<Option<(Value<()>, ValueAttrs)>>,
     tasks: HashSet<BlockId>,
     local_map: HashMap<(FuncCtxId, LocalId), LocalId>,
     func_ctxs: SlotMap<FuncCtxId, FuncCtx>,
     func_ctx_map: HashMap<FuncCtx, FuncCtxId>,
+    symbolic_ptrs: Vec<LocalId>,
+    symbolic_ptr_locals: SparseSecondaryMap<LocalId, u32>,
+    symbolic_ptr_id_map: HashMap<u32, u32>,
 }
 
 impl<'a, 'i> Specializer<'a, 'i> {
@@ -302,32 +395,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
             local_map: Default::default(),
             func_ctxs: Default::default(),
             func_ctx_map: Default::default(),
+            symbolic_ptrs: Default::default(),
+            symbolic_ptr_locals: Default::default(),
+            symbolic_ptr_id_map: Default::default(),
         }
     }
 
     pub fn run(mut self) -> Result<FuncBody> {
-        let func_ctx_id = self.add_func_ctx(FuncCtx {
-            parent: None,
-            func_id: self.orig_func_id,
-            shape: self.args.iter().map(Option::is_some).collect(),
-        });
-
-        self.process_params(func_ctx_id);
-        let cfg = self.interp.get_cfg(self.orig_func_id).unwrap();
-        self.func.entry = self.process_branch(
-            None,
-            func_ctx_id,
-            cfg.entry,
-            Env::entry(
-                &self.interp.module,
-                &cfg,
-                &self.args,
-                &self.interp.const_global_ids,
-                |local_id| self.local_map[&(func_ctx_id, local_id)],
-            ),
-            0,
-            BlockKind::Regular,
-        );
+        self.process_entry();
 
         while let Some(&block_id) = self.tasks.iter().next() {
             self.tasks.remove(&block_id);
@@ -340,6 +415,124 @@ impl<'a, 'i> Specializer<'a, 'i> {
         self.set_block_name(self.func.entry, format_args!("entry"));
 
         Ok(self.func)
+    }
+
+    fn process_arg(&mut self, value: Value<()>, load: impl FnOnce() -> Expr) -> Value<()> {
+        match value {
+            Value::I32(_) | Value::I64(_) | Value::F32(_) | Value::F64(_) => value,
+
+            Value::Ptr(Ptr { id, offset, .. }) => {
+                let id = *self.symbolic_ptr_id_map.entry(id).or_insert_with(|| {
+                    let id = self.symbolic_ptrs.len().try_into().unwrap();
+                    let base_local_id = self.func.locals.insert(ValType::I32);
+                    self.symbolic_ptrs.push(base_local_id);
+                    self.symbolic_ptr_locals.insert(base_local_id, id);
+                    self.func.blocks[self.func.entry].body.push(Stmt::LocalSet(
+                        base_local_id,
+                        match offset {
+                            0 => load(),
+                            _ => Expr::Binary(
+                                BinOp::I32Sub,
+                                Box::new([
+                                    load(),
+                                    Expr::Value(Value::I32(offset), Default::default()),
+                                ]),
+                            ),
+                        },
+                    ));
+
+                    id
+                });
+
+                Value::Ptr(Ptr {
+                    base: (),
+                    id,
+                    offset,
+                })
+            }
+        }
+    }
+
+    fn process_entry(&mut self) {
+        let func_ctx_id = self.add_func_ctx(FuncCtx {
+            parent: None,
+            func_id: self.orig_func_id,
+            shape: self.args.iter().map(Option::is_some).collect(),
+        });
+
+        self.process_params(func_ctx_id);
+        let cfg = self.interp.get_cfg(self.orig_func_id).unwrap();
+        let mut exit_env = Env::default();
+
+        let globals = mem::take(&mut self.interp.module.globals);
+
+        for (global_id, global) in &globals {
+            match global.def {
+                GlobalDef::Import(_) => {}
+                GlobalDef::Value(ConstExpr::Value(value, attrs)) => {
+                    if !global.ty.mutable || self.interp.const_global_ids.contains(&global_id) {
+                        exit_env.globals.insert(
+                            global_id,
+                            (
+                                self.process_arg(value.lift_ptr(), || {
+                                    Expr::Nullary(NulOp::GlobalGet(global_id))
+                                }),
+                                attrs,
+                            ),
+                        );
+                    }
+                }
+                GlobalDef::Value(ConstExpr::GlobalGet(_)) => {}
+            }
+        }
+
+        self.interp.module.globals = globals;
+
+        for (local_id, val_ty) in &cfg.locals {
+            let local_id = self.local_map[&(func_ctx_id, local_id)];
+            exit_env
+                .locals
+                .insert(local_id, (Value::default_for(val_ty), Default::default()));
+        }
+
+        let args = mem::take(&mut self.args);
+
+        for (&local_id, arg) in cfg.params.iter().zip(&args) {
+            let local_id = self.local_map[&(func_ctx_id, local_id)];
+
+            if let &Some((value, attrs)) = arg {
+                exit_env.locals[local_id] = (
+                    self.process_arg(value, || Expr::Nullary(NulOp::LocalGet(local_id))),
+                    attrs,
+                );
+            } else {
+                exit_env.locals.remove(local_id);
+            }
+        }
+
+        self.args = args;
+
+        self.blocks.insert(
+            self.func.entry,
+            BlockInfo {
+                func_ctx_id,
+                orig_block_id: Default::default(),
+                start_stmt_idx: 0,
+                kind: BlockKind::Regular,
+                entry_env: Env::default(),
+                exit_env: exit_env.clone(),
+            },
+        );
+
+        let entry_block_id = self.process_branch(
+            None,
+            func_ctx_id,
+            cfg.entry,
+            exit_env,
+            0,
+            BlockKind::Regular,
+        );
+        self.func.blocks[self.func.entry].term = Terminator::Br(entry_block_id);
     }
 
     fn process_params(&mut self, orig_func_ctx_id: FuncCtxId) {
@@ -402,13 +595,13 @@ impl<'a, 'i> Specializer<'a, 'i> {
         trace!("locals:");
 
         for (local_id, &(value, attrs)) in &info.exit_env.locals {
-            trace!("  {local_id:?} = {}", Expr::Value(value, attrs));
+            trace!("  {local_id:?} = {}", format_value(&value, attrs));
         }
 
         trace!("globals:");
 
         for (global_id, &(value, attrs)) in &info.exit_env.globals {
-            trace!("  {global_id:?} = {}", Expr::Value(value, attrs));
+            trace!("  {global_id:?} = {}", format_value(&value, attrs));
         }
 
         let mut skip_terminator = false;
@@ -443,14 +636,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 }
             }
 
-            let mut block = &mut self.func.blocks[block_id];
+            let block = &mut self.func.blocks[block_id];
             let info = &mut self.blocks[block_id];
 
             match *stmt {
                 Stmt::Nop => {}
 
                 Stmt::Drop(_) => {
-                    let expr = stack.pop().unwrap();
+                    let expr = Self::convert_expr(&self.symbolic_ptrs, stack.pop().unwrap());
 
                     if expr.has_side_effect() {
                         trace!("emitting Stmt::Drop for {expr}: has a side effect");
@@ -469,13 +662,32 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 Stmt::GlobalSet(global_id, _) => {
                     let expr = stack.pop().unwrap();
 
-                    if let Some(value) = expr.to_value() {
-                        trace!("set exit_env.globals[{global_id:?}] <- {expr}");
-                        info.exit_env.globals.insert(global_id, value);
-                    } else {
-                        trace!("forgetting exit_env.globals[{global_id:?}]: {expr} is not a value");
-                        info.exit_env.globals.remove(global_id);
-                        block.body.push(Stmt::GlobalSet(global_id, expr));
+                    match expr {
+                        Expr::Value(value @ Value::Ptr(_), attrs) => {
+                            trace!("set exit_env.globals[{global_id:?}] <- {expr}");
+                            info.exit_env.globals.insert(global_id, (value, attrs));
+                            trace!("emitting Stmt::GlobalSet for the symbolic pointer");
+                            block.body.push(Stmt::GlobalSet(
+                                global_id,
+                                Self::convert_expr(&self.symbolic_ptrs, expr),
+                            ));
+                        }
+
+                        Expr::Value(value, attrs) => {
+                            trace!("set exit_env.globals[{global_id:?}] <- {expr}");
+                            info.exit_env.globals.insert(global_id, (value, attrs));
+                        }
+
+                        _ => {
+                            trace!(
+                                "forgetting exit_env.globals[{global_id:?}]: {expr} is not a value"
+                            );
+                            info.exit_env.globals.remove(global_id);
+                            block.body.push(Stmt::GlobalSet(
+                                global_id,
+                                Self::convert_expr(&self.symbolic_ptrs, expr),
+                            ));
+                        }
                     }
                 }
 
@@ -490,9 +702,14 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         );
                     }
 
-                    block
-                        .body
-                        .push(Stmt::Store(mem_arg, store, Box::new([base_addr, value])));
+                    block.body.push(Stmt::Store(
+                        mem_arg,
+                        store,
+                        Box::new([
+                            Self::convert_expr(&self.symbolic_ptrs, base_addr),
+                            Self::convert_expr(&self.symbolic_ptrs, value),
+                        ]),
+                    ));
                 }
 
                 Stmt::Call(Call::Direct {
@@ -526,7 +743,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 }) => {
                     let ret_local_id = ret_local_id
                         .map(|ret_local_id| self.local_map[&(info.func_ctx_id, ret_local_id)]);
-                    let mut index = Some(stack.pop().unwrap());
+                    let mut index = Some(Self::convert_expr(
+                        &self.symbolic_ptrs,
+                        stack.pop().unwrap(),
+                    ));
                     let mut args = stack.drain(stack.len() - args.len()..).collect();
 
                     'spec: {
@@ -577,21 +797,24 @@ impl<'a, 'i> Specializer<'a, 'i> {
                                     skip_terminator = true;
                                     break 'body;
                                 }
-
-                                block = &mut self.func.blocks[block_id];
                             }
                         }
                     }
 
                     if let Some(index) = index {
                         trace!("emitting an indirect call");
-                        block.body.push(Stmt::Call(Call::Indirect {
+                        self.flush_global_env(block_id);
+                        self.func.blocks[block_id].body.push(Stmt::Call(Call::Indirect {
                             ret_local_id,
                             ty_id,
                             table_id,
-                            args,
+                            args: args
+                                .into_iter()
+                                .map(|arg| Self::convert_expr(&self.symbolic_ptrs, arg))
+                                .collect(),
                             index: Box::new(index),
                         }));
+                        self.assume_clobbered_env(block_id);
 
                         if let Some(ret_local_id) = ret_local_id {
                             trace!(
@@ -642,7 +865,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 }
 
                 Terminator::If(_, [orig_then_block_id, orig_else_block_id]) => {
-                    let condition = stack.pop().unwrap();
+                    let condition = Self::convert_expr(&self.symbolic_ptrs, stack.pop().unwrap());
                     let exit_env = info.exit_env.clone();
 
                     match condition
@@ -697,7 +920,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 }
 
                 Terminator::Switch(_, ref orig_block_ids) => {
-                    let index = stack.pop().unwrap();
+                    let index = Self::convert_expr(&self.symbolic_ptrs, stack.pop().unwrap());
                     let exit_env = info.exit_env.clone();
 
                     let orig_target_block_id = index.to_value().map(|(value, _)| {
@@ -773,8 +996,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         );
                         self.func.blocks[block_id].term = Terminator::Br(target_block_id);
                     } else {
-                        self.flush_globals(block_id);
-                        let expr = expr.is_some().then(|| stack.pop().unwrap());
+                        self.flush_global_env(block_id);
+                        let expr = expr
+                            .is_some()
+                            .then(|| Self::convert_expr(&self.symbolic_ptrs, stack.pop().unwrap()));
                         self.func.blocks[block_id].term = Terminator::Return(expr);
                     }
                 }
@@ -787,7 +1012,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
     fn process_expr(
         &mut self,
         block_id: BlockId,
-        stack: &mut Vec<Expr>,
+        stack: &mut Vec<Expr<()>>,
         expr: &Expr,
     ) -> Result<()> {
         let mut tasks = vec![(0, expr)];
@@ -801,7 +1026,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 trace!("processing an expr: {expr}");
 
                 match *expr {
-                    Expr::Value(value, attrs) => stack.push(Expr::Value(value, attrs)),
+                    Expr::Value(value, attrs) => stack.push(Expr::Value(value.lift_ptr(), attrs)),
                     Expr::Nullary(op) => self.process_nul_op(block_id, stack, op)?,
                     Expr::Unary(op, _) => self.process_un_op(block_id, stack, op)?,
                     Expr::Binary(op, _) => self.process_bin_op(block_id, stack, op)?,
@@ -820,7 +1045,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
     fn process_nul_op(
         &mut self,
         block_id: BlockId,
-        stack: &mut Vec<Expr>,
+        stack: &mut Vec<Expr<()>>,
         mut op: NulOp,
     ) -> Result<()> {
         let info = &mut self.blocks[block_id];
@@ -829,7 +1054,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
             *local_id = self.local_map[&(info.func_ctx_id, *local_id)];
         };
 
-        let try_process = || -> Option<Expr> {
+        let try_process = || -> Option<Expr<()>> {
             Some(match op {
                 NulOp::LocalGet(local_id) => info.exit_env.locals.get(local_id).copied()?.into(),
                 NulOp::GlobalGet(global_id) => {
@@ -844,10 +1069,15 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(())
     }
 
-    fn process_un_op(&mut self, _block_id: BlockId, stack: &mut Vec<Expr>, op: UnOp) -> Result<()> {
+    fn process_un_op(
+        &mut self,
+        _block_id: BlockId,
+        stack: &mut Vec<Expr<()>>,
+        op: UnOp,
+    ) -> Result<()> {
         let arg = stack.pop().unwrap();
 
-        let try_process = || -> Option<Expr> {
+        let try_process = || -> Option<Expr<()>> {
             let &Expr::Value(value, attrs) = &arg else {
                 return None;
             };
@@ -995,14 +1225,16 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         }
                     };
 
-                    Expr::Value(load.load(bytes), attrs.deref_attrs())
+                    Expr::Value(load.load(bytes).lift_ptr(), attrs.deref_attrs())
                 }
 
                 UnOp::MemoryGrow(_mem_id) => return None,
             })
         };
 
-        stack.push(try_process().unwrap_or_else(|| Expr::Unary(op, Box::new(arg))));
+        stack.push(try_process().unwrap_or_else(|| {
+            Expr::Unary(op, Box::new(Self::convert_expr(&self.symbolic_ptrs, arg)))
+        }));
 
         Ok(())
     }
@@ -1010,13 +1242,13 @@ impl<'a, 'i> Specializer<'a, 'i> {
     fn process_bin_op(
         &mut self,
         _block_id: BlockId,
-        stack: &mut Vec<Expr>,
+        stack: &mut Vec<Expr<()>>,
         op: BinOp,
     ) -> Result<()> {
         let mut args: [_; 2] = array::from_fn(|_| stack.pop().unwrap());
         args.reverse();
 
-        let try_process = || -> Option<Expr> {
+        let try_process = || -> Option<Expr<()>> {
             let &[Expr::Value(lhs, lhs_attrs), Expr::Value(rhs, rhs_attrs)] = &args else {
                 return None;
             };
@@ -1024,13 +1256,29 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
             Some(match op {
                 BinOp::I32Add => Expr::Value(
-                    Value::I32(lhs.to_i32()?.wrapping_add(rhs.to_i32()?)),
+                    match (lhs, rhs) {
+                        (Value::I32(lhs), Value::I32(rhs)) => Value::I32(lhs.wrapping_add(rhs)),
+
+                        (Value::I32(offset), Value::Ptr(ptr))
+                        | (Value::Ptr(ptr), Value::I32(offset)) => Value::Ptr(ptr.add(offset)),
+
+                        _ => return None,
+                    },
                     lhs_attrs.addsub_attrs(&rhs_attrs),
                 ),
+
                 BinOp::I32Sub => Expr::Value(
-                    Value::I32(lhs.to_i32()?.wrapping_sub(rhs.to_i32()?)),
+                    match (lhs, rhs) {
+                        (Value::I32(lhs), Value::I32(rhs)) => Value::I32(lhs.wrapping_sub(rhs)),
+
+                        (Value::I32(offset), Value::Ptr(ptr))
+                        | (Value::Ptr(ptr), Value::I32(offset)) => Value::Ptr(ptr.sub(offset)),
+
+                        _ => return None,
+                    },
                     lhs_attrs.addsub_attrs(&rhs_attrs),
                 ),
+
                 BinOp::I32Mul => Expr::Value(
                     Value::I32(lhs.to_i32()?.wrapping_mul(rhs.to_i32()?)),
                     meet_attrs,
@@ -1333,7 +1581,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
             })
         };
 
-        stack.push(try_process().unwrap_or_else(|| Expr::Binary(op, Box::new(args))));
+        stack.push(try_process().unwrap_or_else(|| {
+            Expr::Binary(
+                op,
+                Box::new(args.map(|expr| Self::convert_expr(&self.symbolic_ptrs, expr))),
+            )
+        }));
 
         Ok(())
     }
@@ -1341,7 +1594,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
     fn process_tern_op(
         &mut self,
         _block_id: BlockId,
-        stack: &mut Vec<Expr>,
+        stack: &mut Vec<Expr<()>>,
         op: TernOp,
     ) -> Result<()> {
         let [arg2, arg1, arg0] = array::from_fn(|_| stack.pop().unwrap());
@@ -1355,7 +1608,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 },
             }
 
-            Expr::Ternary(op, Box::new([arg0, arg1, arg2]))
+            Expr::Ternary(
+                op,
+                Box::new(
+                    [arg0, arg1, arg2].map(|expr| Self::convert_expr(&self.symbolic_ptrs, expr)),
+                ),
+            )
         };
 
         stack.push(result);
@@ -1369,7 +1627,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         next_stmt_idx: usize,
         ret_local_id: Option<LocalId>,
         func_id: FuncId,
-        args: Vec<Expr>,
+        args: Vec<Expr<()>>,
         inline_disposition: InlineDisposition,
     ) -> Result<bool> {
         trace!(
@@ -1400,6 +1658,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 }
                 IntrinsicDecl::ConstPtr => {
                     self.process_intr_const_ptr(block_id, ret_local_id.unwrap(), &args)?
+                }
+                IntrinsicDecl::SymbolicPtr => {
+                    self.process_intr_symbolic_ptr(block_id, ret_local_id.unwrap(), &args)?
                 }
                 IntrinsicDecl::PropagateLoad => {
                     self.process_intr_propagate_load(block_id, ret_local_id.unwrap(), &args)?
@@ -1500,10 +1761,16 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 let target_func_id = if inline_mode == InlineMode::Outline {
                     trace!("replacing a direct call to {func_id:?} with a specialized version");
 
-                    match self
-                        .interp
-                        .specialize(func_id, args.iter().map(Expr::to_value).collect())
-                    {
+                    let args = args
+                        .iter()
+                        .map(|arg| match arg.to_value() {
+                            Some((Value::Ptr(_), _)) => None,
+                            Some((value, attrs)) => Some((value.unwrap_concrete(), attrs)),
+                            None => None,
+                        })
+                        .collect();
+
+                    match self.interp.specialize(func_id, args) {
                         Ok(spec_func_id) => spec_func_id,
                         Err(e) => {
                             warn!("specialization failed: {e}");
@@ -1516,15 +1783,18 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 };
 
                 trace!("emitting a direct call to {target_func_id:?}");
-                self.flush_globals(block_id);
+                self.flush_global_env(block_id);
                 self.func.blocks[block_id]
                     .body
                     .push(Stmt::Call(Call::Direct {
                         ret_local_id,
                         func_id: target_func_id,
-                        args,
+                        args: args
+                            .into_iter()
+                            .map(|expr| Self::convert_expr(&self.symbolic_ptrs, expr))
+                            .collect(),
                     }));
-                self.assume_clobbered_globals(block_id);
+                self.assume_clobbered_env(block_id);
 
                 if let Some(ret_local_id) = ret_local_id {
                     trace!(
@@ -1556,7 +1826,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         &mut self,
         block_id: BlockId,
         ret_local_id: LocalId,
-        args: &Vec<Expr>,
+        args: &Vec<Expr<()>>,
     ) -> Result<bool> {
         let Some(idx) = args[0].to_value().map(|(value, _)| value.to_u32().unwrap()) else {
             return Ok(false);
@@ -1634,7 +1904,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         &mut self,
         block_id: BlockId,
         ret_local_id: LocalId,
-        args: &Vec<Expr>,
+        args: &Vec<Expr<()>>,
     ) -> Result<bool> {
         self.set_local(
             block_id,
@@ -1648,11 +1918,58 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(true)
     }
 
+    fn process_intr_symbolic_ptr(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+        args: &Vec<Expr<()>>,
+    ) -> Result<bool> {
+        match args[0].clone() {
+            expr @ Expr::Value(Value::Ptr(_), _) => {
+                self.set_local(block_id, ret_local_id, expr);
+            }
+
+            expr => {
+                let id = *self
+                    .symbolic_ptr_locals
+                    .entry(ret_local_id)
+                    .unwrap()
+                    .or_insert_with(|| {
+                        let id = self.symbolic_ptrs.len().try_into().unwrap();
+                        self.symbolic_ptrs.push(ret_local_id);
+                        self.func.blocks[block_id].body.push(Stmt::LocalSet(
+                            ret_local_id,
+                            Self::convert_expr(&self.symbolic_ptrs, expr),
+                        ));
+
+                        id
+                    });
+
+                let result = Value::Ptr(Ptr {
+                    base: (),
+                    id,
+                    offset: 0,
+                });
+
+                trace!(
+                    "set exit_env.locals[{ret_local_id:?}] <- {}",
+                    format_value(&result, Default::default()),
+                );
+                self.blocks[block_id]
+                    .exit_env
+                    .locals
+                    .insert(ret_local_id, (result, Default::default()));
+            }
+        }
+
+        Ok(true)
+    }
+
     fn process_intr_propagate_load(
         &mut self,
         block_id: BlockId,
         ret_local_id: LocalId,
-        args: &Vec<Expr>,
+        args: &Vec<Expr<()>>,
     ) -> Result<bool> {
         self.set_local(
             block_id,
@@ -1702,7 +2019,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         &mut self,
         block_id: BlockId,
         ret_local_id: LocalId,
-        args: &Vec<Expr>,
+        args: &Vec<Expr<()>>,
     ) -> Result<bool> {
         self.set_local(
             block_id,
@@ -1726,7 +2043,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         &mut self,
         block_id: BlockId,
         ret_local_id: LocalId,
-        args: &Vec<Expr>,
+        args: &Vec<Expr<()>>,
     ) -> Result<bool> {
         self.set_local(
             block_id,
@@ -1858,35 +2175,163 @@ impl<'a, 'i> Specializer<'a, 'i> {
         block_id
     }
 
-    fn flush_globals_in(entry_env: &Env, exit_env: &Env, block: &mut Block) {
-        let flushed_globals = exit_env
-            .globals
-            .iter()
-            .filter(|&(global_id, (exit_value, _))| {
-                !entry_env
-                    .globals
-                    .get(global_id)
-                    .is_some_and(|(entry_value, _)| exit_value == entry_value)
-            })
-            .collect::<Vec<_>>();
+    fn flush_env<B: BlockProvider>(
+        symbolic_ptrs: &Vec<LocalId>,
+        mem_id: MemoryId,
+        exit_env: &Env,
+        entry_env: Option<&Env>,
+        global_env_only: bool,
+        mut target_block: B,
+    ) {
+        fn flush_vars<K: Key>(
+            block: &mut Block,
+            exit_vars: &SecondaryMap<K, (Value<()>, ValueAttrs)>,
+            entry_vars: Option<&SecondaryMap<K, (Value<()>, ValueAttrs)>>,
+            make_stmt: impl Fn(K, Expr) -> Stmt,
+        ) {
+            for (id, &(lhs_value, lhs_attrs)) in exit_vars {
+                if entry_vars.is_some_and(|entry_vars| entry_vars.contains_key(id)) {
+                    continue;
+                }
 
-        for (global_id, &(value, attrs)) in flushed_globals {
-            block
-                .body
-                .push(Stmt::GlobalSet(global_id, Expr::Value(value, attrs)));
+                let lhs_value = match lhs_value {
+                    Value::Ptr(_) => continue,
+                    _ => lhs_value.unwrap_concrete(),
+                };
+
+                trace!("  saving {id:?} = {}", format_value(&lhs_value, lhs_attrs));
+                block
+                    .body
+                    .push(make_stmt(id, Expr::Value(lhs_value, lhs_attrs)));
+            }
+        }
+
+        if !global_env_only {
+            flush_vars(
+                target_block.get(),
+                &exit_env.locals,
+                entry_env.map(|entry_env| &entry_env.locals),
+                Stmt::LocalSet,
+            );
+        }
+
+        flush_vars(
+            target_block.get(),
+            &exit_env.globals,
+            entry_env.map(|entry_env| &entry_env.globals),
+            Stmt::GlobalSet,
+        );
+
+        for (mem_idx, (mem_slice, &base_local_id)) in
+            exit_env.mem.iter().zip(symbolic_ptrs).enumerate()
+        {
+            let mut flush_mask = mem_slice.init.clone();
+            let rhs_iter = entry_env
+                .and_then(|entry_env| entry_env.mem.get(mem_idx))
+                .map(|mem_slice| mem_slice.init.iter().by_vals())
+                .into_iter()
+                .flatten();
+
+            for (lhs, rhs) in flush_mask.iter_mut().zip(rhs_iter) {
+                let new_value = *lhs & !rhs;
+                lhs.commit(new_value);
+            }
+
+            let mut idx_iter = flush_mask.iter_ones();
+
+            while let Some(idx) = idx_iter.next() {
+                let store = if flush_mask.get(idx..idx + 8).is_some_and(BitSlice::all) {
+                    Store::I64(I64Store::Eight)
+                } else if flush_mask.get(idx..idx + 4).is_some_and(BitSlice::all) {
+                    Store::I32(I32Store::Four)
+                } else if flush_mask.get(idx..idx + 2).is_some_and(BitSlice::all) {
+                    Store::I32(I32Store::Two)
+                } else {
+                    Store::I32(I32Store::One)
+                };
+
+                for i in 0..(store.dst_size() - 1) {
+                    debug_assert_eq!(idx_iter.next().unwrap(), idx + i + 1);
+                }
+
+                target_block.get().body.push(Stmt::Store(
+                    MemArg {
+                        mem_id,
+                        offset: idx.try_into().unwrap(),
+                        align: 1,
+                    },
+                    store,
+                    Box::new([
+                        Expr::Nullary(NulOp::LocalGet(base_local_id)),
+                        Expr::Value(
+                            match store {
+                                Store::I64(_) => {
+                                    Value::I64(mem_slice.read_u64(idx).unwrap() as i64)
+                                }
+                                Store::I32(store) => Value::I32(match store {
+                                    I32Store::Four => mem_slice.read_u32(idx).unwrap() as i32,
+                                    I32Store::Two => mem_slice.read_u16(idx).unwrap() as i32,
+                                    I32Store::One => mem_slice.read_u8(idx).unwrap() as i32,
+                                }),
+                                _ => unreachable!(),
+                            },
+                            Default::default(),
+                        ),
+                    ]),
+                ));
+            }
         }
     }
 
-    fn flush_globals(&mut self, block_id: BlockId) {
+    fn flush_global_env(&mut self, block_id: BlockId) {
+        struct TargetBlockProvider<'a> {
+            func: &'a mut FuncBody,
+            block_id: BlockId,
+        }
+
+        impl BlockProvider for TargetBlockProvider<'_> {
+            fn get(&mut self) -> &mut Block {
+                &mut self.func.blocks[self.block_id]
+            }
+        }
+
         let info = &self.blocks[block_id];
-        Self::flush_globals_in(
-            &info.entry_env,
+        Self::flush_env(
+            &self.symbolic_ptrs,
+            self.interp.module.default_mem,
             &info.exit_env,
-            &mut self.func.blocks[block_id],
+            None,
+            true,
+            TargetBlockProvider {
+                func: &mut self.func,
+                block_id,
+            },
         );
     }
 
     fn flush_envs(&mut self) {
+        struct BridgeBlockProvider<'a> {
+            func: &'a mut FuncBody,
+            bridge_block_id: &'a mut Option<BlockId>,
+            succ_block_id: BlockId,
+        }
+
+        impl BlockProvider for BridgeBlockProvider<'_> {
+            fn get(&mut self) -> &mut Block {
+                let bridge_block_id = *self.bridge_block_id.get_or_insert_with(|| {
+                    let bridge_block_id = self.func.blocks.insert(Block {
+                        term: Terminator::Br(self.succ_block_id),
+                        ..Default::default()
+                    });
+                    trace!("  created {bridge_block_id:?}");
+
+                    bridge_block_id
+                });
+
+                &mut self.func.blocks[bridge_block_id]
+            }
+        }
+
         let block_ids = self.func.blocks.keys().collect::<Vec<_>>();
 
         for block_id in block_ids {
@@ -1901,55 +2346,18 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 let entry_env = &self.blocks[succ_block_id].entry_env;
                 let ref mut bridge_block_id = None;
 
-                fn flush<K: Key, F>(
-                    func: &mut FuncBody,
-                    bridge_block_id: &mut Option<BlockId>,
-                    succ_block_id: BlockId,
-                    exit_values: &SecondaryMap<K, (Value, ValueAttrs)>,
-                    entry_values: &SecondaryMap<K, (Value, ValueAttrs)>,
-                    make_stmt: F,
-                ) where
-                    F: Fn(K, Expr) -> Stmt,
-                {
-                    for (id, &(lhs_value, lhs_attrs)) in exit_values {
-                        if entry_values.contains_key(id) {
-                            continue;
-                        }
-
-                        let bridge_block_id = *bridge_block_id.get_or_insert_with(|| {
-                            let bridge_block_id = func.blocks.insert(Block {
-                                term: Terminator::Br(succ_block_id),
-                                ..Default::default()
-                            });
-                            trace!("  created {bridge_block_id:?}");
-
-                            bridge_block_id
-                        });
-
-                        trace!("  saving {id:?} = {}", Expr::Value(lhs_value, lhs_attrs));
-                        func.blocks[bridge_block_id]
-                            .body
-                            .push(make_stmt(id, Expr::Value(lhs_value, lhs_attrs)));
-                    }
-                }
-
                 trace!("flushing the environment along the edge {block_id:?} -> {succ_block_id:?}");
-
-                flush(
-                    &mut self.func,
-                    bridge_block_id,
-                    succ_block_id,
-                    &exit_env.locals,
-                    &entry_env.locals,
-                    Stmt::LocalSet,
-                );
-                flush(
-                    &mut self.func,
-                    bridge_block_id,
-                    succ_block_id,
-                    &exit_env.globals,
-                    &entry_env.globals,
-                    Stmt::GlobalSet,
+                Self::flush_env(
+                    &self.symbolic_ptrs,
+                    self.interp.module.default_mem,
+                    exit_env,
+                    Some(entry_env),
+                    false,
+                    BridgeBlockProvider {
+                        func: &mut self.func,
+                        bridge_block_id,
+                        succ_block_id,
+                    },
                 );
 
                 if let Some(bridge_block_id) = *bridge_block_id {
@@ -1968,22 +2376,16 @@ impl<'a, 'i> Specializer<'a, 'i> {
         }
     }
 
-    fn assume_clobbered_globals(&mut self, block_id: BlockId) {
-        trace!("assuming all globals are clobbered");
+    fn assume_clobbered_env(&mut self, block_id: BlockId) {
+        trace!("assuming the global environment is clobbered");
         let info = &mut self.blocks[block_id];
-        let clobbered_global_ids = info
-            .exit_env
+        info.exit_env
             .globals
-            .keys()
-            .filter(|&global_id| self.interp.module.globals[global_id].ty.mutable)
-            .collect::<Vec<_>>();
-
-        for global_id in clobbered_global_ids {
-            info.exit_env.globals.remove(global_id);
-        }
+            .retain(|global_id, _| !self.interp.module.globals[global_id].ty.mutable);
+        info.exit_env.mem.clear();
     }
 
-    fn is_recursive_call(&self, block_id: BlockId, func_id: FuncId, args: &[Expr]) -> bool {
+    fn is_recursive_call(&self, block_id: BlockId, func_id: FuncId, args: &[Expr<()>]) -> bool {
         let mut func_ctx_id = self.blocks[block_id].func_ctx_id;
 
         loop {
@@ -2007,18 +2409,33 @@ impl<'a, 'i> Specializer<'a, 'i> {
         }
     }
 
-    fn set_local(&mut self, block_id: BlockId, local_id: LocalId, expr: Expr) {
+    fn set_local(&mut self, block_id: BlockId, local_id: LocalId, expr: Expr<()>) {
         let exit_env = &mut self.blocks[block_id].exit_env;
 
-        if let Some(value) = expr.to_value() {
-            trace!("set exit_env.locals[{local_id:?}] <- {expr}");
-            exit_env.locals.insert(local_id, value);
-        } else {
-            trace!("forgetting exit_env.locals[{local_id:?}]: {expr} is not a value");
-            exit_env.locals.remove(local_id);
-            self.func.blocks[block_id]
-                .body
-                .push(Stmt::LocalSet(local_id, expr));
+        match expr {
+            Expr::Value(value @ Value::Ptr(_), attrs) => {
+                trace!("set exit_env.locals[{local_id:?}] <- {expr}");
+                exit_env.locals.insert(local_id, (value, attrs));
+                trace!("emitting Stmt::LocalSet for the symbolic pointer");
+                self.func.blocks[block_id].body.push(Stmt::LocalSet(
+                    local_id,
+                    Self::convert_expr(&self.symbolic_ptrs, expr),
+                ));
+            }
+
+            Expr::Value(value, attrs) => {
+                trace!("set exit_env.locals[{local_id:?}] <- {expr}");
+                exit_env.locals.insert(local_id, (value, attrs));
+            }
+
+            _ => {
+                trace!("forgetting exit_env.locals[{local_id:?}]: {expr} is not a value");
+                exit_env.locals.remove(local_id);
+                self.func.blocks[block_id].body.push(Stmt::LocalSet(
+                    local_id,
+                    Self::convert_expr(&self.symbolic_ptrs, expr),
+                ));
+            }
         }
     }
 
@@ -2038,6 +2455,28 @@ impl<'a, 'i> Specializer<'a, 'i> {
         match self.interp.module.funcs[func_id].name() {
             Some(name) => format!("{name}.{suffix}"),
             None => format!("{func_id:?}.{suffix}"),
+        }
+    }
+
+    fn convert_expr(symbolic_ptrs: &Vec<LocalId>, expr: Expr<()>) -> Expr {
+        match expr {
+            Expr::Value(Value::Ptr(Ptr { id, offset: 0, .. }), _) => {
+                Expr::Nullary(NulOp::LocalGet(symbolic_ptrs[id as usize]))
+            }
+
+            Expr::Value(Value::Ptr(Ptr { id, offset, .. }), _) => Expr::Binary(
+                BinOp::I32Add,
+                Box::new([
+                    Expr::Nullary(NulOp::LocalGet(symbolic_ptrs[id as usize])),
+                    Expr::Value(Value::I32(offset), Default::default()),
+                ]),
+            ),
+
+            Expr::Value(value, attrs) => Expr::Value(value.unwrap_concrete(), attrs),
+            Expr::Nullary(op) => Expr::Nullary(op),
+            Expr::Unary(op, expr) => Expr::Unary(op, expr),
+            Expr::Binary(op, exprs) => Expr::Binary(op, exprs),
+            Expr::Ternary(op, exprs) => Expr::Ternary(op, exprs),
         }
     }
 }

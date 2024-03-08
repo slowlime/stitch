@@ -385,6 +385,9 @@ impl Encoder<'_> {
             ConstExpr::Value(Value::F64(value), _) => {
                 wasm_encoder::ConstExpr::f64_const(value.to_f64())
             }
+            ConstExpr::Value(Value::Ptr(_), _) => {
+                panic!("a global is initialized with a symbolic pointer value")
+            }
             ConstExpr::GlobalGet(global_id) => {
                 wasm_encoder::ConstExpr::global_get(self.globals[global_id] as u32)
             }
@@ -435,6 +438,7 @@ impl<'a> BodyEncoder<'a, '_> {
                 Value::I64(value) => Instruction::I64Const(*value),
                 Value::F32(value) => Instruction::F32Const(value.to_f32()),
                 Value::F64(value) => Instruction::F64Const(value.to_f64()),
+                Value::Ptr(_) => panic!("encountered a symbolic pointer value expression"),
             }),
 
             Expr::Nullary(op) => self.nullary(match *op {

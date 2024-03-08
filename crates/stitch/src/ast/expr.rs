@@ -10,14 +10,67 @@ use super::ty::{BlockType, ValType};
 use super::{BlockId, FuncId, GlobalId, LocalId, MemoryId, TableId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Value {
+pub enum Never {}
+
+#[derive(Debug, Clone, Copy, Eq, Hash)]
+pub struct Ptr<E = Never> {
+    pub base: E,
+    pub id: u32,
+    pub offset: i32,
+}
+
+impl<E> Ptr<E> {
+    pub fn add(self, offset: i32) -> Self {
+        Self {
+            base: self.base,
+            id: self.id,
+            offset: self.offset + offset,
+        }
+    }
+
+    pub fn sub(self, offset: i32) -> Self {
+        Self {
+            base: self.base,
+            id: self.id,
+            offset: self.offset - offset,
+        }
+    }
+
+    pub fn as_ref(&self) -> Ptr<&E> {
+        let Self {
+            ref base,
+            id,
+            offset,
+        } = *self;
+
+        Ptr { base, id, offset }
+    }
+
+    pub fn map<T>(self, f: impl FnOnce(E) -> T) -> Ptr<T> {
+        Ptr {
+            base: f(self.base),
+            id: self.id,
+            offset: self.offset,
+        }
+    }
+}
+
+impl<E> PartialEq for Ptr<E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.offset == other.offset
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Value<E = Never> {
     I32(i32),
     I64(i64),
     F32(F32),
     F64(F64),
+    Ptr(Ptr<E>),
 }
 
-impl Value {
+impl<E> Value<E> {
     pub fn default_for(val_ty: &ValType) -> Self {
         match val_ty {
             ValType::I32 => Self::I32(0),
@@ -29,20 +82,10 @@ impl Value {
 
     pub fn val_ty(&self) -> ValType {
         match self {
-            Self::I32(_) => ValType::I32,
+            Self::I32(_) | Self::Ptr(_) => ValType::I32,
             Self::I64(_) => ValType::I64,
             Self::F32(_) => ValType::F32,
             Self::F64(_) => ValType::F64,
-        }
-    }
-
-    pub fn meet(&self, other: &Self) -> Option<Self> {
-        match (self, other) {
-            (Self::I32(lhs), Self::I32(rhs)) if lhs == rhs => Some(self.clone()),
-            (Self::I64(lhs), Self::I64(rhs)) if lhs == rhs => Some(self.clone()),
-            (Self::F32(lhs), Self::F32(rhs)) if lhs == rhs => Some(self.clone()),
-            (Self::F64(lhs), Self::F64(rhs)) if lhs == rhs => Some(self.clone()),
-            _ => None,
         }
     }
 
@@ -68,6 +111,70 @@ impl Value {
 
     pub fn to_f64(&self) -> Option<F64> {
         try_match!(*self, Self::F64(value) => value)
+    }
+
+    pub fn to_ptr(&self) -> Option<Ptr<E>>
+    where
+        E: Copy,
+    {
+        try_match!(*self, Self::Ptr(value) => value)
+    }
+
+    pub fn into_ptr(self) -> Option<Ptr<E>> {
+        try_match!(self, Self::Ptr(value) => value)
+    }
+
+    pub fn as_ref_ptr(&self) -> Value<&E> {
+        match *self {
+            Self::I32(value) => Value::I32(value),
+            Self::I64(value) => Value::I64(value),
+            Self::F32(value) => Value::F32(value),
+            Self::F64(value) => Value::F64(value),
+            Self::Ptr(ref value) => Value::Ptr(value.as_ref()),
+        }
+    }
+
+    pub fn map_ptr<T>(self, f: impl FnOnce(Ptr<E>) -> Ptr<T>) -> Value<T> {
+        match self {
+            Self::I32(value) => Value::I32(value),
+            Self::I64(value) => Value::I64(value),
+            Self::F32(value) => Value::F32(value),
+            Self::F64(value) => Value::F64(value),
+            Self::Ptr(value) => Value::Ptr(f(value)),
+        }
+    }
+
+    pub fn unwrap_concrete<T>(self) -> Value<T> {
+        self.map_ptr(|_| panic!("a symbolic pointer is not a concrete"))
+    }
+
+    pub fn with_dropped_ptr_base(&self) -> Value<()> {
+        self.as_ref_ptr().map_ptr(|ptr| ptr.map(|_| ()))
+    }
+}
+
+impl<E: Clone> Value<E> {
+    pub fn meet(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::I32(lhs), Self::I32(rhs)) if lhs == rhs => Some(self.clone()),
+            (Self::I64(lhs), Self::I64(rhs)) if lhs == rhs => Some(self.clone()),
+            (Self::F32(lhs), Self::F32(rhs)) if lhs == rhs => Some(self.clone()),
+            (Self::F64(lhs), Self::F64(rhs)) if lhs == rhs => Some(self.clone()),
+            (Self::Ptr(lhs), Self::Ptr(rhs)) if lhs == rhs => Some(self.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl Value<Never> {
+    pub fn lift_ptr<T>(self) -> Value<T> {
+        match self {
+            Self::I32(value) => Value::I32(value),
+            Self::I64(value) => Value::I64(value),
+            Self::F32(value) => Value::F32(value),
+            Self::F64(value) => Value::F64(value),
+            Self::Ptr(value) => match value.base {},
+        }
     }
 }
 
@@ -99,13 +206,47 @@ impl ValueAttrs {
     }
 
     pub fn addsub_attrs(&self, other: &Self) -> ValueAttrs {
-        self.meet(other) | (*self | *other) & Self::CONST_PTR
+        const OR_FLAGS: ValueAttrs = ValueAttrs::CONST_PTR;
+
+        self.meet(other) | (*self | *other) & OR_FLAGS
     }
 }
 
+pub fn format_value<E>(value: &Value<E>, attrs: ValueAttrs) -> impl Display + '_ {
+    struct ValuePrinter<'a, E>(&'a Value<E>, ValueAttrs);
+
+    impl<E> Display for ValuePrinter<'_, E> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self.0 {
+                Value::I32(value) => write!(f, "(i32.const {value}")?,
+                Value::I64(value) => write!(f, "(i64.const {value}")?,
+                Value::F32(value) => write!(f, "(f32.const {value}")?,
+                Value::F64(value) => write!(f, "(f64.const {value}")?,
+                Value::Ptr(Ptr { id, offset, .. }) => {
+                    write!(f, "(ptr.new id={id} offset={offset}")?
+                }
+            }
+
+            if !self.1.is_empty() {
+                for (idx, (name, _)) in self.1.iter_names().enumerate() {
+                    if idx == 0 {
+                        write!(f, " {name}")?;
+                    } else {
+                        write!(f, " | {name}")?;
+                    }
+                }
+            }
+
+            write!(f, ")")
+        }
+    }
+
+    ValuePrinter(value, attrs)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ConstExpr {
-    Value(Value, ValueAttrs),
+pub enum ConstExpr<E = Never> {
+    Value(Value<E>, ValueAttrs),
     GlobalGet(GlobalId),
 }
 
@@ -114,7 +255,8 @@ impl TryFrom<Expr> for ConstExpr {
 
     fn try_from(expr: Expr) -> Result<Self, Self::Error> {
         match expr {
-            Expr::Value(value, attrs) => Ok(Self::Value(value, attrs)),
+            Expr::Value(Value::Ptr(_), _) => Err(()),
+            Expr::Value(value, attrs) => Ok(Self::Value(value.unwrap_concrete(), attrs)),
             Expr::Nullary(NulOp::GlobalGet(global_id)) => Ok(Self::GlobalGet(global_id)),
             _ => Err(()),
         }
@@ -1530,6 +1672,7 @@ impl Expr {
                             Value::I64(value) => write!(self.f, "i64.const {value}")?,
                             Value::F32(value) => write!(self.f, "f32.const {value}")?,
                             Value::F64(value) => write!(self.f, "f64.const {value}")?,
+                            Value::Ptr(Ptr { base, .. }) => match *base {},
                         }
 
                         write!(self.f, " {attrs:?}")?

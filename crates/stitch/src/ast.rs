@@ -41,6 +41,7 @@ pub enum IntrinsicDecl {
     Specialize,
     Unknown,
     ConstPtr,
+    SymbolicPtr,
     PropagateLoad,
     PrintValue,
     PrintStr,
@@ -87,14 +88,14 @@ impl IntrinsicDecl {
             Self::Unknown if func_ty.params.is_empty() && func_ty.ret.is_some() => Ok(()),
             Self::Unknown => Err("[] -> [t]".into()),
 
-            Self::ConstPtr | Self::PropagateLoad
+            Self::ConstPtr | Self::SymbolicPtr | Self::PropagateLoad
                 if func_ty.params.len() == 1
                     && func_ty.params[0] == ValType::I32
                     && func_ty.ret == Some(ValType::I32) =>
             {
                 Ok(())
             }
-            Self::ConstPtr | Self::PropagateLoad => Err("[i32] -> [i32]".into()),
+            Self::ConstPtr | Self::SymbolicPtr | Self::PropagateLoad => Err("[i32] -> [i32]".into()),
 
             Self::PrintValue if func_ty.params.len() == 1 && func_ty.ret.is_none() => Ok(()),
             Self::PrintValue => Err("[t] -> []".into()),
@@ -139,6 +140,7 @@ impl Display for IntrinsicDecl {
                 Self::Specialize => "specialize",
                 Self::Unknown => "unknown",
                 Self::ConstPtr => "const-ptr",
+                Self::SymbolicPtr => "symbolic-ptr",
                 Self::PropagateLoad => "propagate-load",
                 Self::PrintValue => "print-value",
                 Self::PrintStr => "print-str",
@@ -193,6 +195,7 @@ impl Module {
             "specialize" => IntrinsicDecl::Specialize,
             "unknown" => IntrinsicDecl::Unknown,
             "const-ptr" => IntrinsicDecl::ConstPtr,
+            "symbolic-ptr" => IntrinsicDecl::SymbolicPtr,
             "propagate-load" => IntrinsicDecl::PropagateLoad,
             "print-value" => IntrinsicDecl::PrintValue,
             "print-str" => IntrinsicDecl::PrintStr,

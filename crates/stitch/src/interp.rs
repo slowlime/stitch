@@ -31,7 +31,7 @@ fn format_arg_list(args: impl Iterator<Item = Option<ValType>>) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpecSignature {
     orig_func_id: FuncId,
-    args: Vec<Option<(Value, ValueAttrs)>>,
+    args: Vec<Option<(Value<()>, ValueAttrs)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,6 +55,7 @@ pub struct Interpreter<'a> {
     cfgs: SparseSecondaryMap<FuncId, Rc<FuncBody>>,
     args: Vec<Vec<u8>>,
     const_global_ids: HashSet<GlobalId>,
+    next_symbolic_ptr_id: u32,
 }
 
 impl<'a> Interpreter<'a> {
@@ -66,6 +67,7 @@ impl<'a> Interpreter<'a> {
             cfgs: Default::default(),
             args,
             const_global_ids: Default::default(),
+            next_symbolic_ptr_id: 0,
         }
     }
 
@@ -98,7 +100,7 @@ impl<'a> Interpreter<'a> {
     pub fn specialize(
         &mut self,
         func_id: FuncId,
-        args: Vec<Option<(Value, ValueAttrs)>>,
+        args: Vec<Option<(Value<()>, ValueAttrs)>>,
     ) -> Result<FuncId> {
         let func = &self.module.funcs[func_id];
 

@@ -337,7 +337,7 @@ impl<'a> Translator<'a> {
 
     fn do_translate_expr(&mut self, expr: &'a AstExpr) {
         let result = match expr {
-            &AstExpr::Value(value, attrs) => self.push_drop(Expr::Value(value, attrs)),
+            &AstExpr::Value(value, attrs) => self.push_drop(Expr::Value(value.lift_ptr(), attrs)),
 
             AstExpr::Nullary(op) => match *op {
                 AstNulOp::Nop => self.push_stmt(Stmt::Nop),

@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use log::{info, trace};
 use slotmap::{Key, SecondaryMap};
 
-use crate::ast::expr::{Value, ValueAttrs};
+use crate::ast::expr::{format_value, Never, ValueAttrs};
 use crate::ast::ty::{ElemType, FuncType};
 use crate::ast::{
     ConstExpr, Export, ExportDef, FuncId, GlobalDef, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE,
@@ -19,6 +19,9 @@ use crate::interp::{format_arg_list, SpecializedFunc};
 use crate::util::float::{F32, F64};
 
 use super::Interpreter;
+
+type Ptr<E = i32> = crate::ast::expr::Ptr<E>;
+type Value<E = i32> = crate::ast::expr::Value<E>;
 
 #[derive(Debug, Clone, Copy)]
 enum Task<'a> {
@@ -45,6 +48,18 @@ impl<'a> From<&'a [Expr]> for Task<'a> {
     }
 }
 
+impl Value<i32> {
+    pub fn into_concrete<T>(self) -> Value<T> {
+        match self {
+            Self::I32(value) => Value::I32(value),
+            Self::I64(value) => Value::I64(value),
+            Self::F32(value) => Value::F32(value),
+            Self::F64(value) => Value::F64(value),
+            Self::Ptr(_) => Value::I32(self.unwrap_i32()),
+        }
+    }
+}
+
 trait ValueExt {
     fn unwrap_i32(&self) -> i32;
     fn unwrap_u32(&self) -> u32;
@@ -56,11 +71,15 @@ trait ValueExt {
 
 impl ValueExt for Value {
     fn unwrap_i32(&self) -> i32 {
-        self.to_i32().unwrap()
+        match *self {
+            Self::I32(value) => value,
+            Self::Ptr(Ptr { base, offset, .. }) => base + offset,
+            _ => panic!(),
+        }
     }
 
     fn unwrap_u32(&self) -> u32 {
-        self.to_u32().unwrap()
+        self.unwrap_i32() as u32
     }
 
     fn unwrap_i64(&self) -> i64 {
@@ -94,7 +113,7 @@ impl Frame {
     fn set_local(&mut self, local_id: LocalId, value: (Value, ValueAttrs)) {
         trace!(
             "frame.locals[{local_id:?}] <- {}",
-            Expr::Value(value.0, value.1)
+            format_value(&value.0, value.1)
         );
         self.locals[local_id] = value;
     }
@@ -173,8 +192,8 @@ impl Interpreter<'_> {
                         match self.module.globals[global_id].def {
                             GlobalDef::Import(_) => bail!("cannot assign to an imported global"),
                             GlobalDef::Value(ref mut expr) => {
-                                *expr = ConstExpr::Value(value, attrs);
-                                trace!("globals[{global_id:?}] <- {}", Expr::Value(value, attrs));
+                                *expr = ConstExpr::Value(value.into_concrete(), attrs);
+                                trace!("globals[{global_id:?}] <- {}", format_value(&value, attrs));
                             }
                         }
                     }
@@ -185,10 +204,10 @@ impl Interpreter<'_> {
                         let start = (base_addr + mem_arg.offset) as usize;
                         let range = start..start + store.dst_size();
                         let bytes = self.module.get_mem_mut(mem_arg.mem_id, range)?;
-                        store.store(bytes, value);
+                        store.store(bytes, value.into_concrete());
                         trace!(
                             "{store} {} to 0x{base_addr:x} + {offset}: [0x{start:x}..0x{end:x}] <- [{bytes}]",
-                            Expr::Value(value, attrs),
+                            format_value(&value, attrs),
                             offset = mem_arg.offset,
                             end = start + store.dst_size(),
                             bytes = bytes
@@ -337,8 +356,6 @@ impl Interpreter<'_> {
         let mut stack = vec![(0, task.into())];
 
         while let Some(&mut (ref mut subexpr_idx, task)) = stack.last_mut() {
-            let frame = frames.last_mut().unwrap();
-
             let subexpr = match task {
                 Task::Expr(expr) => expr.nth_subexpr(*subexpr_idx),
                 Task::Call(call) => call.nth_subexpr(*subexpr_idx),
@@ -354,7 +371,7 @@ impl Interpreter<'_> {
 
             match task {
                 Task::Expr(expr) => match *expr {
-                    Expr::Value(value, attrs) => frame.stack.push((value, attrs)),
+                    Expr::Value(value, attrs) => self.eval_value(frames, value, attrs)?,
                     Expr::Nullary(op) => self.eval_nul_op(frames, op)?,
                     Expr::Unary(op, _) => self.eval_un_op(frames, op)?,
                     Expr::Binary(op, _) => self.eval_bin_op(frames, op)?,
@@ -372,6 +389,18 @@ impl Interpreter<'_> {
         Ok(())
     }
 
+    fn eval_value(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        value: Value<Never>,
+        attrs: ValueAttrs,
+    ) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        frame.stack.push((value.lift_ptr(), attrs));
+
+        Ok(())
+    }
+
     fn eval_nul_op(&mut self, frames: &mut Vec<Frame>, op: NulOp) -> Result<()> {
         let frame = frames.last_mut().unwrap();
 
@@ -381,7 +410,7 @@ impl Interpreter<'_> {
                 frame.stack.push(value);
                 trace!(
                     "frame.locals[{local_id:?}] -> {}",
-                    Expr::Value(value.0, value.1)
+                    format_value(&value.0, value.1)
                 );
             }
 
@@ -390,8 +419,8 @@ impl Interpreter<'_> {
                     GlobalDef::Import(_) => bail!("cannot evaluate an imported global"),
 
                     GlobalDef::Value(ConstExpr::Value(value, attrs)) => {
-                        frame.stack.push((value, attrs));
-                        trace!("globals[{global_id:?}] -> {}", Expr::Value(value, attrs));
+                        frame.stack.push((value.lift_ptr(), attrs));
+                        trace!("globals[{global_id:?}] -> {}", format_value(&value, attrs));
                     }
 
                     GlobalDef::Value(ConstExpr::GlobalGet(_)) => {
@@ -420,15 +449,15 @@ impl Interpreter<'_> {
 
         let result = match op {
             UnOp::I32Clz => (
-                Value::I32(arg.unwrap_i32().leading_zeros() as i32),
+                Value::I32(arg.unwrap_u32().leading_zeros() as i32),
                 Default::default(),
             ),
             UnOp::I32Ctz => (
-                Value::I32(arg.unwrap_i32().trailing_zeros() as i32),
+                Value::I32(arg.unwrap_u32().trailing_zeros() as i32),
                 Default::default(),
             ),
             UnOp::I32Popcnt => (
-                Value::I32(arg.unwrap_i32().count_ones() as i32),
+                Value::I32(arg.unwrap_u32().count_ones() as i32),
                 Default::default(),
             ),
 
@@ -466,7 +495,7 @@ impl Interpreter<'_> {
                 Default::default(),
             ),
             UnOp::I64Eqz => (
-                Value::I32((arg.unwrap_i32() == 0) as i32),
+                Value::I32((arg.unwrap_i64() == 0) as i32),
                 Default::default(),
             ),
 
@@ -525,7 +554,7 @@ impl Interpreter<'_> {
                 let attrs = arg_attrs.deref_attrs();
                 trace!(
                     "{load} {} from 0x{base_addr:x} + {offset}: [0x{start:x}..0x{end:x}] -> [{bytes}]",
-                    Expr::Value(value, attrs),
+                    format_value(&value, attrs),
                     offset = mem_arg.offset,
                     end = start + load.src_size(),
                     bytes = bytes
@@ -535,7 +564,7 @@ impl Interpreter<'_> {
                         .trim_end(),
                 );
 
-                (value, attrs)
+                (value.lift_ptr(), attrs)
             }
 
             UnOp::MemoryGrow(mem_id) => {
@@ -579,13 +608,25 @@ impl Interpreter<'_> {
 
         frame.stack.push(match op {
             BinOp::I32Add => (
-                Value::I32(lhs.unwrap_i32().wrapping_add(rhs.unwrap_i32())),
+                match (lhs, rhs) {
+                    (Value::I32(offset), Value::Ptr(ptr))
+                    | (Value::Ptr(ptr), Value::I32(offset)) => Value::Ptr(ptr.add(offset)),
+
+                    _ => Value::I32(lhs.unwrap_i32().wrapping_add(rhs.unwrap_i32())),
+                },
                 lhs_attrs.addsub_attrs(&rhs_attrs),
             ),
+
             BinOp::I32Sub => (
-                Value::I32(lhs.unwrap_i32().wrapping_sub(rhs.unwrap_i32())),
+                match (lhs, rhs) {
+                    (Value::I32(offset), Value::Ptr(ptr))
+                    | (Value::Ptr(ptr), Value::I32(offset)) => Value::Ptr(ptr.sub(offset)),
+
+                    _ => Value::I32(lhs.unwrap_i32().wrapping_sub(rhs.unwrap_i32())),
+                },
                 lhs_attrs.addsub_attrs(&rhs_attrs),
             ),
+
             BinOp::I32Mul => (
                 Value::I32(lhs.unwrap_i32().wrapping_mul(rhs.unwrap_i32())),
                 meet_attrs,
@@ -610,7 +651,7 @@ impl Interpreter<'_> {
                 (lhs, rhs) => (Value::I32((lhs % rhs) as i32), meet_attrs),
             },
             BinOp::I32And => (Value::I32(lhs.unwrap_i32() & rhs.unwrap_i32()), meet_attrs),
-            BinOp::I32Or => (Value::I32(lhs.unwrap_i32() & rhs.unwrap_i32()), meet_attrs),
+            BinOp::I32Or => (Value::I32(lhs.unwrap_i32() | rhs.unwrap_i32()), meet_attrs),
             BinOp::I32Xor => (Value::I32(lhs.unwrap_i32() ^ rhs.unwrap_i32()), meet_attrs),
             BinOp::I32Shl => (
                 Value::I32(lhs.unwrap_i32().wrapping_shl(rhs.unwrap_u32())),
@@ -933,6 +974,7 @@ impl Interpreter<'_> {
                 IntrinsicDecl::Specialize => self.eval_intr_specialize(frames, args)?,
                 IntrinsicDecl::Unknown => self.eval_intr_unknown(frames, func_id)?,
                 IntrinsicDecl::ConstPtr => self.eval_intr_const_ptr(frames, args)?,
+                IntrinsicDecl::SymbolicPtr => self.eval_intr_symbolic_ptr(frames, args)?,
                 IntrinsicDecl::PropagateLoad => self.eval_intr_propagate_load(frames, args)?,
                 IntrinsicDecl::PrintValue => self.eval_intr_print_value(args)?,
                 IntrinsicDecl::PrintStr => self.eval_intr_print_str(args)?,
@@ -990,7 +1032,10 @@ impl Interpreter<'_> {
         frames: &mut Vec<Frame>,
         args: Vec<(Value, ValueAttrs)>,
     ) -> Result<()> {
-        let [idx, buf, size, offset] = array::from_fn(|i| args[i].0.unwrap_u32());
+        let idx = args[0].0.unwrap_u32();
+        let buf = args[1].0.unwrap_u32();
+        let size = args[2].0.unwrap_u32();
+        let offset = args[3].0.unwrap_u32();
         let arg = self.args.get(idx as usize).with_context(|| {
             anyhow!(
                 "an interpreter argument index {idx} is out of bounds (provided {})",
@@ -1030,7 +1075,9 @@ impl Interpreter<'_> {
         frames: &mut Vec<Frame>,
         mut args: Vec<(Value, ValueAttrs)>,
     ) -> Result<()> {
-        let [elem_idx, name_addr, name_len] = array::from_fn(|i| args[i].0.unwrap_u32());
+        let elem_idx = args[0].0.unwrap_u32();
+        let name_addr = args[1].0.unwrap_u32();
+        let name_len = args[2].0.unwrap_u32();
         args.drain(..3);
 
         ensure!(
@@ -1097,7 +1144,7 @@ impl Interpreter<'_> {
                 if attrs.contains(ValueAttrs::UNKNOWN) {
                     None
                 } else {
-                    Some((value, attrs))
+                    Some((value.with_dropped_ptr_base(), attrs))
                 }
             })
             .collect();
@@ -1117,7 +1164,9 @@ impl Interpreter<'_> {
             .find(|(_, elem)| elem.is_none())
         {
             Some((idx, elem)) => {
-                trace!("replacing an empty function table slot {idx} with the specialized function id");
+                trace!(
+                    "replacing an empty function table slot {idx} with the specialized function id"
+                );
                 *elem = Some(spec_func_id);
 
                 idx
@@ -1183,6 +1232,26 @@ impl Interpreter<'_> {
         Ok(())
     }
 
+    fn eval_intr_symbolic_ptr(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        let id = self.next_symbolic_ptr_id;
+        self.next_symbolic_ptr_id = self.next_symbolic_ptr_id.checked_add(1).unwrap();
+        frame.stack.push((
+            Value::Ptr(Ptr {
+                base: args[0].0.unwrap_i32(),
+                id,
+                offset: 0,
+            }),
+            args[0].1,
+        ));
+
+        Ok(())
+    }
+
     fn eval_intr_propagate_load(
         &mut self,
         frames: &mut Vec<Frame>,
@@ -1204,13 +1273,17 @@ impl Interpreter<'_> {
             Value::I64(value) => info!("{intr}: {value}"),
             Value::F32(value) => info!("{intr}: {value}"),
             Value::F64(value) => info!("{intr}: {value}"),
+            Value::Ptr(Ptr { base, id, offset }) => {
+                info!("{intr}: ptr({base} + {offset}, id={id})")
+            }
         }
 
         Ok(())
     }
 
     fn eval_intr_print_str(&mut self, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
-        let [addr, len] = array::from_fn(|i| args[i].0.unwrap_u32() as usize);
+        let addr = args[0].0.unwrap_u32() as usize;
+        let len = args[1].0.unwrap_u32() as usize;
         ensure!(
             !self.module.default_mem.is_null(),
             "the module does not define a memory",
