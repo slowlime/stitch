@@ -1,6 +1,7 @@
+use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
 use std::ops::{Bound, Neg, Range, RangeBounds};
-use std::{array, fmt, iter, mem};
+use std::{array, iter, mem};
 
 use anyhow::{ensure, Result};
 use bitvec::prelude::*;
@@ -25,7 +26,7 @@ new_key_type! {
 
 type OrigBlockId = BlockId;
 
-#[derive(Debug, Default, Clone, Eq)]
+#[derive(Default, Clone, Eq)]
 struct MemSlice {
     // invariant: bytes.len() == init.len() ≥ zero_idx ∧ zero_idx ≤ |isize::MIN|
     bytes: Vec<u8>,
@@ -68,7 +69,20 @@ impl MemSlice {
         })
     }
 
+    fn invalidate(&mut self, start: isize, end: Option<isize>) {
+        let start = self.zero_idx.checked_add_signed(start).unwrap_or(0);
+        let end = end
+            .and_then(|end| self.zero_idx.checked_add_signed(end))
+            .unwrap_or(self.init.len());
+
+        self.init[start..end].fill(false);
+    }
+
     fn read(&self, range: Range<isize>) -> Option<&[u8]> {
+        trace!(
+            "read({range:?}) -> {:?}",
+            self.translate_range(range.clone())
+        );
         let range = self.translate_range(range)?;
         self.init[range.clone()].all().then(|| &self.bytes[range])
     }
@@ -123,6 +137,31 @@ impl MemSlice {
         }
 
         changed
+    }
+}
+
+impl Debug for MemSlice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "MemSlice[{}..{}] [",
+            self.zero_idx.wrapping_neg() as isize,
+            self.init.len() - self.zero_idx,
+        )?;
+
+        for (idx, (known, byte)) in self.init.iter().by_vals().zip(&self.bytes).enumerate() {
+            if idx > 0 {
+                write!(f, " ")?;
+            }
+
+            if known {
+                write!(f, "{byte:02x}")?;
+            } else {
+                write!(f, "??")?;
+            }
+        }
+
+        write!(f, "]")
     }
 }
 
@@ -392,6 +431,15 @@ trait BlockProvider {
     fn get(&mut self) -> &mut Block;
 }
 
+#[derive(Debug, Clone)]
+struct SymbolicPtrInfo {
+    /// The id of the immutable local that stores the base address of the allocation.
+    local_id: LocalId,
+
+    /// Whether all pointers to the allocation are controlled by the specialized function.
+    owned: bool,
+}
+
 pub struct Specializer<'a, 'i> {
     interp: &'i mut Interpreter<'a>,
     orig_func_id: FuncId,
@@ -403,7 +451,7 @@ pub struct Specializer<'a, 'i> {
     local_map: HashMap<(FuncCtxId, LocalId), LocalId>,
     func_ctxs: SlotMap<FuncCtxId, FuncCtx>,
     func_ctx_map: HashMap<FuncCtx, FuncCtxId>,
-    symbolic_ptrs: Vec<LocalId>,
+    symbolic_ptrs: Vec<SymbolicPtrInfo>,
     symbolic_ptr_locals: SparseSecondaryMap<LocalId, u32>,
     symbolic_ptr_id_map: HashMap<u32, u32>,
 }
@@ -455,7 +503,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 let id = *self.symbolic_ptr_id_map.entry(id).or_insert_with(|| {
                     let id = self.symbolic_ptrs.len().try_into().unwrap();
                     let base_local_id = self.func.locals.insert(ValType::I32);
-                    self.symbolic_ptrs.push(base_local_id);
+                    self.symbolic_ptrs.push(SymbolicPtrInfo {
+                        local_id: base_local_id,
+                        owned: false,
+                    });
                     self.symbolic_ptr_locals.insert(base_local_id, id);
                     self.func.blocks[self.func.entry].body.push(Stmt::LocalSet(
                         base_local_id,
@@ -636,6 +687,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
             trace!("  {global_id:?} = {}", format_value(&value, attrs));
         }
 
+        trace!("mem:");
+
+        for (idx, mem_slice) in info.exit_env.mem.iter().enumerate() {
+            trace!("  {idx}: {mem_slice:?}");
+        }
+
         let mut skip_terminator = false;
 
         'body: while let Some(stmt) = cfg.blocks[orig_block_id].body.get(stmt_idx) {
@@ -736,23 +793,28 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
                     let mut emit_store = true;
 
-                    if let (Some((Value::Ptr(Ptr { id, offset, .. }), _)), Some((value, _))) =
-                        (base_addr.to_value(), value.to_value())
-                    {
+                    if let Some((Value::Ptr(Ptr { id, offset, .. }), _)) = base_addr.to_value() {
                         let id = id as usize;
                         let start = offset.wrapping_add_unsigned(mem_arg.offset) as isize;
+                        let end = start.checked_add_unsigned(store.dst_size());
 
-                        if let Some(end) = start.checked_add_unsigned(store.dst_size()) {
+                        if let (Some((value, _)), Some(end)) = (value.to_value(), end) {
+                            trace!("performing symbolic store: {start}..{end}");
+
                             for _ in info.exit_env.mem.len()..=id {
                                 info.exit_env.mem.push(Default::default());
                             }
 
                             store.store(info.exit_env.mem[id].write(start..end), value);
                             emit_store = false;
+                        } else if let Some(mem_slice) = info.exit_env.mem.get_mut(id) {
+                            trace!("invalidating {start}..{end:?}: {value} is not a value");
+                            mem_slice.invalidate(start, end);
                         }
                     }
 
                     if emit_store {
+                        trace!("emitting a store");
                         block.body.push(Stmt::Store(
                             mem_arg,
                             store,
@@ -853,6 +915,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     if let Some(index) = index {
                         trace!("emitting an indirect call");
                         self.flush_global_env(block_id);
+                        let preserved_ptrs = self.find_preserved_ptrs(&args);
                         self.func.blocks[block_id]
                             .body
                             .push(Stmt::Call(Call::Indirect {
@@ -865,7 +928,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                                     .collect(),
                                 index: Box::new(index),
                             }));
-                        self.assume_clobbered_env(block_id);
+                        self.assume_clobbered_env(block_id, preserved_ptrs);
 
                         if let Some(ret_local_id) = ret_local_id {
                             trace!(
@@ -1280,8 +1343,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     Value::Ptr(Ptr { id, offset, .. })
                         if mem_arg.mem_id == self.interp.module.default_mem =>
                     {
+                        trace!("performing symbolic load");
                         let start = offset.wrapping_add_unsigned(mem_arg.offset) as isize;
                         let range = start..start.checked_add_unsigned(load.src_size())?;
+
+                        trace!("  mem_slice={:?}", info.exit_env.mem.get(id as usize));
                         let bytes = info.exit_env.mem.get(id as usize)?.read(range)?;
 
                         Expr::Value(load.load(bytes).lift_ptr(), attrs.deref_attrs())
@@ -1846,6 +1912,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
                 trace!("emitting a direct call to {target_func_id:?}");
                 self.flush_global_env(block_id);
+                let preserved_ptrs = self.find_preserved_ptrs(&args);
                 self.func.blocks[block_id]
                     .body
                     .push(Stmt::Call(Call::Direct {
@@ -1856,7 +1923,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                             .map(|expr| Self::convert_expr(&self.symbolic_ptrs, expr))
                             .collect(),
                     }));
-                self.assume_clobbered_env(block_id);
+                self.assume_clobbered_env(block_id, preserved_ptrs);
 
                 if let Some(ret_local_id) = ret_local_id {
                     trace!(
@@ -1998,7 +2065,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     .unwrap()
                     .or_insert_with(|| {
                         let id = self.symbolic_ptrs.len().try_into().unwrap();
-                        self.symbolic_ptrs.push(ret_local_id);
+                        self.symbolic_ptrs.push(SymbolicPtrInfo {
+                            local_id: ret_local_id,
+                            owned: true,
+                        });
                         self.func.blocks[block_id].body.push(Stmt::LocalSet(
                             ret_local_id,
                             Self::convert_expr(&self.symbolic_ptrs, expr),
@@ -2238,7 +2308,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
     }
 
     fn flush_env<B: BlockProvider>(
-        symbolic_ptrs: &Vec<LocalId>,
+        symbolic_ptrs: &Vec<SymbolicPtrInfo>,
         mem_id: MemoryId,
         exit_env: &Env,
         entry_env: Option<&Env>,
@@ -2246,7 +2316,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         mut target_block: B,
     ) {
         fn flush_vars<K: Key>(
-            block: &mut Block,
+            block: &mut impl BlockProvider,
             exit_vars: &SecondaryMap<K, (Value<()>, ValueAttrs)>,
             entry_vars: Option<&SecondaryMap<K, (Value<()>, ValueAttrs)>>,
             make_stmt: impl Fn(K, Expr) -> Stmt,
@@ -2262,15 +2332,17 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 };
 
                 trace!("  saving {id:?} = {}", format_value(&lhs_value, lhs_attrs));
-                block
+                block.get()
                     .body
                     .push(make_stmt(id, Expr::Value(lhs_value, lhs_attrs)));
             }
         }
 
+        trace!("flushing environment");
+
         if !global_env_only {
             flush_vars(
-                target_block.get(),
+                &mut target_block,
                 &exit_env.locals,
                 entry_env.map(|entry_env| &entry_env.locals),
                 Stmt::LocalSet,
@@ -2278,13 +2350,13 @@ impl<'a, 'i> Specializer<'a, 'i> {
         }
 
         flush_vars(
-            target_block.get(),
+            &mut target_block,
             &exit_env.globals,
             entry_env.map(|entry_env| &entry_env.globals),
             Stmt::GlobalSet,
         );
 
-        for (mem_idx, (mem_slice, &base_local_id)) in
+        for (mem_idx, (mem_slice, symbolic_ptr_info)) in
             exit_env.mem.iter().zip(symbolic_ptrs).enumerate()
         {
             let mut flush_mask = mem_slice.init.clone();
@@ -2302,6 +2374,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
             let mut idx_iter = flush_mask.iter_ones();
 
             while let Some(idx) = idx_iter.next() {
+
                 let store = if flush_mask.get(idx..idx + 8).is_some_and(BitSlice::all) {
                     Store::I64(I64Store::Eight)
                 } else if flush_mask.get(idx..idx + 4).is_some_and(BitSlice::all) {
@@ -2317,8 +2390,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 }
 
                 let start = (idx - mem_slice.zero_idx) as isize;
-
-                target_block.get().body.push(Stmt::Store(
+                let stmt = Stmt::Store(
                     MemArg {
                         mem_id,
                         offset: idx.try_into().unwrap(),
@@ -2326,7 +2398,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     },
                     store,
                     Box::new([
-                        Expr::Nullary(NulOp::LocalGet(base_local_id)),
+                        Expr::Nullary(NulOp::LocalGet(symbolic_ptr_info.local_id)),
                         Expr::Value(
                             match store {
                                 Store::I64(_) => {
@@ -2342,7 +2414,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
                             Default::default(),
                         ),
                     ]),
-                ));
+                );
+                trace!("  emitting a store for the symbolically tracked allocation #{mem_idx}: {stmt}");
+                target_block.get().body.push(stmt);
             }
         }
     }
@@ -2440,13 +2514,46 @@ impl<'a, 'i> Specializer<'a, 'i> {
         }
     }
 
-    fn assume_clobbered_env(&mut self, block_id: BlockId) {
+    fn find_preserved_ptrs(&self, args: &[Expr<()>]) -> HashSet<u32> {
+        let mut result = self
+            .symbolic_ptrs
+            .iter()
+            .enumerate()
+            .filter(|(_, info)| info.owned)
+            .map(|(idx, _)| idx.try_into().unwrap())
+            .collect::<HashSet<_>>();
+
+        for arg in args {
+            match arg {
+                Expr::Value(Value::Ptr(Ptr { id, .. }), _) => {
+                    result.remove(id);
+                }
+
+                Expr::Value(..) => continue,
+
+                // TODO: this is very pessimistic
+                // (can be improved by tagging expressions derived from symbolic pointers)
+                _ => return Default::default(),
+            }
+        }
+
+        result
+    }
+
+    fn assume_clobbered_env(&mut self, block_id: BlockId, preserved_ptrs: HashSet<u32>) {
         trace!("assuming the global environment is clobbered");
         let info = &mut self.blocks[block_id];
         info.exit_env
             .globals
             .retain(|global_id, _| !self.interp.module.globals[global_id].ty.mutable);
-        info.exit_env.mem.clear();
+
+        for (idx, mem_slice) in info.exit_env.mem.iter_mut().enumerate() {
+            if !preserved_ptrs.contains(&u32::try_from(idx).unwrap()) {
+                mem_slice.invalidate(0, None);
+            } else {
+                trace!("  preserved {idx}");
+            }
+        }
     }
 
     fn is_recursive_call(&self, block_id: BlockId, func_id: FuncId, args: &[Expr<()>]) -> bool {
@@ -2522,16 +2629,16 @@ impl<'a, 'i> Specializer<'a, 'i> {
         }
     }
 
-    fn convert_expr(symbolic_ptrs: &Vec<LocalId>, expr: Expr<()>) -> Expr {
+    fn convert_expr(symbolic_ptrs: &Vec<SymbolicPtrInfo>, expr: Expr<()>) -> Expr {
         match expr {
             Expr::Value(Value::Ptr(Ptr { id, offset: 0, .. }), _) => {
-                Expr::Nullary(NulOp::LocalGet(symbolic_ptrs[id as usize]))
+                Expr::Nullary(NulOp::LocalGet(symbolic_ptrs[id as usize].local_id))
             }
 
             Expr::Value(Value::Ptr(Ptr { id, offset, .. }), _) => Expr::Binary(
                 BinOp::I32Add,
                 Box::new([
-                    Expr::Nullary(NulOp::LocalGet(symbolic_ptrs[id as usize])),
+                    Expr::Nullary(NulOp::LocalGet(symbolic_ptrs[id as usize].local_id)),
                     Expr::Value(Value::I32(offset), Default::default()),
                 ]),
             ),
