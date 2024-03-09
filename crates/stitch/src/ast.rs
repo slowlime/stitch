@@ -48,6 +48,9 @@ pub enum IntrinsicDecl {
     IsSpecializing,
     Inline,
     NoInline,
+    FileOpen,
+    FileRead,
+    FileClose,
 }
 
 impl IntrinsicDecl {
@@ -95,7 +98,9 @@ impl IntrinsicDecl {
             {
                 Ok(())
             }
-            Self::ConstPtr | Self::SymbolicPtr | Self::PropagateLoad => Err("[i32] -> [i32]".into()),
+            Self::ConstPtr | Self::SymbolicPtr | Self::PropagateLoad => {
+                Err("[i32] -> [i32]".into())
+            }
 
             Self::PrintValue if func_ty.params.len() == 1 && func_ty.ret.is_none() => Ok(()),
             Self::PrintValue => Err("[t] -> []".into()),
@@ -124,6 +129,33 @@ impl IntrinsicDecl {
                 Ok(())
             }
             Self::Inline | Self::NoInline => Err("[i32] -> [i32]".into()),
+
+            Self::FileOpen
+                if func_ty.params.len() == 3
+                    && func_ty.params.iter().all(|ty| *ty == ValType::I32)
+                    && func_ty.ret == Some(ValType::I32) =>
+            {
+                Ok(())
+            }
+            Self::FileOpen => Err("[i32 i32 i32] -> [i32]".into()),
+
+            Self::FileRead
+                if func_ty.params.len() == 4
+                    && func_ty.params.iter().all(|ty| *ty == ValType::I32)
+                    && func_ty.ret == Some(ValType::I32) =>
+            {
+                Ok(())
+            }
+            Self::FileRead => Err("[i32 i32 i32 i32] -> [i32]".into()),
+
+            Self::FileClose
+                if func_ty.params.len() == 1
+                    && func_ty.params[0] == ValType::I32
+                    && func_ty.ret == Some(ValType::I32) =>
+            {
+                Ok(())
+            }
+            Self::FileClose => Err("[i32] -> [i32]".into()),
         }
     }
 }
@@ -147,6 +179,9 @@ impl Display for IntrinsicDecl {
                 Self::IsSpecializing => "is-specializing",
                 Self::Inline => "inline",
                 Self::NoInline => "no-inline",
+                Self::FileOpen => "file-open",
+                Self::FileRead => "file-read",
+                Self::FileClose => "file-close",
             }
         )
     }
@@ -202,6 +237,9 @@ impl Module {
             "is-specializing" => IntrinsicDecl::IsSpecializing,
             "inline" => IntrinsicDecl::Inline,
             "no-inline" => IntrinsicDecl::NoInline,
+            "file-open" => IntrinsicDecl::FileOpen,
+            "file-read" => IntrinsicDecl::FileRead,
+            "file-close" => IntrinsicDecl::FileClose,
             _ => return None,
         })
     }

@@ -107,4 +107,28 @@ impl PostProc<'_> {
                 .push(NulOp::LocalGet(body.params[0]).into())
         });
     }
+
+    pub(super) fn replace_intr_file_open(&mut self, func_id: FuncId) {
+        self.replace_intr(func_id, |_, body| {
+            body.main_block
+                .body
+                .push(Expr::Value(Value::I32(-1), Default::default()))
+        });
+    }
+
+    pub(super) fn replace_intr_file_read(&mut self, func_id: FuncId) {
+        self.replace_intr(func_id, |_, body| {
+            body.main_block
+                .body
+                .push(Expr::Value(Value::I32(-1), Default::default()))
+        });
+    }
+
+    pub(super) fn replace_intr_file_close(&mut self, func_id: FuncId) {
+        self.replace_intr(func_id, |_, body| {
+            body.main_block
+                .body
+                .push(Expr::Value(Value::I32(-1), Default::default()))
+        });
+    }
 }

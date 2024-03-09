@@ -1,6 +1,7 @@
 mod concrete;
 mod spec;
 
+use std::fs::File;
 use std::rc::Rc;
 
 use anyhow::{bail, ensure, Result};
@@ -56,6 +57,7 @@ pub struct Interpreter<'a> {
     args: Vec<Vec<u8>>,
     const_global_ids: HashSet<GlobalId>,
     next_symbolic_ptr_id: u32,
+    files: Vec<Option<File>>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -68,6 +70,7 @@ impl<'a> Interpreter<'a> {
             args,
             const_global_ids: Default::default(),
             next_symbolic_ptr_id: 0,
+            files: Default::default(),
         }
     }
 

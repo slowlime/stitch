@@ -1775,12 +1775,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 IntrinsicDecl::ArgLen => {
                     self.process_intr_arg_len(block_id, ret_local_id.unwrap(), &args)?
                 }
-                IntrinsicDecl::ArgRead => {
-                    self.process_intr_arg_read(block_id, ret_local_id.unwrap())?
-                }
-                IntrinsicDecl::Specialize => {
-                    self.process_intr_specialize(block_id, ret_local_id.unwrap())?
-                }
                 IntrinsicDecl::Unknown => {
                     self.process_intr_unknown(block_id, ret_local_id.unwrap(), func_id)?
                 }
@@ -1793,8 +1787,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 IntrinsicDecl::PropagateLoad => {
                     self.process_intr_propagate_load(block_id, ret_local_id.unwrap(), &args)?
                 }
-                IntrinsicDecl::PrintValue => self.process_intr_print_value()?,
-                IntrinsicDecl::PrintStr => self.process_intr_print_str()?,
                 IntrinsicDecl::IsSpecializing => {
                     self.process_intr_is_specializing(block_id, ret_local_id.unwrap())?
                 }
@@ -1803,6 +1795,18 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 }
                 IntrinsicDecl::NoInline => {
                     self.process_intr_no_inline(block_id, ret_local_id.unwrap(), &args)?
+                }
+
+                IntrinsicDecl::ArgRead
+                | IntrinsicDecl::Specialize
+                | IntrinsicDecl::PrintValue
+                | IntrinsicDecl::PrintStr
+                | IntrinsicDecl::FileOpen
+                | IntrinsicDecl::FileRead
+                | IntrinsicDecl::FileClose => {
+                    warn!("encountered {intrinsic} during specialization");
+
+                    false
                 }
             };
 
@@ -1981,38 +1985,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(true)
     }
 
-    fn process_intr_arg_read(&mut self, block_id: BlockId, ret_local_id: LocalId) -> Result<bool> {
-        warn!(
-            "encountered {} during specialization",
-            IntrinsicDecl::ArgRead,
-        );
-        self.set_local(
-            block_id,
-            ret_local_id,
-            Expr::Value(Value::I32(0), Default::default()),
-        );
-
-        Ok(true)
-    }
-
-    fn process_intr_specialize(
-        &mut self,
-        block_id: BlockId,
-        ret_local_id: LocalId,
-    ) -> Result<bool> {
-        warn!(
-            "encountered {} during specialization",
-            IntrinsicDecl::Specialize,
-        );
-        self.set_local(
-            block_id,
-            ret_local_id,
-            Expr::Value(Value::I32(0), Default::default()),
-        );
-
-        Ok(true)
-    }
-
     fn process_intr_unknown(
         &mut self,
         block_id: BlockId,
@@ -2113,24 +2085,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
         );
 
         Ok(true)
-    }
-
-    fn process_intr_print_value(&mut self) -> Result<bool> {
-        warn!(
-            "encountered {} during specialization",
-            IntrinsicDecl::PrintValue,
-        );
-
-        Ok(false)
-    }
-
-    fn process_intr_print_str(&mut self) -> Result<bool> {
-        warn!(
-            "encountered {} during specialization",
-            IntrinsicDecl::PrintStr,
-        );
-
-        Ok(false)
     }
 
     fn process_intr_is_specializing(
@@ -2332,7 +2286,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 };
 
                 trace!("  saving {id:?} = {}", format_value(&lhs_value, lhs_attrs));
-                block.get()
+                block
+                    .get()
                     .body
                     .push(make_stmt(id, Expr::Value(lhs_value, lhs_attrs)));
             }
@@ -2374,7 +2329,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
             let mut idx_iter = flush_mask.iter_ones();
 
             while let Some(idx) = idx_iter.next() {
-
                 let store = if flush_mask.get(idx..idx + 8).is_some_and(BitSlice::all) {
                     Store::I64(I64Store::Eight)
                 } else if flush_mask.get(idx..idx + 4).is_some_and(BitSlice::all) {
@@ -2415,7 +2369,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         ),
                     ]),
                 );
-                trace!("  emitting a store for the symbolically tracked allocation #{mem_idx}: {stmt}");
+                trace!(
+                    "  emitting a store for the symbolically tracked allocation #{mem_idx}: {stmt}"
+                );
                 target_block.get().body.push(stmt);
             }
         }

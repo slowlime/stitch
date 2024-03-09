@@ -44,6 +44,9 @@ impl<'a> PostProc<'a> {
                 IntrinsicDecl::IsSpecializing => self.replace_intr_is_specializing(func_id),
                 IntrinsicDecl::Inline => self.replace_intr_inline(func_id),
                 IntrinsicDecl::NoInline => self.replace_intr_no_inline(func_id),
+                IntrinsicDecl::FileOpen => self.replace_intr_file_open(func_id),
+                IntrinsicDecl::FileRead => self.replace_intr_file_read(func_id),
+                IntrinsicDecl::FileClose => self.replace_intr_file_close(func_id),
             }
         }
 

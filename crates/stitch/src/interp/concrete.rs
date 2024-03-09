@@ -1,5 +1,7 @@
-use std::io::Write;
-use std::ops::Neg;
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{ErrorKind, Read, Write};
+use std::ops::{Bound, Neg};
 use std::rc::Rc;
 use std::{array, str};
 
@@ -981,6 +983,9 @@ impl Interpreter<'_> {
                 IntrinsicDecl::IsSpecializing => self.eval_intr_is_specializing(frames)?,
                 IntrinsicDecl::Inline => self.eval_intr_inline(frames, args)?,
                 IntrinsicDecl::NoInline => self.eval_intr_no_inline(frames, args)?,
+                IntrinsicDecl::FileOpen => self.eval_intr_file_open(frames, args)?,
+                IntrinsicDecl::FileRead => self.eval_intr_file_read(frames, args)?,
+                IntrinsicDecl::FileClose => self.eval_intr_file_close(frames, args)?,
             }
 
             let frame = frames.last_mut().unwrap();
@@ -1032,17 +1037,14 @@ impl Interpreter<'_> {
         frames: &mut Vec<Frame>,
         args: Vec<(Value, ValueAttrs)>,
     ) -> Result<()> {
-        let idx = args[0].0.unwrap_u32();
-        let buf = args[1].0.unwrap_u32();
-        let size = args[2].0.unwrap_u32();
-        let offset = args[3].0.unwrap_u32();
-        let arg = self.args.get(idx as usize).with_context(|| {
+        let [idx, buf, size, offset] = array::from_fn(|i| args[i].0.unwrap_u32() as usize);
+        let arg = self.args.get(idx).with_context(|| {
             anyhow!(
                 "an interpreter argument index {idx} is out of bounds (provided {})",
                 self.args.len(),
             )
         })?;
-        let arg = arg.get(offset as usize..).with_context(|| {
+        let arg = arg.get(offset..).with_context(|| {
             anyhow!(
                 "an offset {offset} is out of bounds for the argument #{idx} of length {}",
                 arg.len(),
@@ -1057,7 +1059,7 @@ impl Interpreter<'_> {
             .module
             .get_mem_mut(
                 self.module.default_mem,
-                (buf as usize)..((buf + size) as usize),
+                buf..buf.checked_add(size).context("the size is too large")?,
             )
             .context("could not write the argument value")?
             .write(arg)?;
@@ -1075,9 +1077,7 @@ impl Interpreter<'_> {
         frames: &mut Vec<Frame>,
         mut args: Vec<(Value, ValueAttrs)>,
     ) -> Result<()> {
-        let elem_idx = args[0].0.unwrap_u32();
-        let name_addr = args[1].0.unwrap_u32();
-        let name_len = args[2].0.unwrap_u32();
+        let [elem_idx, name_addr, name_len] = array::from_fn(|i| args[i].0.unwrap_u32() as usize);
         args.drain(..3);
 
         ensure!(
@@ -1098,7 +1098,7 @@ impl Interpreter<'_> {
             }
 
             TableDef::Elems(elems) => elems
-                .get(elem_idx as usize)
+                .get(elem_idx)
                 .with_context(|| {
                     anyhow!(
                         "a table entry index {elem_idx} is out of range for a table of size {}",
@@ -1108,9 +1108,6 @@ impl Interpreter<'_> {
                 .with_context(|| anyhow!("a table entry (index {elem_idx}) is uninitialized"))?,
         };
 
-        let name_addr = name_addr as usize;
-        let name_len = name_len as usize;
-
         let name = if name_len > 0 {
             ensure!(
                 !self.module.default_mem.is_null(),
@@ -1119,7 +1116,13 @@ impl Interpreter<'_> {
 
             let name_bytes = self
                 .module
-                .get_mem(self.module.default_mem, name_addr..name_addr + name_len)
+                .get_mem(
+                    self.module.default_mem,
+                    name_addr
+                        ..name_addr
+                            .checked_add(name_len)
+                            .context("the name is too large")?,
+                )
                 .context("could not read the export name")?;
             let name = str::from_utf8(name_bytes)
                 .context("the export name is not a valid utf-8 string")?;
@@ -1282,15 +1285,17 @@ impl Interpreter<'_> {
     }
 
     fn eval_intr_print_str(&mut self, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
-        let addr = args[0].0.unwrap_u32() as usize;
-        let len = args[1].0.unwrap_u32() as usize;
+        let [addr, len] = array::from_fn(|i| args[i].0.unwrap_u32() as usize);
         ensure!(
             !self.module.default_mem.is_null(),
             "the module does not define a memory",
         );
         let bytes = self
             .module
-            .get_mem(self.module.default_mem, addr..addr + len)
+            .get_mem(
+                self.module.default_mem,
+                addr..addr.checked_add(len).context("the string is too large")?,
+            )
             .context("could not read the string")?;
         info!(
             "{}: {}",
@@ -1332,6 +1337,169 @@ impl Interpreter<'_> {
         attrs |= ValueAttrs::NO_INLINE;
         attrs.remove(ValueAttrs::INLINE);
         frame.stack.push((value, attrs));
+
+        Ok(())
+    }
+
+    fn eval_intr_file_open(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        let [path_ptr, path_len, out_fd_ptr] = array::from_fn(|i| args[i].0.unwrap_u32() as usize);
+        ensure!(
+            !self.module.default_mem.is_null(),
+            "the module does not define a memory",
+        );
+        let path = self
+            .module
+            .get_mem(
+                self.module.default_mem,
+                path_ptr
+                    ..path_ptr
+                        .checked_add(path_len)
+                        .context("the path is too large")?,
+            )
+            .context("could not read the path")?;
+
+        #[cfg(not(unix))]
+        let path = OsString::from(str::from_utf8(path).context("could not decode the path")?);
+        #[cfg(unix)]
+        let path = OsString::from(<OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path));
+
+        match File::open(&path) {
+            Ok(file) => {
+                let idx = if let Some((idx, entry)) = self
+                    .files
+                    .iter_mut()
+                    .enumerate()
+                    .find(|(_, entry)| entry.is_none())
+                {
+                    *entry = Some(file);
+
+                    idx
+                } else {
+                    self.files.push(Some(file));
+
+                    self.files.len() - 1
+                };
+
+                self.module
+                    .get_mem_mut(
+                        self.module.default_mem,
+                        out_fd_ptr
+                            ..out_fd_ptr
+                                .checked_add(4)
+                                .context("not enough memory for writing the file descriptor")?,
+                    )
+                    .context("could not write the file descriptor")?
+                    .copy_from_slice(&u32::try_from(idx).unwrap().to_le_bytes());
+                frame.stack.push((Value::I32(0), Default::default()));
+            }
+
+            Err(e) => {
+                let errno = e
+                    .raw_os_error()
+                    .context("File::open returned an unknown error code")?;
+                frame.stack.push((Value::I32(errno), Default::default()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn eval_intr_file_read(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        let [fd, buf_ptr, size, out_count_ptr] =
+            array::from_fn(|i| args[i].0.unwrap_u32() as usize);
+        ensure!(
+            !self.module.default_mem.is_null(),
+            "the module does not define a memory",
+        );
+
+        let file = if let Some(Some(file)) = self.files.get_mut(fd) {
+            file
+        } else {
+            frame.stack.push((
+                Value::I32(ErrorKind::InvalidInput as i32),
+                Default::default(),
+            ));
+
+            return Ok(());
+        };
+
+        let buf = self
+            .module
+            .get_mem_mut(
+                self.module.default_mem,
+                buf_ptr
+                    ..buf_ptr
+                        .checked_add(size)
+                        .context("the buffer is too large")?,
+            )
+            .context("the buffer is invalid")?;
+
+        match file.read(buf) {
+            Ok(size) => {
+                self.module
+                    .get_mem_mut(
+                        self.module.default_mem,
+                        out_count_ptr
+                            ..out_count_ptr.checked_add(4).context(
+                                "not enough memory for writing the number of bytes read",
+                            )?,
+                    )
+                    .context("could not write the number of bytes read")?
+                    .copy_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+                frame.stack.push((Value::I32(0), Default::default()));
+            }
+
+            Err(e) => {
+                let errno = e
+                    .raw_os_error()
+                    .context("File::open returned an unknown error code")?;
+                frame.stack.push((Value::I32(errno), Default::default()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn eval_intr_file_close(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        let fd = args[0].0.unwrap_u32() as usize;
+
+        if let Some(file @ Some(_)) = self.files.get_mut(fd) {
+            *file = None;
+
+            if self.files.len() == fd + 1 {
+                // remove the tail None elements
+                let last_valid_idx = self
+                    .files
+                    .iter()
+                    .enumerate()
+                    .rfind(|(_, file)| file.is_some())
+                    .map(|(idx, _)| Bound::Excluded(idx))
+                    .unwrap_or(Bound::Unbounded);
+                self.files.drain((last_valid_idx, Bound::Unbounded));
+            }
+
+            frame.stack.push((Value::I32(0), Default::default()));
+        } else {
+            frame.stack.push((
+                Value::I32(ErrorKind::InvalidInput as i32),
+                Default::default(),
+            ));
+        }
 
         Ok(())
     }
