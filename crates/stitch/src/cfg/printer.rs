@@ -292,6 +292,20 @@ impl Display for Stmt {
                 Some(ret_local_id) => write!(f, "(local.set {ret_local_id:?} ({call}))"),
                 None => write!(f, "({call})"),
             },
+            Self::MemoryCopy {
+                dst_mem_id,
+                src_mem_id,
+                args,
+            } => write!(
+                f,
+                "(memory.copy dst={dst_mem_id:?} src={src_mem_id:?} {} {} {})",
+                args[0], args[1], args[2],
+            ),
+            Self::MemoryFill(mem_id, args) => write!(
+                f,
+                "(memory.fill mem={mem_id:?} {} {} {})",
+                args[0], args[1], args[2],
+            ),
         }
     }
 }

@@ -9,7 +9,7 @@ mod remove_unreachable_blocks;
 mod rpo;
 mod to_ast;
 
-use std::{iter, slice};
+use std::{iter, mem, slice};
 
 use slotmap::{new_key_type, SlotMap};
 
@@ -822,6 +822,13 @@ pub enum Stmt {
     GlobalSet(GlobalId, Expr),
     Store(MemArg, Store, Box<[Expr; 2]>),
     Call(Call),
+
+    MemoryCopy {
+        dst_mem_id: MemoryId,
+        src_mem_id: MemoryId,
+        args: Box<[Expr; 3]>,
+    },
+    MemoryFill(MemoryId, Box<[Expr; 3]>),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -894,5 +901,18 @@ impl FuncBody {
             locals: Default::default(),
             params: Default::default(),
         }
+    }
+
+    pub fn split_block_before(&mut self, block_id: BlockId, stmt_idx: usize) -> BlockId {
+        let old_block = &mut self.blocks[block_id];
+        let new_block = Block {
+            name: old_block.name.as_ref().map(|name| format!("{name}.split:{stmt_idx}")),
+            body: old_block.body.split_off(stmt_idx),
+            term: mem::take(&mut old_block.term),
+        };
+        let new_block_id = self.blocks.insert(new_block);
+        self.blocks[block_id].term = Terminator::Br(new_block_id);
+
+        new_block_id
     }
 }

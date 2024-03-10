@@ -798,6 +798,16 @@ impl<'a> Translator<'a> {
 
             let result = match op {
                 AstTernOp::Select => self.push_drop(Expr::Ternary(TernOp::Select, exprs)),
+
+                AstTernOp::MemoryCopy {
+                    dst_mem_id,
+                    src_mem_id,
+                } => self.push_stmt(Stmt::MemoryCopy {
+                    dst_mem_id,
+                    src_mem_id,
+                    args: exprs,
+                }),
+                AstTernOp::MemoryFill { mem_id } => self.push_stmt(Stmt::MemoryFill(mem_id, exprs)),
             };
 
             self.task_results.push(result);

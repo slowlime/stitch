@@ -695,9 +695,25 @@ impl<'a> BodyEncoder<'a, '_> {
                 },
             ),
 
-            Expr::Ternary(TernOp::Select, [first, second, condition]) => {
-                self.ternary(first, second, condition, Instruction::Select)
-            }
+            Expr::Ternary(op, exprs) => self.ternary(
+                &exprs[0],
+                &exprs[1],
+                &exprs[2],
+                match *op {
+                    TernOp::Select => Instruction::Select,
+
+                    TernOp::MemoryCopy {
+                        dst_mem_id,
+                        src_mem_id,
+                    } => Instruction::MemoryCopy {
+                        src_mem: self.encoder.mems[src_mem_id] as u32,
+                        dst_mem: self.encoder.mems[dst_mem_id] as u32,
+                    },
+                    TernOp::MemoryFill { mem_id } => {
+                        Instruction::MemoryFill(self.encoder.mems[mem_id] as u32)
+                    }
+                },
+            ),
 
             Expr::Block(block_ty, block) => {
                 self.nullary(Instruction::Block(self.convert_block_type(block_ty)));

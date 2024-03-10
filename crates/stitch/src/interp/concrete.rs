@@ -48,6 +48,12 @@ impl<'a> From<&'a [Expr]> for Task<'a> {
     }
 }
 
+impl<'a, const N: usize> From<&'a Box<[Expr; N]>> for Task<'a> {
+    fn from(exprs: &'a Box<[Expr; N]>) -> Self {
+        exprs.as_slice().into()
+    }
+}
+
 impl Value<i32> {
     pub fn into_concrete<T>(self) -> Value<T> {
         match self {
@@ -159,8 +165,10 @@ impl Interpreter<'_> {
                     Stmt::Drop(expr) => self.eval(frames, expr)?,
                     Stmt::LocalSet(_, expr) => self.eval(frames, expr)?,
                     Stmt::GlobalSet(_, expr) => self.eval(frames, expr)?,
-                    Stmt::Store(_, _, exprs) => self.eval(frames, exprs.as_slice())?,
+                    Stmt::Store(_, _, exprs) => self.eval(frames, exprs)?,
                     Stmt::Call(call) => self.eval(frames, call)?,
+                    Stmt::MemoryCopy { args, .. } => self.eval(frames, args)?,
+                    Stmt::MemoryFill(_, exprs) => self.eval(frames, exprs)?,
                 },
 
                 None => match &block.term {
@@ -202,7 +210,10 @@ impl Interpreter<'_> {
                         let (value, attrs) = frame.stack.pop().unwrap();
                         let base_addr = frame.stack.pop().unwrap().0.unwrap_u32();
                         let start = (base_addr + mem_arg.offset) as usize;
-                        let range = start..start + store.dst_size();
+                        let range = start
+                            ..start
+                                .checked_add(store.dst_size())
+                                .context("not enough memory")?;
                         let bytes = self.module.get_mem_mut(mem_arg.mem_id, range)?;
                         store.store(bytes, value.into_concrete());
                         trace!(
@@ -219,6 +230,60 @@ impl Interpreter<'_> {
                     }
 
                     Stmt::Call(..) => continue 'frame,
+
+                    Stmt::MemoryCopy {
+                        dst_mem_id,
+                        src_mem_id,
+                        args: _,
+                    } => {
+                        let len = frame.stack.pop().unwrap().0.unwrap_u32() as usize;
+                        let src = frame.stack.pop().unwrap().0.unwrap_u32() as usize;
+                        let dst = frame.stack.pop().unwrap().0.unwrap_u32() as usize;
+                        self.module.get_mem_mut(
+                            dst_mem_id,
+                            dst..dst
+                                .checked_add(len)
+                                .context("the destination range is too large")?,
+                        )?;
+                        self.module.get_mem(
+                            src_mem_id,
+                            src..src
+                                .checked_add(len)
+                                .context("the source range is too large")?,
+                        )?;
+
+                        let mut copy = |i| {
+                            let src = src + i;
+                            let dst = dst + i;
+                            let byte = self.module.get_mem(src_mem_id, src..src + 1).unwrap()[0];
+                            self.module.get_mem_mut(dst_mem_id, dst..dst + 1).unwrap()[0] = byte;
+                        };
+
+                        if dst <= src {
+                            for i in 0..len {
+                                copy(i);
+                            }
+                        } else {
+                            for i in (0..len).rev() {
+                                copy(i);
+                            }
+                        }
+                    }
+
+                    Stmt::MemoryFill(mem_id, _) => {
+                        let len = frame.stack.pop().unwrap().0.unwrap_u32() as usize;
+                        let byte = frame.stack.pop().unwrap().0.unwrap_u32() as u8;
+                        let addr = frame.stack.pop().unwrap().0.unwrap_u32() as usize;
+
+                        self.module
+                            .get_mem_mut(
+                                mem_id,
+                                addr..addr
+                                    .checked_add(len)
+                                    .context("the destination range is too large")?,
+                            )?
+                            .fill(byte);
+                    }
                 }
             } else {
                 match block.term {

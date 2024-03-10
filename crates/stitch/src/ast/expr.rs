@@ -701,12 +701,26 @@ impl Display for BinOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TernOp {
     Select,
+
+    MemoryCopy {
+        dst_mem_id: MemoryId,
+        src_mem_id: MemoryId,
+    },
+    MemoryFill {
+        mem_id: MemoryId,
+    },
 }
 
 impl Display for TernOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Select => write!(f, "select"),
+
+            Self::MemoryCopy {
+                dst_mem_id,
+                src_mem_id,
+            } => write!(f, "memory.copy dst={dst_mem_id:?} src={src_mem_id:?}"),
+            Self::MemoryFill { mem_id } => write!(f, "memory.fill mem={mem_id:?}"),
         }
     }
 }
@@ -1160,7 +1174,10 @@ impl Expr {
                 | BinOp::I64Store16(_)
                 | BinOp::I64Store32(_),
                 _,
-            ) => ReturnValueCount::Zero,
+            )
+            | Self::Ternary(TernOp::MemoryCopy { .. } | TernOp::MemoryFill { .. }, _) => {
+                ReturnValueCount::Zero
+            }
 
             Self::Nullary(NulOp::Unreachable) => ReturnValueCount::Unreachable,
 
@@ -1415,6 +1432,10 @@ impl Expr {
                 ValType::I64.into()
             }
 
+            Self::Ternary(TernOp::MemoryCopy { .. } | TernOp::MemoryFill { .. }, _) => {
+                ExprTy::Empty
+            }
+
             Self::Nullary(NulOp::MemorySize(_)) | Self::Unary(UnOp::MemoryGrow(_), _) => {
                 ValType::I32.into()
             }
@@ -1618,6 +1639,8 @@ impl Expr {
 
             Expr::Ternary(op, ..) => match op {
                 TernOp::Select => false,
+
+                TernOp::MemoryCopy { .. } | TernOp::MemoryFill { .. } => true,
             },
 
             Expr::Block(..) => false,

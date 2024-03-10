@@ -1,7 +1,11 @@
+mod preprocess;
+mod expr;
+
 use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
-use std::ops::{Bound, Neg, Range, RangeBounds};
-use std::{array, iter, mem};
+use std::ops::{Bound, Range, RangeBounds};
+use std::rc::Rc;
+use std::{iter, mem};
 
 use anyhow::{ensure, Result};
 use bitvec::prelude::*;
@@ -13,10 +17,9 @@ use crate::ast::expr::{format_value, MemArg, Ptr, Value, ValueAttrs};
 use crate::ast::ty::ValType;
 use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, IntrinsicDecl, MemoryId, TableDef};
 use crate::cfg::{
-    BinOp, Block, BlockId, Call, Expr, FuncBody, I32Store, I64Store, LocalId, NulOp, Stmt, Store,
-    Terminator, TernOp, UnOp,
+    BinOp, Block, BlockId, Call, Expr, FuncBody, I32Store, I64Store, Load, LocalId, NulOp, Stmt,
+    Store, Terminator, UnOp,
 };
-use crate::util::float::{F32, F64};
 
 use super::{Interpreter, SpecSignature};
 
@@ -442,6 +445,7 @@ struct SymbolicPtrInfo {
 
 pub struct Specializer<'a, 'i> {
     interp: &'i mut Interpreter<'a>,
+    preprocessed_cfgs: SparseSecondaryMap<FuncId, Rc<FuncBody>>,
     orig_func_id: FuncId,
     func: FuncBody,
     block_map: HashMap<BlockMapKey, BlockId>,
@@ -464,6 +468,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
     ) -> Self {
         Self {
             interp,
+            preprocessed_cfgs: Default::default(),
             orig_func_id,
             func,
             block_map: Default::default(),
@@ -493,6 +498,20 @@ impl<'a, 'i> Specializer<'a, 'i> {
         self.set_block_name(self.func.entry, format_args!("entry"));
 
         Ok(self.func)
+    }
+
+    fn get_cfg(&mut self, func_id: FuncId) -> Option<Rc<FuncBody>> {
+        if let Some(cfg) = self.preprocessed_cfgs.get(func_id) {
+            return Some(Rc::clone(cfg));
+        }
+
+        let mut cfg = Rc::unwrap_or_clone(self.interp.get_cfg(func_id)?);
+        trace!("preprocessing {func_id:?} before specialization");
+        self.preprocess_cfg(&mut cfg);
+        let cfg = Rc::new(cfg);
+        self.preprocessed_cfgs.insert(func_id, Rc::clone(&cfg));
+
+        Some(cfg)
     }
 
     fn process_arg(&mut self, value: Value<()>, load: impl FnOnce() -> Expr) -> Value<()> {
@@ -544,7 +563,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         });
 
         self.process_params(func_ctx_id);
-        let cfg = self.interp.get_cfg(self.orig_func_id).unwrap();
+        let cfg = self.get_cfg(self.orig_func_id).unwrap();
         let mut exit_env = Env::default();
 
         let globals = mem::take(&mut self.interp.module.globals);
@@ -619,7 +638,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
     }
 
     fn process_params(&mut self, orig_func_ctx_id: FuncCtxId) {
-        let cfg = self.interp.get_cfg(self.orig_func_id).unwrap();
+        let cfg = self.get_cfg(self.orig_func_id).unwrap();
         self.process_locals(orig_func_ctx_id);
         self.func.params = cfg
             .params
@@ -632,7 +651,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
     fn process_locals(&mut self, func_ctx_id: FuncCtxId) {
         let func_id = self.func_ctxs[func_ctx_id].func_id;
-        let cfg = self.interp.get_cfg(func_id).unwrap();
+        let cfg = self.get_cfg(func_id).unwrap();
 
         for (local_id, val_ty) in &cfg.locals {
             self.local_map
@@ -648,7 +667,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
         let info = &self.blocks[block_id];
         let orig_block_id = info.orig_block_id;
         let func_id = self.func_ctxs[info.func_ctx_id].func_id;
-        let cfg = self.interp.get_cfg(func_id).unwrap();
+        let cfg = self.get_cfg(func_id).unwrap();
+        let info = &self.blocks[block_id];
         let mut stmt_idx = info.start_stmt_idx;
         let ref mut stack = vec![];
 
@@ -723,6 +743,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         self.process_expr(block_id, stack, expr)?;
                     }
                 }
+                Stmt::MemoryCopy { .. } | Stmt::MemoryFill(..) => unreachable!(),
             }
 
             let block = &mut self.func.blocks[block_id];
@@ -782,44 +803,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
 
                 Stmt::Store(mem_arg, store, _) => {
                     let value = Self::convert_expr(&self.symbolic_ptrs, stack.pop().unwrap());
-                    let base_addr = stack.pop().unwrap();
+                    let addr = stack.pop().unwrap();
 
-                    if let Some((_, addr_attrs)) = base_addr.to_value() {
-                        ensure!(
-                            !addr_attrs.contains(ValueAttrs::CONST_PTR),
-                            "encountered a memory write via a constant pointer"
-                        );
-                    }
-
-                    let mut emit_store = true;
-
-                    if let Some((Value::Ptr(Ptr { id, offset, .. }), _)) = base_addr.to_value() {
-                        let id = id as usize;
-                        let start = offset.wrapping_add_unsigned(mem_arg.offset) as isize;
-                        let end = start.checked_add_unsigned(store.dst_size());
-
-                        if let (Some((value, _)), Some(end)) = (value.to_value(), end) {
-                            trace!("performing symbolic store: {start}..{end}");
-
-                            for _ in info.exit_env.mem.len()..=id {
-                                info.exit_env.mem.push(Default::default());
-                            }
-
-                            store.store(info.exit_env.mem[id].write(start..end), value);
-                            emit_store = false;
-                        } else if let Some(mem_slice) = info.exit_env.mem.get_mut(id) {
-                            trace!("invalidating {start}..{end:?}: {value} is not a value");
-                            mem_slice.invalidate(start, end);
-                        }
-                    }
-
-                    if emit_store {
+                    if let Some(stmt) = self.process_store(block_id, mem_arg, store, addr, value)? {
                         trace!("emitting a store");
-                        block.body.push(Stmt::Store(
-                            mem_arg,
-                            store,
-                            Box::new([Self::convert_expr(&self.symbolic_ptrs, base_addr), value]),
-                        ));
+                        self.func.blocks[block_id].body.push(stmt);
                     }
                 }
 
@@ -939,6 +927,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         }
                     }
                 }
+
+                Stmt::MemoryCopy { .. } | Stmt::MemoryFill(..) => unreachable!(),
             }
         }
 
@@ -1123,630 +1113,124 @@ impl<'a, 'i> Specializer<'a, 'i> {
         Ok(())
     }
 
-    fn process_expr(
+    fn process_load(
         &mut self,
         block_id: BlockId,
-        stack: &mut Vec<Expr<()>>,
-        expr: &Expr,
-    ) -> Result<()> {
-        let mut tasks = vec![(0, expr)];
+        mem_arg: MemArg,
+        load: Load,
+        addr: Expr<()>,
+    ) -> Expr<()> {
+        let try_process = || -> Option<Expr<()>> {
+            match &addr {
+                &Expr::Value(Value::I32(base_addr), attrs)
+                    if attrs.contains(ValueAttrs::CONST_PTR) =>
+                {
+                    let base_addr = base_addr as u32;
+                    let start = (base_addr + mem_arg.offset) as usize;
+                    let range = start..start.checked_add(load.src_size())?;
 
-        while let Some(&mut (ref mut subexpr_idx, expr)) = tasks.last_mut() {
-            if let Some(subexpr) = expr.nth_subexpr(*subexpr_idx) {
-                trace!("processing a subexpr (#{subexpr_idx}) of {expr}");
-                *subexpr_idx += 1;
-                tasks.push((0, subexpr));
-            } else {
-                trace!("processing an expr: {expr}");
+                    let bytes = match self.interp.module.get_mem(mem_arg.mem_id, range) {
+                        Ok(bytes) => bytes,
 
-                match *expr {
-                    Expr::Value(value, attrs) => stack.push(Expr::Value(value.lift_ptr(), attrs)),
-                    Expr::Nullary(op) => self.process_nul_op(block_id, stack, op)?,
-                    Expr::Unary(op, _) => self.process_un_op(block_id, stack, op)?,
-                    Expr::Binary(op, _) => self.process_bin_op(block_id, stack, op)?,
-                    Expr::Ternary(op, _) => self.process_tern_op(block_id, stack, op)?,
+                        Err(e) => {
+                            warn!("encountered an error while specializing a constant memory load: {e}");
+
+                            return None;
+                        }
+                    };
+
+                    Some(Expr::Value(
+                        load.load(bytes).lift_ptr(),
+                        attrs.deref_attrs(),
+                    ))
                 }
 
-                trace!("pushed {}", stack.last().unwrap());
+                &Expr::Value(Value::Ptr(Ptr { id, offset, .. }), attrs)
+                    if mem_arg.mem_id == self.interp.module.default_mem =>
+                {
+                    trace!("performing symbolic load");
+                    let start = offset.wrapping_add_unsigned(mem_arg.offset) as isize;
+                    let range = start..start.checked_add_unsigned(load.src_size())?;
+                    let bytes = self.blocks[block_id]
+                        .exit_env
+                        .mem
+                        .get(id as usize)?
+                        .read(range)?;
 
-                tasks.pop().unwrap();
+                    Some(Expr::Value(
+                        load.load(bytes).lift_ptr(),
+                        attrs.deref_attrs(),
+                    ))
+                }
+
+                _ => None,
             }
+        };
+
+        try_process().unwrap_or_else(|| {
+            Expr::Unary(
+                UnOp::Load(mem_arg, load),
+                Box::new(Self::convert_expr(&self.symbolic_ptrs, addr)),
+            )
+        })
+    }
+
+    fn process_store(
+        &mut self,
+        block_id: BlockId,
+        mem_arg: MemArg,
+        store: Store,
+        addr: Expr<()>,
+        value: Expr,
+    ) -> Result<Option<Stmt>> {
+        if let Some((_, addr_attrs)) = addr.to_value() {
+            ensure!(
+                !addr_attrs.contains(ValueAttrs::CONST_PTR),
+                "encountered a memory write via a constant pointer",
+            );
         }
 
-        Ok(())
-    }
-
-    fn process_nul_op(
-        &mut self,
-        block_id: BlockId,
-        stack: &mut Vec<Expr<()>>,
-        mut op: NulOp,
-    ) -> Result<()> {
-        let info = &mut self.blocks[block_id];
-
-        if let NulOp::LocalGet(local_id) = &mut op {
-            *local_id = self.local_map[&(info.func_ctx_id, *local_id)];
-        };
-
-        let try_process = || -> Option<Expr<()>> {
-            Some(match op {
-                NulOp::LocalGet(local_id) => info.exit_env.locals.get(local_id).copied()?.into(),
-                NulOp::GlobalGet(global_id) => {
-                    info.exit_env.globals.get(global_id).copied()?.into()
-                }
-                NulOp::MemorySize(_mem_id) => return None,
-            })
-        };
-
-        stack.push(try_process().unwrap_or_else(|| Expr::Nullary(op)));
-
-        Ok(())
-    }
-
-    fn process_un_op(
-        &mut self,
-        block_id: BlockId,
-        stack: &mut Vec<Expr<()>>,
-        op: UnOp,
-    ) -> Result<()> {
-        let info = &mut self.blocks[block_id];
-        let arg = stack.pop().unwrap();
-
-        let try_process = || -> Option<Expr<()>> {
-            let &Expr::Value(value, attrs) = &arg else {
-                return None;
-            };
-
-            Some(match op {
-                UnOp::I32Clz => Expr::Value(
-                    Value::I32(value.to_i32()?.leading_zeros() as i32),
-                    Default::default(),
-                ),
-                UnOp::I32Ctz => Expr::Value(
-                    Value::I32(value.to_i32()?.trailing_zeros() as i32),
-                    Default::default(),
-                ),
-                UnOp::I32Popcnt => Expr::Value(
-                    Value::I32(value.to_i32()?.count_ones() as i32),
-                    Default::default(),
-                ),
-
-                UnOp::I64Clz => Expr::Value(
-                    Value::I64(value.to_i64()?.leading_zeros() as i64),
-                    Default::default(),
-                ),
-                UnOp::I64Ctz => Expr::Value(
-                    Value::I64(value.to_i64()?.trailing_zeros() as i64),
-                    Default::default(),
-                ),
-                UnOp::I64Popcnt => Expr::Value(
-                    Value::I64(value.to_i64()?.count_ones() as i64),
-                    Default::default(),
-                ),
-
-                UnOp::F32Abs => Expr::Value(Value::F32(value.to_f32()?.abs()), attrs),
-                UnOp::F32Neg => Expr::Value(Value::F32(value.to_f32()?.neg()), attrs),
-                UnOp::F32Sqrt => Expr::Value(Value::F32(value.to_f32()?.sqrt()), attrs),
-                UnOp::F32Ceil => Expr::Value(Value::F32(value.to_f32()?.ceil()), attrs),
-                UnOp::F32Floor => Expr::Value(Value::F32(value.to_f32()?.floor()), attrs),
-                UnOp::F32Trunc => Expr::Value(Value::F32(value.to_f32()?.trunc()), attrs),
-                UnOp::F32Nearest => Expr::Value(Value::F32(value.to_f32()?.nearest()), attrs),
-
-                UnOp::F64Abs => Expr::Value(Value::F64(value.to_f64()?.abs()), attrs),
-                UnOp::F64Neg => Expr::Value(Value::F64(value.to_f64()?.neg()), attrs),
-                UnOp::F64Sqrt => Expr::Value(Value::F64(value.to_f64()?.sqrt()), attrs),
-                UnOp::F64Ceil => Expr::Value(Value::F64(value.to_f64()?.ceil()), attrs),
-                UnOp::F64Floor => Expr::Value(Value::F64(value.to_f64()?.floor()), attrs),
-                UnOp::F64Trunc => Expr::Value(Value::F64(value.to_f64()?.trunc()), attrs),
-                UnOp::F64Nearest => Expr::Value(Value::F64(value.to_f64()?.nearest()), attrs),
-
-                UnOp::I32Eqz => Expr::Value(
-                    Value::I32((value.to_i32()? == 0) as i32),
-                    Default::default(),
-                ),
-                UnOp::I64Eqz => Expr::Value(
-                    Value::I32((value.to_i64()? == 0) as i32),
-                    Default::default(),
-                ),
-
-                UnOp::I32WrapI64 => Expr::Value(Value::I32(value.to_i64()? as i32), attrs),
-
-                UnOp::I64ExtendI32S => Expr::Value(Value::I64(value.to_i32()? as i64), attrs),
-                UnOp::I64ExtendI32U => Expr::Value(Value::I64(value.to_u32()? as i64), attrs),
-
-                UnOp::I32TruncF32S => Expr::Value(Value::I32(value.to_f32()?.trunc_i32()), attrs),
-                UnOp::I32TruncF32U => {
-                    Expr::Value(Value::I32(value.to_f32()?.trunc_u32() as i32), attrs)
-                }
-                UnOp::I32TruncF64S => Expr::Value(Value::I32(value.to_f64()?.trunc_i32()), attrs),
-                UnOp::I32TruncF64U => {
-                    Expr::Value(Value::I32(value.to_f64()?.trunc_u32() as i32), attrs)
-                }
-
-                UnOp::I64TruncF32S => Expr::Value(Value::I64(value.to_f32()?.trunc_i64()), attrs),
-                UnOp::I64TruncF32U => {
-                    Expr::Value(Value::I64(value.to_f32()?.trunc_u64() as i64), attrs)
-                }
-                UnOp::I64TruncF64S => Expr::Value(Value::I64(value.to_f64()?.trunc_i64()), attrs),
-                UnOp::I64TruncF64U => {
-                    Expr::Value(Value::I64(value.to_f64()?.trunc_u64() as i64), attrs)
-                }
-
-                UnOp::F32DemoteF64 => Expr::Value(Value::F32(value.to_f64()?.demote()), attrs),
-                UnOp::F64PromoteF32 => Expr::Value(Value::F64(value.to_f32()?.promote()), attrs),
-
-                UnOp::F32ConvertI32S => {
-                    Expr::Value(Value::F32((value.to_i32()? as f32).into()), attrs)
-                }
-                UnOp::F32ConvertI32U => {
-                    Expr::Value(Value::F32((value.to_u32()? as f32).into()), attrs)
-                }
-                UnOp::F32ConvertI64S => {
-                    Expr::Value(Value::F32((value.to_i64()? as f32).into()), attrs)
-                }
-                UnOp::F32ConvertI64U => {
-                    Expr::Value(Value::F32((value.to_u64()? as f32).into()), attrs)
-                }
-
-                UnOp::F64ConvertI32S => {
-                    Expr::Value(Value::F64((value.to_i32()? as f64).into()), attrs)
-                }
-                UnOp::F64ConvertI32U => {
-                    Expr::Value(Value::F64((value.to_u32()? as f64).into()), attrs)
-                }
-                UnOp::F64ConvertI64S => {
-                    Expr::Value(Value::F64((value.to_i64()? as f64).into()), attrs)
-                }
-                UnOp::F64ConvertI64U => {
-                    Expr::Value(Value::F64((value.to_u64()? as f64).into()), attrs)
-                }
-
-                UnOp::F32ReinterpretI32 => {
-                    Expr::Value(Value::F32(F32::from_bits(value.to_u32()?)), attrs)
-                }
-                UnOp::F64ReinterpretI64 => {
-                    Expr::Value(Value::F64(F64::from_bits(value.to_u64()?)), attrs)
-                }
-                UnOp::I32ReinterpretF32 => {
-                    Expr::Value(Value::I32(value.to_f32()?.to_bits() as i32), attrs)
-                }
-                UnOp::I64ReinterpretF64 => {
-                    Expr::Value(Value::I64(value.to_f64()?.to_bits() as i64), attrs)
-                }
-
-                UnOp::I32Extend8S => Expr::Value(Value::I32(value.to_i32()? as i8 as i32), attrs),
-                UnOp::I32Extend16S => Expr::Value(Value::I32(value.to_i32()? as i16 as i32), attrs),
-
-                UnOp::I64Extend8S => Expr::Value(Value::I64(value.to_i64()? as i8 as i64), attrs),
-                UnOp::I64Extend16S => Expr::Value(Value::I64(value.to_i64()? as i16 as i64), attrs),
-                UnOp::I64Extend32S => Expr::Value(Value::I64(value.to_i64()? as i32 as i64), attrs),
-
-                UnOp::Load(mem_arg, load) => match value {
-                    Value::I32(base_addr) if attrs.contains(ValueAttrs::CONST_PTR) => {
-                        let base_addr = base_addr as u32;
-                        let start = (base_addr + mem_arg.offset) as usize;
-                        let range = start..start + load.src_size();
-
-                        let bytes = match self.interp.module.get_mem(mem_arg.mem_id, range) {
-                            Ok(bytes) => bytes,
-
-                            Err(e) => {
-                                warn!("encountered an error while specializing a constant memory load: {e}");
-
-                                return None;
-                            }
-                        };
-
-                        Expr::Value(load.load(bytes).lift_ptr(), attrs.deref_attrs())
-                    }
-
-                    Value::Ptr(Ptr { id, offset, .. })
-                        if mem_arg.mem_id == self.interp.module.default_mem =>
-                    {
-                        trace!("performing symbolic load");
-                        let start = offset.wrapping_add_unsigned(mem_arg.offset) as isize;
-                        let range = start..start.checked_add_unsigned(load.src_size())?;
-
-                        trace!("  mem_slice={:?}", info.exit_env.mem.get(id as usize));
-                        let bytes = info.exit_env.mem.get(id as usize)?.read(range)?;
-
-                        Expr::Value(load.load(bytes).lift_ptr(), attrs.deref_attrs())
-                    }
-
-                    _ => return None,
-                },
-
-                UnOp::MemoryGrow(_mem_id) => return None,
-            })
-        };
-
-        stack.push(try_process().unwrap_or_else(|| {
-            Expr::Unary(op, Box::new(Self::convert_expr(&self.symbolic_ptrs, arg)))
-        }));
-
-        Ok(())
-    }
-
-    fn process_bin_op(
-        &mut self,
-        _block_id: BlockId,
-        stack: &mut Vec<Expr<()>>,
-        op: BinOp,
-    ) -> Result<()> {
-        let mut args: [_; 2] = array::from_fn(|_| stack.pop().unwrap());
-        args.reverse();
-
-        let try_process = || -> Option<Expr<()>> {
-            let &[Expr::Value(lhs, lhs_attrs), Expr::Value(rhs, rhs_attrs)] = &args else {
-                return None;
-            };
-            let meet_attrs = lhs_attrs.meet(&rhs_attrs);
-
-            Some(match op {
-                BinOp::I32Add => Expr::Value(
-                    match (lhs, rhs) {
-                        (Value::I32(lhs), Value::I32(rhs)) => Value::I32(lhs.wrapping_add(rhs)),
-
-                        (Value::I32(offset), Value::Ptr(ptr))
-                        | (Value::Ptr(ptr), Value::I32(offset)) => Value::Ptr(ptr.add(offset)),
-
-                        _ => return None,
-                    },
-                    lhs_attrs.addsub_attrs(&rhs_attrs),
-                ),
-
-                BinOp::I32Sub => Expr::Value(
-                    match (lhs, rhs) {
-                        (Value::I32(lhs), Value::I32(rhs)) => Value::I32(lhs.wrapping_sub(rhs)),
-
-                        (Value::I32(offset), Value::Ptr(ptr))
-                        | (Value::Ptr(ptr), Value::I32(offset)) => Value::Ptr(ptr.sub(offset)),
-
-                        _ => return None,
-                    },
-                    lhs_attrs.addsub_attrs(&rhs_attrs),
-                ),
-
-                BinOp::I32Mul => Expr::Value(
-                    Value::I32(lhs.to_i32()?.wrapping_mul(rhs.to_i32()?)),
-                    meet_attrs,
-                ),
-                BinOp::I32DivS => match (lhs.to_i32()?, rhs.to_i32()?) {
-                    (_, 0) => {
-                        warn!("encountered division by zero during specialization");
-                        // TODO: stop processing the block body and terminate it with a trap
-                        return None;
-                    }
-                    (lhs, -1) if lhs == i32::MIN => {
-                        warn!("encountered an overflow while performing signed division");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, rhs) => Expr::Value(Value::I32(lhs / rhs), meet_attrs),
-                },
-                BinOp::I32DivU => match (lhs.to_u32()?, rhs.to_u32()?) {
-                    (_, 0) => {
-                        warn!("encountered division by zero during specialization");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, rhs) => Expr::Value(Value::I32((lhs / rhs) as i32), meet_attrs),
-                },
-                BinOp::I32RemS => match (lhs.to_i32()?, rhs.to_i32()?) {
-                    (_, 0) => {
-                        warn!("trying to take the remainder of division by zero during specialization");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, rhs) => Expr::Value(Value::I32(lhs % rhs), meet_attrs),
-                },
-                BinOp::I32RemU => match (lhs.to_u32()?, rhs.to_u32()?) {
-                    (_, 0) => {
-                        warn!("trying to take the remainder of division by zero during specialization");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, rhs) => Expr::Value(Value::I32((lhs % rhs) as i32), meet_attrs),
-                },
-                BinOp::I32And => Expr::Value(Value::I32(lhs.to_i32()? & rhs.to_i32()?), meet_attrs),
-                BinOp::I32Or => Expr::Value(Value::I32(lhs.to_i32()? | rhs.to_i32()?), meet_attrs),
-                BinOp::I32Xor => Expr::Value(Value::I32(lhs.to_i32()? ^ rhs.to_i32()?), meet_attrs),
-                BinOp::I32Shl => Expr::Value(
-                    Value::I32(lhs.to_i32()?.wrapping_shl(rhs.to_u32()?)),
-                    meet_attrs,
-                ),
-                BinOp::I32ShrS => Expr::Value(
-                    Value::I32(lhs.to_i32()?.wrapping_shr(rhs.to_u32()?)),
-                    meet_attrs,
-                ),
-                BinOp::I32ShrU => Expr::Value(
-                    Value::I32(lhs.to_u32()?.wrapping_shr(rhs.to_u32()?) as i32),
-                    meet_attrs,
-                ),
-                BinOp::I32Rotl => Expr::Value(
-                    Value::I32(lhs.to_i32()?.rotate_left(rhs.to_u32()?)),
-                    meet_attrs,
-                ),
-                BinOp::I32Rotr => Expr::Value(
-                    Value::I32(lhs.to_i32()?.rotate_right(rhs.to_u32()?)),
-                    meet_attrs,
-                ),
-
-                BinOp::I64Add => Expr::Value(
-                    Value::I64(lhs.to_i64()?.wrapping_add(rhs.to_i64()?)),
-                    meet_attrs,
-                ),
-                BinOp::I64Sub => Expr::Value(
-                    Value::I64(lhs.to_i64()?.wrapping_sub(rhs.to_i64()?)),
-                    meet_attrs,
-                ),
-                BinOp::I64Mul => Expr::Value(
-                    Value::I64(lhs.to_i64()?.wrapping_mul(rhs.to_i64()?)),
-                    meet_attrs,
-                ),
-                BinOp::I64DivS => match (lhs.to_i64()?, rhs.to_i64()?) {
-                    (_, 0) => {
-                        warn!("encountered division by zero during specialization");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, -1) if lhs == i64::MIN => {
-                        warn!("encountered an overflow while performing signed division");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, rhs) => Expr::Value(Value::I64(lhs / rhs), meet_attrs),
-                },
-                BinOp::I64DivU => match (lhs.to_u64()?, rhs.to_u64()?) {
-                    (_, 0) => {
-                        warn!("encountered division by zero during specialization");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, rhs) => Expr::Value(Value::I64((lhs / rhs) as i64), meet_attrs),
-                },
-                BinOp::I64RemS => match (lhs.to_i64()?, rhs.to_i64()?) {
-                    (_, 0) => {
-                        warn!("trying to take the remainder of division by zero during specialization");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, rhs) => Expr::Value(Value::I64(lhs % rhs), meet_attrs),
-                },
-                BinOp::I64RemU => match (lhs.to_i64()?, rhs.to_i64()?) {
-                    (_, 0) => {
-                        warn!("trying to take the remainder of division by zero during specialization");
-                        // TODO: see above
-                        return None;
-                    }
-                    (lhs, rhs) => Expr::Value(Value::I64((lhs % rhs) as i64), meet_attrs),
-                },
-                BinOp::I64And => Expr::Value(Value::I64(lhs.to_i64()? & rhs.to_i64()?), meet_attrs),
-                BinOp::I64Or => Expr::Value(Value::I64(lhs.to_i64()? | rhs.to_i64()?), meet_attrs),
-                BinOp::I64Xor => Expr::Value(Value::I64(lhs.to_i64()? ^ rhs.to_i64()?), meet_attrs),
-                BinOp::I64Shl => Expr::Value(
-                    Value::I64(lhs.to_i64()?.wrapping_shl(rhs.to_u64()? as u32)),
-                    meet_attrs,
-                ),
-                BinOp::I64ShrS => Expr::Value(
-                    Value::I64(lhs.to_i64()?.wrapping_shr(rhs.to_u64()? as u32)),
-                    meet_attrs,
-                ),
-                BinOp::I64ShrU => Expr::Value(
-                    Value::I64(lhs.to_u64()?.wrapping_shr(rhs.to_u64()? as u32) as i64),
-                    meet_attrs,
-                ),
-                BinOp::I64Rotl => Expr::Value(
-                    Value::I64(lhs.to_i64()?.rotate_left(rhs.to_u64()? as u32)),
-                    meet_attrs,
-                ),
-                BinOp::I64Rotr => Expr::Value(
-                    Value::I64(lhs.to_i64()?.rotate_right(rhs.to_u64()? as u32)),
-                    meet_attrs,
-                ),
-
-                BinOp::F32Add => Expr::Value(Value::F32(lhs.to_f32()? + rhs.to_f32()?), meet_attrs),
-                BinOp::F32Sub => Expr::Value(Value::F32(lhs.to_f32()? - rhs.to_f32()?), meet_attrs),
-                BinOp::F32Mul => Expr::Value(Value::F32(lhs.to_f32()? * rhs.to_f32()?), meet_attrs),
-                BinOp::F32Div => Expr::Value(Value::F32(lhs.to_f32()? / rhs.to_f32()?), meet_attrs),
-                BinOp::F32Min => {
-                    Expr::Value(Value::F32(lhs.to_f32()?.min(rhs.to_f32()?)), meet_attrs)
-                }
-                BinOp::F32Max => {
-                    Expr::Value(Value::F32(lhs.to_f32()?.max(rhs.to_f32()?)), meet_attrs)
-                }
-                BinOp::F32Copysign => Expr::Value(
-                    Value::F32(lhs.to_f32()?.copysign(rhs.to_f32()?)),
-                    meet_attrs,
-                ),
-
-                BinOp::F64Add => Expr::Value(Value::F64(lhs.to_f64()? + rhs.to_f64()?), meet_attrs),
-                BinOp::F64Sub => Expr::Value(Value::F64(lhs.to_f64()? - rhs.to_f64()?), meet_attrs),
-                BinOp::F64Mul => Expr::Value(Value::F64(lhs.to_f64()? * rhs.to_f64()?), meet_attrs),
-                BinOp::F64Div => Expr::Value(Value::F64(lhs.to_f64()? / rhs.to_f64()?), meet_attrs),
-                BinOp::F64Min => {
-                    Expr::Value(Value::F64(lhs.to_f64()?.min(rhs.to_f64()?)), meet_attrs)
-                }
-                BinOp::F64Max => {
-                    Expr::Value(Value::F64(lhs.to_f64()?.max(rhs.to_f64()?)), meet_attrs)
-                }
-                BinOp::F64Copysign => Expr::Value(
-                    Value::F64(lhs.to_f64()?.copysign(rhs.to_f64()?)),
-                    meet_attrs,
-                ),
-
-                BinOp::I32Eq => Expr::Value(
-                    Value::I32((lhs.to_i32()? == rhs.to_i32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32Ne => Expr::Value(
-                    Value::I32((lhs.to_i32()? != rhs.to_i32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32LtS => Expr::Value(
-                    Value::I32((lhs.to_i32()? < rhs.to_i32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32LtU => Expr::Value(
-                    Value::I32((lhs.to_u32()? < rhs.to_u32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32GtS => Expr::Value(
-                    Value::I32((lhs.to_i32()? > rhs.to_i32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32GtU => Expr::Value(
-                    Value::I32((lhs.to_u32()? > rhs.to_u32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32LeS => Expr::Value(
-                    Value::I32((lhs.to_i32()? <= rhs.to_i32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32LeU => Expr::Value(
-                    Value::I32((lhs.to_u32()? <= rhs.to_u32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32GeS => Expr::Value(
-                    Value::I32((lhs.to_i32()? >= rhs.to_i32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I32GeU => Expr::Value(
-                    Value::I32((lhs.to_u32()? >= rhs.to_u32()?) as i32),
-                    Default::default(),
-                ),
-
-                BinOp::I64Eq => Expr::Value(
-                    Value::I32((lhs.to_i64()? == rhs.to_i64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64Ne => Expr::Value(
-                    Value::I32((lhs.to_i64()? != rhs.to_i64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64LtS => Expr::Value(
-                    Value::I32((lhs.to_i64()? < rhs.to_i64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64LtU => Expr::Value(
-                    Value::I32((lhs.to_u64()? < rhs.to_u64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64GtS => Expr::Value(
-                    Value::I32((lhs.to_i64()? > rhs.to_i64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64GtU => Expr::Value(
-                    Value::I32((lhs.to_u64()? > rhs.to_u64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64LeS => Expr::Value(
-                    Value::I32((lhs.to_i64()? <= rhs.to_i64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64LeU => Expr::Value(
-                    Value::I32((lhs.to_u64()? <= rhs.to_u64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64GeS => Expr::Value(
-                    Value::I32((lhs.to_i64()? >= rhs.to_i64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::I64GeU => Expr::Value(
-                    Value::I32((lhs.to_u64()? >= rhs.to_u64()?) as i32),
-                    Default::default(),
-                ),
-
-                BinOp::F32Eq => Expr::Value(
-                    Value::I32((lhs.to_f32()? == rhs.to_f32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F32Ne => Expr::Value(
-                    Value::I32((lhs.to_f32()? != rhs.to_f32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F32Lt => Expr::Value(
-                    Value::I32((lhs.to_f32()? < rhs.to_f32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F32Gt => Expr::Value(
-                    Value::I32((lhs.to_f32()? > rhs.to_f32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F32Le => Expr::Value(
-                    Value::I32((lhs.to_f32()? <= rhs.to_f32()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F32Ge => Expr::Value(
-                    Value::I32((lhs.to_f32()? >= rhs.to_f32()?) as i32),
-                    Default::default(),
-                ),
-
-                BinOp::F64Eq => Expr::Value(
-                    Value::I32((lhs.to_f64()? == rhs.to_f64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F64Ne => Expr::Value(
-                    Value::I32((lhs.to_f64()? != rhs.to_f64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F64Lt => Expr::Value(
-                    Value::I32((lhs.to_f64()? < rhs.to_f64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F64Gt => Expr::Value(
-                    Value::I32((lhs.to_f64()? > rhs.to_f64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F64Le => Expr::Value(
-                    Value::I32((lhs.to_f64()? <= rhs.to_f64()?) as i32),
-                    Default::default(),
-                ),
-                BinOp::F64Ge => Expr::Value(
-                    Value::I32((lhs.to_f64()? >= rhs.to_f64()?) as i32),
-                    Default::default(),
-                ),
-            })
-        };
-
-        stack.push(try_process().unwrap_or_else(|| {
-            Expr::Binary(
-                op,
-                Box::new(args.map(|expr| Self::convert_expr(&self.symbolic_ptrs, expr))),
-            )
-        }));
-
-        Ok(())
-    }
-
-    fn process_tern_op(
-        &mut self,
-        _block_id: BlockId,
-        stack: &mut Vec<Expr<()>>,
-        op: TernOp,
-    ) -> Result<()> {
-        let [arg2, arg1, arg0] = array::from_fn(|_| stack.pop().unwrap());
-
-        let result = 'result: {
-            match op {
-                TernOp::Select => match arg2 {
-                    Expr::Value(Value::I32(0), _) => break 'result arg1,
-                    Expr::Value(Value::I32(_), _) => break 'result arg0,
-                    _ => {}
-                },
+        let mut try_process = || -> bool {
+            if mem_arg.mem_id != self.interp.module.default_mem {
+                return false;
             }
 
-            Expr::Ternary(
-                op,
-                Box::new(
-                    [arg0, arg1, arg2].map(|expr| Self::convert_expr(&self.symbolic_ptrs, expr)),
-                ),
-            )
+            let &Expr::Value(Value::Ptr(Ptr { id, offset, .. }), _) = &addr else {
+                return false;
+            };
+
+            let id = id as usize;
+            let start = offset.wrapping_add_unsigned(mem_arg.offset) as isize;
+            let end = start.checked_add_unsigned(store.dst_size());
+            let mem = &mut self.blocks[block_id].exit_env.mem;
+
+            if let (Some((value, _)), Some(end)) = (value.to_value(), end) {
+                trace!("performing symbolic store: {start}..{end}");
+
+                if mem.len() <= id {
+                    mem.resize_with(id, Default::default);
+                }
+
+                store.store(mem[id].write(start..end), value);
+
+                return true;
+            }
+
+            if let Some(mem_slice) = mem.get_mut(id) {
+                trace!("invalidating {start}..{end:?}: {value} is not a value");
+                mem_slice.invalidate(start, end);
+            }
+
+            false
         };
 
-        stack.push(result);
-
-        Ok(())
+        Ok((!try_process()).then(|| {
+            Stmt::Store(
+                mem_arg,
+                store,
+                Box::new([Self::convert_expr(&self.symbolic_ptrs, addr), value]),
+            )
+        }))
     }
 
     fn process_call(
@@ -1858,7 +1342,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     shape: args.iter().map(|arg| arg.to_value().is_some()).collect(),
                 });
 
-                let target_cfg = self.interp.get_cfg(func_id).unwrap();
+                let target_cfg = self.get_cfg(func_id).unwrap();
                 self.process_locals(func_ctx_id);
                 let exit_env = &mut self.blocks[block_id].exit_env;
 

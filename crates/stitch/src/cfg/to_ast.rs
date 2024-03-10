@@ -337,6 +337,16 @@ impl Translator<'_> {
             }
 
             Stmt::Call(call) => exprs.push(self.translate_call(call)),
+
+            &Stmt::MemoryCopy { dst_mem_id, src_mem_id, ref args } => exprs.push(AstExpr::Ternary(
+                AstTernOp::MemoryCopy { dst_mem_id, src_mem_id },
+                array::from_fn(|i| Box::new(self.translate_expr(&args[i]))),
+            )),
+
+            &Stmt::MemoryFill(mem_id, ref args) => exprs.push(AstExpr::Ternary(
+                AstTernOp::MemoryFill { mem_id },
+                array::from_fn(|i| Box::new(self.translate_expr(&args[i]))),
+            )),
         }
     }
 

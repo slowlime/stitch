@@ -22,7 +22,7 @@ const FEATURES: WasmFeatures = WasmFeatures {
     sign_extension: true,
     reference_types: false,
     multi_value: false,
-    bulk_memory: false,
+    bulk_memory: true,
     simd: false,
     relaxed_simd: false,
     threads: false,
@@ -84,6 +84,21 @@ pub enum ParseError {
         expected: String,
         actual: ast::ty::FuncType,
     },
+
+    #[error("element segment #{segment_idx} has an unsupported mode {mode}")]
+    UnsupportedElementSegmentMode {
+        segment_idx: usize,
+        mode: &'static str,
+    },
+
+    #[error("data segment #{segment_idx} has an unsupported mode {mode}")]
+    UnsupportedDataSegmentMode {
+        segment_idx: usize,
+        mode: &'static str,
+    },
+
+    #[error("unsupported instruction `{instr}` at byte 0x{offset:x}")]
+    UnsupportedInstruction { instr: String, offset: usize },
 }
 
 fn make_val_type(val_ty: wasmparser::ValType) -> ast::ty::ValType {
@@ -203,7 +218,10 @@ impl Parser {
 
     fn add_global(&mut self, global: ast::Global) -> GlobalId {
         let id = self.module.globals.insert(global);
-        trace!("added global {id:?} of type {:?}", self.module.globals[id].ty);
+        trace!(
+            "added global {id:?} of type {:?}",
+            self.module.globals[id].ty
+        );
         self.globals.push(id);
 
         id
@@ -575,7 +593,14 @@ impl Parser {
                 offset_expr,
             } = elem.kind
             else {
-                unreachable!();
+                return Err(ParseError::UnsupportedElementSegmentMode {
+                    segment_idx,
+                    mode: match elem.kind {
+                        wasmparser::ElementKind::Active { .. } => unreachable!(),
+                        wasmparser::ElementKind::Passive => "passive",
+                        wasmparser::ElementKind::Declared => "declarative",
+                    },
+                });
             };
             let table_idx = table_index.unwrap_or(0);
             let [offset] = self
@@ -631,7 +656,13 @@ impl Parser {
                 offset_expr,
             } = data.kind
             else {
-                unreachable!();
+                return Err(ParseError::UnsupportedDataSegmentMode {
+                    segment_idx,
+                    mode: match data.kind {
+                        wasmparser::DataKind::Active { .. } => unreachable!(),
+                        wasmparser::DataKind::Passive => "passive",
+                    },
+                });
             };
 
             let mem_idx = mem_idx as usize;
@@ -1347,6 +1378,44 @@ impl Parser {
                 Operator::I64Extend8S => ctx.un_expr(UnOp::I64Extend8S),
                 Operator::I64Extend16S => ctx.un_expr(UnOp::I64Extend16S),
                 Operator::I64Extend32S => ctx.un_expr(UnOp::I64Extend32S),
+
+                Operator::MemoryInit { .. } => {
+                    return Err(ParseError::UnsupportedInstruction {
+                        instr: "memory.init".into(),
+                        offset,
+                    })
+                }
+                Operator::DataDrop { .. } => {
+                    return Err(ParseError::UnsupportedInstruction {
+                        instr: "data.drop".into(),
+                        offset,
+                    })
+                }
+                Operator::MemoryCopy { dst_mem, src_mem } => ctx.tern_expr(TernOp::MemoryCopy {
+                    dst_mem_id: ctx.parser.mems[dst_mem as usize],
+                    src_mem_id: ctx.parser.mems[src_mem as usize],
+                }),
+                Operator::MemoryFill { mem } => ctx.tern_expr(TernOp::MemoryFill {
+                    mem_id: ctx.parser.mems[mem as usize],
+                }),
+                Operator::TableInit { .. } => {
+                    return Err(ParseError::UnsupportedInstruction {
+                        instr: "table.init".into(),
+                        offset,
+                    })
+                }
+                Operator::ElemDrop { .. } => {
+                    return Err(ParseError::UnsupportedInstruction {
+                        instr: "elem.drop".into(),
+                        offset,
+                    })
+                }
+                Operator::TableCopy { .. } => {
+                    return Err(ParseError::UnsupportedInstruction {
+                        instr: "table.copy".into(),
+                        offset,
+                    })
+                }
 
                 op => unreachable!("unsupported operation {op:?}"),
             };
