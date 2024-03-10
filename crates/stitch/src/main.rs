@@ -29,7 +29,9 @@ fn main() -> Result<()> {
     let module = encode::encode(&mut module);
 
     if cfg!(debug_assertions) {
-        parse::parse(&module).unwrap();
+        if let Err(e) = parse::parse(&module) {
+            panic!("emitted a malformed module: {e}");
+        }
     }
 
     fs::write(&output_path, &module).context("could not save the result")?;

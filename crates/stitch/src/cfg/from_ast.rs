@@ -302,7 +302,11 @@ impl<'a> Translator<'a> {
             let is_tail = match last_result {
                 ExprResult::Unreachable => return,
                 ExprResult::DefinedAt(block_id, idx) => {
-                    matches!(self.func.blocks[block_id].body[idx], Stmt::Drop(_))
+                    match &self.func.blocks[block_id].body[idx] {
+                        Stmt::Drop(_) => true,
+                        Stmt::Call(call) => call.ret_local_id().is_some(),
+                        _ => false,
+                    }
                 }
                 ExprResult::BlockResult(block_id) => self.block_results.contains_key(block_id),
             };

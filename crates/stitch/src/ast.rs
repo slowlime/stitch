@@ -277,6 +277,8 @@ impl Module {
             _ => true,
         });
 
+        // FIXME: remove direct calls to the function
+
         Some(result)
     }
 

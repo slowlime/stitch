@@ -14,9 +14,7 @@ use crate::ast::ty::{ElemType, FuncType};
 use crate::ast::{
     ConstExpr, Export, ExportDef, FuncId, GlobalDef, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE,
 };
-use crate::cfg::{
-    BinOp, BlockId, Call, Expr, FuncBody, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp,
-};
+use crate::cfg::{BinOp, BlockId, Call, Expr, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp};
 use crate::interp::{format_arg_list, SpecializedFunc};
 use crate::util::float::{F32, F64};
 
@@ -300,10 +298,8 @@ impl Interpreter<'_> {
     ) -> Result<()> {
         let func = &self.module.funcs[func_id];
         self.check_args(&args, func.ty())?;
+        ensure!(!func.is_import(), "cannot interpret imported function");
 
-        let Some(body) = func.body() else {
-            bail!("cannot interpret imported function");
-        };
         if matches!(
             self.spec_funcs
                 .get(func_id)
@@ -313,12 +309,7 @@ impl Interpreter<'_> {
             bail!("cannot interpret a function while it is being specialized");
         }
 
-        let func = self
-            .cfgs
-            .entry(func_id)
-            .unwrap()
-            .or_insert_with(|| Rc::new(FuncBody::from_ast(self.module, body)));
-
+        let func = self.get_cfg(func_id).unwrap();
         let mut locals: SecondaryMap<LocalId, (Value, ValueAttrs)> = func
             .locals
             .iter()
@@ -580,16 +571,22 @@ impl Interpreter<'_> {
                     MemoryDef::Bytes(ref mut bytes) => {
                         let prev_pages = bytes.len().div_ceil(PAGE_SIZE);
                         let increment = arg.unwrap_u32() as usize;
+                        let new_pages = prev_pages + increment;
 
                         match mem.ty.limits.max {
-                            Some(max) if prev_pages + increment > max as usize => {
+                            Some(max) if new_pages > max as usize => {
                                 (Value::I32(-1), Default::default())
                             }
 
                             _ => {
-                                bytes.resize((prev_pages + increment) * PAGE_SIZE, 0);
+                                if let Ok(new_pages_u32) = u32::try_from(new_pages) {
+                                    mem.ty.limits.min = mem.ty.limits.min.max(new_pages_u32);
+                                    bytes.resize(new_pages * PAGE_SIZE, 0);
 
-                                (Value::I32(prev_pages as i32), Default::default())
+                                    (Value::I32(prev_pages as i32), Default::default())
+                                } else {
+                                    (Value::I32(-1), Default::default())
+                                }
                             }
                         }
                     }

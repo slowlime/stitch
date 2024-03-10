@@ -147,8 +147,8 @@ pub fn arg_read(idx: usize, buf: &mut [u8], offset: usize) -> usize {
 
 #[macro_export]
 macro_rules! specialize {
-    ($label:literal: fn( $($param:tt)*, ) $(-> $ret:ty)?) => {
-        specialize!(@parse $label {$($param)*} $({$ret})?: orig = {}, spec = {}, params = {})
+    ($label:literal: fn( $($param:tt)* $(,)? ) $(-> $ret:ty)?) => {
+        specialize!(@parse $label {$($param)*,} $({$ret})?: orig = {}, spec = {}, params = {}, args = {})
     };
 
     (
@@ -169,7 +169,7 @@ macro_rules! specialize {
         ) -> Option<extern fn($($spec_ty),*) $(-> $ret)?> {
             #[link(wasm_import_module = "stitch")]
             extern {
-                #[link_name = "specialize#" $label]
+                #[link_name = concat!("specialize#", $label)]
                 fn specialize(
                     f: extern fn($($orig_ty),*) $(-> $ret)?,
                     name_ptr: *const u8,
@@ -255,4 +255,28 @@ pub fn print_str(s: &str) {
 
 pub fn is_specializing() -> bool {
     unsafe { ffi::is_specializing() }
+}
+
+#[macro_export]
+macro_rules! inline {
+    (fn($($param:ty),* $(,)?) $(-> $ret:ty)?) => {{
+        fn inline(f: extern fn($($param),*) $(-> $ret)?) -> extern fn($($param),*) $(-> $ret)? {
+            use ::std::mem::transmute;
+
+            unsafe { transmute($crate::ffi::inline(transmute::<_, extern fn()>(f))) }
+        }
+
+        inline
+    }};
+}
+
+#[macro_export]
+macro_rules! print_str {
+    ($($param:tt)+) => {{
+        if let Some(s) = ::std::format_args!($($param)+).as_str() {
+            $crate::print_str(s);
+        } else {
+            $crate::print_str(&::std::format!($($param)+).to_string());
+        }
+    }};
 }

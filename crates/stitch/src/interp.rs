@@ -189,8 +189,11 @@ impl<'a> Interpreter<'a> {
     fn get_cfg(&mut self, func_id: FuncId) -> Option<Rc<FuncBody>> {
         let body = self.module.funcs[func_id].body()?;
 
-        Some(Rc::clone(self.cfgs.entry(func_id).unwrap().or_insert_with(
-            || Rc::new(FuncBody::from_ast(&self.module, body)),
-        )))
+        Some(Rc::clone(self.cfgs.entry(func_id).unwrap().or_insert_with(|| {
+            let cfg = Rc::new(FuncBody::from_ast(&self.module, body));
+            trace!("cfg for {func_id:?}:\n{cfg}");
+
+            cfg
+        })))
     }
 }

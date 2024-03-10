@@ -187,6 +187,7 @@ impl Parser {
 
     fn add_table(&mut self, table: ast::Table) -> TableId {
         let id = self.module.tables.insert(table);
+        trace!("added table {id:?} of type {:?}", self.module.tables[id].ty);
         self.tables.push(id);
 
         id
@@ -194,6 +195,7 @@ impl Parser {
 
     fn add_mem(&mut self, mem: ast::Memory) -> MemoryId {
         let id = self.module.mems.insert(mem);
+        trace!("added mem {id:?} of type {:?}", self.module.mems[id].ty);
         self.mems.push(id);
 
         id
@@ -201,6 +203,7 @@ impl Parser {
 
     fn add_global(&mut self, global: ast::Global) -> GlobalId {
         let id = self.module.globals.insert(global);
+        trace!("added global {id:?} of type {:?}", self.module.globals[id].ty);
         self.globals.push(id);
 
         id
