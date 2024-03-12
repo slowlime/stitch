@@ -568,7 +568,15 @@ impl Translator<'_> {
             .local_map
             .entry(local_id)
             .unwrap()
-            .or_insert_with(|| self.ast.locals.insert(self.func.locals[local_id].clone()))
+            .or_insert_with(|| {
+                let ast_local_id = self.ast.locals.insert(self.func.locals[local_id].clone());
+
+                if let Some(name) = self.func.local_names.get(local_id) {
+                    self.ast.local_names.insert(ast_local_id, name.clone());
+                }
+
+                ast_local_id
+            })
     }
 
     fn is_merge_node(&self, block_id: BlockId) -> bool {

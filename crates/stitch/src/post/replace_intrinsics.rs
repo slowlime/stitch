@@ -131,4 +131,8 @@ impl PostProc<'_> {
                 .push(Expr::Value(Value::I32(-1), Default::default()))
         });
     }
+
+    pub(super) fn replace_intr_func_spec_policy(&mut self, func_id: FuncId) {
+        self.replace_intr(func_id, |_, _| {})
+    }
 }

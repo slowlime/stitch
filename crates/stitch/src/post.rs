@@ -47,6 +47,7 @@ impl<'a> PostProc<'a> {
                 IntrinsicDecl::FileOpen => self.replace_intr_file_open(func_id),
                 IntrinsicDecl::FileRead => self.replace_intr_file_read(func_id),
                 IntrinsicDecl::FileClose => self.replace_intr_file_close(func_id),
+                IntrinsicDecl::FuncSpecPolicy => self.replace_intr_func_spec_policy(func_id),
             }
         }
 

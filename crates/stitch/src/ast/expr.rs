@@ -227,14 +227,8 @@ pub fn format_value<E>(value: &Value<E>, attrs: ValueAttrs) -> impl Display + '_
                 }
             }
 
-            if !self.1.is_empty() {
-                for (idx, (name, _)) in self.1.iter_names().enumerate() {
-                    if idx == 0 {
-                        write!(f, " {name}")?;
-                    } else {
-                        write!(f, " | {name}")?;
-                    }
-                }
+            for (name, _) in self.1.iter_names() {
+                write!(f, " {name}")?;
             }
 
             write!(f, ")")

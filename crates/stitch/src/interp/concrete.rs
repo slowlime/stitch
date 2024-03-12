@@ -6,8 +6,10 @@ use std::rc::Rc;
 use std::{array, str};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use log::{info, trace};
+use log::{debug, info, trace, warn};
+use regex::Regex;
 use slotmap::{Key, SecondaryMap};
+use strum::VariantArray;
 
 use crate::ast::expr::{format_value, Never, ValueAttrs};
 use crate::ast::ty::{ElemType, FuncType};
@@ -15,7 +17,7 @@ use crate::ast::{
     ConstExpr, Export, ExportDef, FuncId, GlobalDef, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE,
 };
 use crate::cfg::{BinOp, BlockId, Call, Expr, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp};
-use crate::interp::{format_arg_list, SpecializedFunc};
+use crate::interp::{format_arg_list, FuncSpecPolicy, InlineDisposition, SpecializedFunc};
 use crate::util::float::{F32, F64};
 
 use super::Interpreter;
@@ -1048,6 +1050,7 @@ impl Interpreter<'_> {
                 IntrinsicDecl::FileOpen => self.eval_intr_file_open(frames, args)?,
                 IntrinsicDecl::FileRead => self.eval_intr_file_read(frames, args)?,
                 IntrinsicDecl::FileClose => self.eval_intr_file_close(frames, args)?,
+                IntrinsicDecl::FuncSpecPolicy => self.eval_intr_func_spec_policy(args)?,
             }
 
             let frame = frames.last_mut().unwrap();
@@ -1237,23 +1240,27 @@ impl Interpreter<'_> {
                 idx
             }
 
-            None => match table.ty.limits.max {
-                Some(max) if 2.max(elems.len() + 1) > max as usize => {
-                    bail!("cannot grow a table past its maximum size")
+            None => {
+                if elems.is_empty() {
+                    elems.push(None);
                 }
 
-                _ => {
-                    if elems.is_empty() {
-                        elems.push(None);
+                trace!("growing the function table to insert the specialized function id");
+                elems.push(Some(spec_func_id));
+                table.ty.limits.min = table.ty.limits.min.max(elems.len().try_into().unwrap());
+
+                if let Some(max) = &mut table.ty.limits.max {
+                    if 2.max(elems.len() + 1) > *max as usize {
+                        warn!(
+                            "growing the function table past its maximum size ({max}): expanding to {}",
+                            elems.len(),
+                        );
+                        *max = elems.len().try_into().unwrap();
                     }
-
-                    trace!("growing the function table to insert the specialized function id");
-                    elems.push(Some(spec_func_id));
-                    table.ty.limits.min = table.ty.limits.min.max(elems.len().try_into().unwrap());
-
-                    elems.len() - 1
                 }
-            },
+
+                elems.len() - 1
+            }
         };
 
         if let Some(name) = name {
@@ -1561,6 +1568,75 @@ impl Interpreter<'_> {
                 Value::I32(ErrorKind::InvalidInput as i32),
                 Default::default(),
             ));
+        }
+
+        Ok(())
+    }
+
+    fn eval_intr_func_spec_policy(
+        &mut self,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let [name_regexp_ptr, name_regexp_len, inline_policy] =
+            array::from_fn(|i| args[i].0.unwrap_u32());
+        let name_regexp_ptr = name_regexp_ptr as usize;
+        let name_regexp_len = name_regexp_len as usize;
+        ensure!(
+            !self.module.default_mem.is_null(),
+            "the module does not define a memory",
+        );
+
+        let name_regexp_bytes = self
+            .module
+            .get_mem(
+                self.module.default_mem,
+                name_regexp_ptr
+                    ..name_regexp_ptr
+                        .checked_add(name_regexp_len)
+                        .context("the name regexp is too long")?,
+            )
+            .context("could not read the name regexp")?;
+        let name_regexp_str =
+            str::from_utf8(name_regexp_bytes).context("could not decode the name regexp")?;
+        let name_regexp =
+            Regex::new(name_regexp_str).context("could not compile the name regexp")?;
+
+        let Some(inline_policy) = u8::try_from(inline_policy)
+            .ok()
+            .and_then(|inline_policy| InlineDisposition::from_repr(inline_policy))
+        else {
+            warn!("invalid inline policy {inline_policy}");
+            warn!(
+                "valid values are: {}",
+                InlineDisposition::VARIANTS
+                    .iter()
+                    .map(|variant| format!("{} ({variant})", *variant as u8))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            bail!("invalid inline policy {inline_policy}");
+        };
+
+        let func_spec_policy = FuncSpecPolicy { inline_policy };
+        let mut empty = true;
+
+        for (func_id, func) in &self.module.funcs {
+            if func.name().is_some_and(|name| name_regexp.is_match(name)) {
+                debug!(
+                    "applying a specialization policy to {func_id:?} ({}): {func_spec_policy:?}",
+                    func.name().unwrap(),
+                );
+                self.func_spec_policies
+                    .insert(func_id, func_spec_policy.clone());
+                empty = false;
+            }
+        }
+
+        if empty {
+            warn!(
+                "the name regexp didn't match any function: {}",
+                name_regexp.as_str()
+            );
         }
 
         Ok(())

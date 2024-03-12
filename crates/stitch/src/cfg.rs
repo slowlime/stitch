@@ -11,7 +11,7 @@ mod to_ast;
 
 use std::{iter, mem, slice};
 
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{new_key_type, SecondaryMap, SlotMap};
 
 use crate::ast::expr::{MemArg, Never, Value, ValueAttrs};
 use crate::ast::ty::{FuncType, ValType};
@@ -886,6 +886,7 @@ pub struct FuncBody {
     pub entry: BlockId,
     pub ty: FuncType,
     pub locals: SlotMap<LocalId, ValType>,
+    pub local_names: SecondaryMap<LocalId, String>,
     pub params: Vec<LocalId>,
 }
 
@@ -899,6 +900,7 @@ impl FuncBody {
             entry,
             ty,
             locals: Default::default(),
+            local_names: Default::default(),
             params: Default::default(),
         }
     }

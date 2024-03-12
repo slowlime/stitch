@@ -2,11 +2,11 @@ use std::mem;
 use std::ops::Range;
 
 use log::{log_enabled, trace, warn};
-use slotmap::SlotMap;
+use slotmap::{Key, SecondaryMap, SlotMap};
 use thiserror::Error;
 use wasmparser::{
-    BinaryReaderError, CompositeType, ExternalKind, Name, NameSectionReader, Naming, Operator,
-    Payload, SubType, WasmFeatures,
+    BinaryReaderError, CompositeType, ExternalKind, IndirectNaming, Name, NameSectionReader,
+    Naming, Operator, Payload, SubType, WasmFeatures,
 };
 
 use crate::ast::expr::{BinOp, ExprTy, NulOp, ReturnValueCount, TernOp, UnOp, Value};
@@ -173,6 +173,7 @@ struct Parser {
     module: ast::Module,
     types: Vec<TypeId>,
     funcs: Vec<FuncId>,
+    locals: SecondaryMap<FuncId, Vec<LocalId>>,
     tables: Vec<TableId>,
     mems: Vec<MemoryId>,
     globals: Vec<GlobalId>,
@@ -244,6 +245,7 @@ impl Parser {
             ast::ImportDesc::Func(ty_idx) => {
                 self.add_func(ast::Func::Import(ast::func::FuncImport {
                     name: None,
+                    param_names: Default::default(),
                     ty: self.module.types[*ty_idx].as_func().clone(),
                     import_id: id,
                 }));
@@ -251,6 +253,7 @@ impl Parser {
 
             ast::ImportDesc::Global(global_ty) => {
                 self.add_global(ast::Global {
+                    name: None,
                     ty: global_ty.clone(),
                     def: ast::GlobalDef::Import(id),
                 });
@@ -393,27 +396,7 @@ impl Parser {
                 }
 
                 Payload::CustomSection(reader) if reader.name() == "name" => {
-                    for name in NameSectionReader::new(reader.data(), reader.data_offset()) {
-                        match name? {
-                            Name::Module { name, .. } => {
-                                self.module.name = Some(name.into());
-                            }
-
-                            Name::Function(names) => {
-                                for name in names {
-                                    let Naming { index, name } = name?;
-
-                                    if let Some(&func_id) = self.funcs.get(index as usize) {
-                                        self.module.funcs[func_id].set_name(Some(name.into()));
-                                    } else {
-                                        warn!("the name section contains a name for a non-existent function #{index}");
-                                    }
-                                }
-                            }
-
-                            _ => {}
-                        }
-                    }
+                    self.parse_names(NameSectionReader::new(reader.data(), reader.data_offset()))?;
                 }
 
                 Payload::CustomSection(_) => {}
@@ -526,6 +509,7 @@ impl Parser {
             let pages = ty.limits.min as usize;
 
             self.add_mem(ast::Memory {
+                name: None,
                 ty,
                 def: ast::MemoryDef::Bytes(vec![0; pages * PAGE_SIZE]),
             });
@@ -550,7 +534,11 @@ impl Parser {
                 .unwrap();
             let def = ast::GlobalDef::Value(expr.try_into().unwrap());
 
-            self.add_global(ast::Global { ty, def });
+            self.add_global(ast::Global {
+                name: None,
+                ty,
+                def,
+            });
         }
 
         Ok(())
@@ -731,6 +719,110 @@ impl Parser {
         let func_body = self.module.funcs[func_id].body_mut().unwrap();
         func_body.main_block = body;
         func_body.blocks = blocks;
+        self.locals.insert(func_id, locals);
+
+        Ok(())
+    }
+
+    fn parse_names(&mut self, reader: wasmparser::NameSectionReader<'_>) -> Result<()> {
+        fn naming<K: Key>(
+            reader: wasmparser::NameMap<'_>,
+            ids: &[K],
+            what: &str,
+            mut f: impl FnMut(K, &str),
+        ) -> Result<()> {
+            for name in reader {
+                let Naming { index, name } = name?;
+
+                if let Some(&id) = ids.get(index as usize) {
+                    f(id, name);
+                } else {
+                    warn!("the name section contains a name for a non-existent {what} #{index}");
+                }
+            }
+
+            Ok(())
+        }
+
+        for name in reader {
+            match name? {
+                Name::Module { name, .. } => {
+                    self.module.name = Some(name.into());
+                }
+
+                Name::Function(names) => {
+                    naming(names, &self.funcs, "function", |func_id, name| {
+                        self.module.funcs[func_id].set_name(Some(name.into()));
+                    })?;
+                }
+
+                Name::Local(names) => {
+                    for names in names {
+                        let IndirectNaming {
+                            index: func_index,
+                            names,
+                        } = names?;
+                        let Some(&func_id) = self.funcs.get(func_index as usize) else {
+                            warn!(
+                                "the name section contains a name for \
+                                a non-existent function #{func_index}",
+                            );
+                            continue;
+                        };
+
+                        for name in names {
+                            let Naming { index, name } = name?;
+
+                            match &mut self.module.funcs[func_id] {
+                                ast::Func::Import(import) => {
+                                    if let Some(param_name) =
+                                        import.param_names.get_mut(index as usize)
+                                    {
+                                        param_name.replace(name.into());
+                                        continue;
+                                    }
+                                }
+
+                                ast::Func::Body(body) => {
+                                    if let Some(&local_id) =
+                                        self.locals[func_id].get(index as usize)
+                                    {
+                                        body.local_names.insert(local_id, name.into());
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            warn!(
+                                "the name section contains a name for a non-existent \
+                                local #{index} of function #{func_index} ({})",
+                                self.module.func_name(func_id),
+                            );
+                        }
+                    }
+                }
+
+                Name::Table(names) => {
+                    naming(names, &self.tables, "table", |table_id, name| {
+                        self.module.tables[table_id].name = Some(name.into());
+                    })?;
+                }
+
+                Name::Memory(names) => {
+                    naming(names, &self.mems, "memory", |mem_id, name| {
+                        self.module.mems[mem_id].name = Some(name.into());
+                    })?;
+                }
+
+                Name::Global(names) => {
+                    naming(names, &self.globals, "global", |global_id, name| {
+                        self.module.globals[global_id].name = Some(name.into());
+                    })?;
+                }
+
+                _ => {}
+            }
+        }
 
         Ok(())
     }

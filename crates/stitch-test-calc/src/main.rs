@@ -1,8 +1,14 @@
 use std::fmt::Display;
 use std::process::ExitCode;
-use std::str;
+use std::{mem, str};
 
-use stitch_bindings::{arg_count, arg_len, arg_read, inline, print_str, specialize};
+use stitch_bindings::{
+    arg_count, arg_len, arg_read, configure_rust_func_spec_policies, const_ptr, print_str,
+    propagate_load, specialize, SymbolicAlloc,
+};
+
+#[global_allocator]
+static ALLOC: SymbolicAlloc = SymbolicAlloc;
 
 #[derive(Debug, Clone, Copy)]
 enum BinOp {
@@ -20,8 +26,9 @@ enum Expr {
 }
 
 impl Expr {
-    extern "C" fn eval(&self) -> Result<i64, String> {
-        let recurse = inline!(fn(&Expr) -> Result<i64, String>)(Self::eval);
+    fn eval(&self) -> Result<i64, String> {
+        let recurse =
+            |expr: &Box<Expr>| unsafe { propagate_load(const_ptr(Box::as_ref(expr))).eval() };
 
         Ok(match self {
             &Self::Int(value) => value,
@@ -87,7 +94,11 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, msg: impl Display) -> String {
-        format!("error at {} (byte {}): {msg}", self.char_idx, self.pos)
+        format!(
+            "error at character {} (byte {}): {msg}",
+            self.char_idx,
+            self.pos + 1
+        )
     }
 
     fn peek(&self) -> Option<char> {
@@ -103,7 +114,11 @@ impl<'a> Parser<'a> {
     }
 
     fn consume_if(&mut self, f: impl FnOnce(char) -> bool) -> Option<char> {
-        self.peek().filter(|&c| f(c))
+        if f(self.peek()?) {
+            Some(self.next().unwrap())
+        } else {
+            None
+        }
     }
 
     fn consume(&mut self, c: char) -> bool {
@@ -206,6 +221,7 @@ impl<'a> Parser<'a> {
     fn parse_int(&mut self) -> Result<Expr, String> {
         let literal = self.consume_while(|c| c.is_ascii_digit());
         debug_assert!(!literal.is_empty());
+        print_str!("parse_int: consumed '{literal}'");
 
         i64::from_str_radix(literal, 10)
             .map(Expr::Int)
@@ -213,10 +229,12 @@ impl<'a> Parser<'a> {
     }
 }
 
-static mut EVAL: Option<extern "C" fn() -> Result<i64, String>> = None;
+static mut EVAL: Option<unsafe extern "C" fn() -> Box<Result<i64, String>>> = None;
 
 #[export_name = "stitch-start"]
 pub fn stitch_start() {
+    configure_rust_func_spec_policies();
+
     if arg_count() != 1 {
         print_str(&format!("expected 1 argument, got {}", arg_count()));
         print_str("usage: <expr>");
@@ -242,13 +260,23 @@ pub fn stitch_start() {
         }
     };
 
-    unsafe {
-        EVAL = specialize!("eval": fn(expr: &Expr) -> Result<i64, String>)(Expr::eval, None, &expr);
+    unsafe extern "C" fn eval(expr: *const Expr) -> Box<Result<i64, String>> {
+        Box::new((*expr).eval())
     }
+
+    unsafe {
+        EVAL = specialize!("eval": unsafe extern fn(expr: *const Expr) -> Box<Result<i64, String>>)(
+            eval,
+            None,
+            propagate_load(const_ptr(&expr)),
+        );
+    }
+
+    mem::forget(expr);
 }
 
 pub fn main() -> ExitCode {
-    match unsafe { EVAL }.expect("the specialized function is not available")() {
+    match *unsafe { EVAL.expect("the specialized function is not available")() } {
         Ok(value) => {
             println!("evaluated to {value}");
 

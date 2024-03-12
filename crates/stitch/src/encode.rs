@@ -3,8 +3,7 @@ use std::collections::HashSet;
 use log::trace;
 use slotmap::SecondaryMap;
 use wasm_encoder::{
-    CodeSection, DataSection, ElementSection, EntityType, ExportSection, FunctionSection,
-    GlobalSection, ImportSection, MemorySection, StartSection, TableSection, TypeSection,
+    CodeSection, DataSection, ElementSection, EntityType, ExportSection, FunctionSection, GlobalSection, ImportSection, IndirectNameMap, MemorySection, NameMap, NameSection, StartSection, TableSection, TypeSection
 };
 
 use crate::ast::expr::{BinOp, Block, MemArg, NulOp, TernOp, UnOp, Value};
@@ -22,6 +21,7 @@ struct Encoder<'a> {
     types: SeqSlot<TypeId>,
     imports: SeqSlot<ImportId>,
     funcs: SeqSlot<FuncId>,
+    locals: SecondaryMap<FuncId, SeqSlot<LocalId>>,
     tables: SeqSlot<TableId>,
     mems: SeqSlot<MemoryId>,
     globals: SeqSlot<GlobalId>,
@@ -35,6 +35,7 @@ impl<'a> Encoder<'a> {
             types: Default::default(),
             imports: Default::default(),
             funcs: Default::default(),
+            locals: Default::default(),
             tables: Default::default(),
             mems: Default::default(),
             globals: Default::default(),
@@ -53,6 +54,7 @@ impl<'a> Encoder<'a> {
         self.encode_elements();
         self.encode_code();
         self.encode_data();
+        self.encode_names();
 
         self.encoder.finish()
     }
@@ -301,6 +303,7 @@ impl<'a> Encoder<'a> {
                 block_depths: Default::default(),
             };
             sec.function(&encoder.encode());
+            self.locals.insert(func_id, locals);
         }
 
         self.encoder.section(&sec);
@@ -330,6 +333,72 @@ impl<'a> Encoder<'a> {
                 ),
             }
         }
+
+        self.encoder.section(&sec);
+    }
+
+    fn encode_names(&mut self) {
+        let mut sec = NameSection::new();
+
+        if let Some(name) = &self.module.name {
+            sec.module(name);
+        }
+
+        macro_rules! compile_names {
+            ($seq:expr, |$id:ident| $name:expr) => {{
+                let mut names = NameMap::new();
+
+                for (idx, &$id) in $seq.keys().iter().enumerate() {
+                    if let Some(name) = $name {
+                        names.append(idx.try_into().unwrap(), name);
+                    }
+                }
+
+                names
+            }};
+        }
+
+        sec.functions(&compile_names!(self.funcs, |func_id| {
+            self.module.funcs[func_id].name()
+        }));
+        sec.locals(&{
+            let mut names = IndirectNameMap::new();
+
+            for (idx, &func_id) in self.funcs.keys().iter().enumerate() {
+                let mut local_names = NameMap::new();
+
+                match &self.module.funcs[func_id] {
+                    Func::Import(import) => {
+                        for (idx, name) in import.param_names.iter().enumerate() {
+                            if let Some(name) = name {
+                                local_names.append(idx.try_into().unwrap(), name);
+                            }
+                        }
+                    }
+
+                    Func::Body(body) => {
+                        for (idx, &local_id) in self.locals[func_id].keys().iter().enumerate() {
+                            if let Some(name) = body.local_names.get(local_id) {
+                                local_names.append(idx.try_into().unwrap(), name);
+                            }
+                        }
+                    }
+                }
+
+                names.append(idx.try_into().unwrap(), &local_names);
+            }
+
+            names
+        });
+        sec.tables(&compile_names!(self.tables, |table_id| {
+            self.module.tables[table_id].name.as_deref()
+        }));
+        sec.memories(&compile_names!(self.mems, |mem_id| {
+            self.module.mems[mem_id].name.as_deref()
+        }));
+        sec.globals(&compile_names!(self.globals, |global_id| {
+            self.module.globals[global_id].name.as_deref()
+        }));
 
         self.encoder.section(&sec);
     }

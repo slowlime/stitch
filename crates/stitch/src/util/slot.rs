@@ -7,7 +7,7 @@ pub mod seq {
     #[derive(Debug, Default, Clone)]
     pub struct SeqSlot<K: Key> {
         map: SecondaryMap<K, usize>,
-        next_idx: usize,
+        vec: Vec<K>,
     }
 
     impl<K: Key> SeqSlot<K> {
@@ -22,8 +22,8 @@ pub mod seq {
                 Entry::Occupied(entry) => *entry.get(),
 
                 Entry::Vacant(entry) => {
-                    let idx = self.next_idx;
-                    self.next_idx += 1;
+                    let idx = self.vec.len();
+                    self.vec.push(key);
 
                     *entry.insert(idx)
                 }
@@ -32,6 +32,10 @@ pub mod seq {
 
         pub fn get(&self, key: K) -> Option<usize> {
             self.map.get(key).copied()
+        }
+
+        pub fn keys(&self) -> &[K] {
+            &self.vec
         }
     }
 

@@ -51,6 +51,7 @@ pub enum IntrinsicDecl {
     FileOpen,
     FileRead,
     FileClose,
+    FuncSpecPolicy,
 }
 
 impl IntrinsicDecl {
@@ -156,6 +157,14 @@ impl IntrinsicDecl {
                 Ok(())
             }
             Self::FileClose => Err("[i32] -> [i32]".into()),
+
+            Self::FuncSpecPolicy
+                if func_ty.params.len() == 3
+                    && func_ty.params.iter().all(|ty| *ty == ValType::I32)
+                    && func_ty.ret.is_none() => {
+                Ok(())
+            }
+            Self::FuncSpecPolicy => Err("[i32 i32 i32] -> []".into()),
         }
     }
 }
@@ -182,6 +191,7 @@ impl Display for IntrinsicDecl {
                 Self::FileOpen => "file-open",
                 Self::FileRead => "file-read",
                 Self::FileClose => "file-close",
+                Self::FuncSpecPolicy => "func-spec-policy",
             }
         )
     }
@@ -240,6 +250,7 @@ impl Module {
             "file-open" => IntrinsicDecl::FileOpen,
             "file-read" => IntrinsicDecl::FileRead,
             "file-close" => IntrinsicDecl::FileClose,
+             "func-spec-policy" => IntrinsicDecl::FuncSpecPolicy,
             _ => return None,
         })
     }
@@ -310,10 +321,29 @@ impl Module {
             }
         }
     }
+
+    pub fn func_name(&self, func_id: FuncId) -> String {
+        let func = &self.funcs[func_id];
+
+        match self.funcs[func_id].name() {
+            Some(name) => format!("${name}"),
+
+            None => match func {
+                Func::Import(import) => {
+                    let Import { module, name, .. } = &self.imports[import.import_id];
+
+                    format!("<import: module '{module}', name '{name}'>")
+                }
+
+                _ => format!("{func_id:?}"),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Table {
+    pub name: Option<String>,
     pub ty: TableType,
     pub def: TableDef,
 }
@@ -323,6 +353,7 @@ impl Table {
         let elems = vec![None; ty.limits.min as usize];
 
         Self {
+            name: None,
             ty,
             def: TableDef::Elems(elems),
         }
@@ -343,6 +374,7 @@ impl TableDef {
 
 #[derive(Debug, Clone)]
 pub struct Memory {
+    pub name: Option<String>,
     pub ty: MemoryType,
     pub def: MemoryDef,
 }
@@ -361,6 +393,7 @@ impl MemoryDef {
 
 #[derive(Debug, Clone)]
 pub struct Global {
+    pub name: Option<String>,
     pub ty: GlobalType,
     pub def: GlobalDef,
 }

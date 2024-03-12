@@ -5,9 +5,10 @@ use std::fs::File;
 use std::rc::Rc;
 
 use anyhow::{bail, ensure, Result};
-use hashbrown::{HashSet, HashMap};
-use log::trace;
-use slotmap::SparseSecondaryMap;
+use hashbrown::{HashMap, HashSet};
+use log::{debug, trace};
+use slotmap::{SecondaryMap, SparseSecondaryMap};
+use strum::{Display, FromRepr, VariantArray};
 
 use crate::ast::expr::{Value, ValueAttrs};
 use crate::ast::ty::ValType;
@@ -27,6 +28,22 @@ fn format_arg_list(args: impl Iterator<Item = Option<ValType>>) -> String {
         .reduce(|lhs, rhs| format!("{lhs}, {rhs}"))
         .unwrap_or_default()
     )
+}
+
+#[derive(Display, FromRepr, VariantArray, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InlineDisposition {
+    #[default]
+    Allow = 0,
+
+    Deny = 1,
+    ForceInline = 2,
+    ForceOutline = 3,
+}
+
+#[derive(Debug, Clone)]
+pub struct FuncSpecPolicy {
+    pub inline_policy: InlineDisposition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -58,6 +75,7 @@ pub struct Interpreter<'a> {
     const_global_ids: HashSet<GlobalId>,
     next_symbolic_ptr_id: u32,
     files: Vec<Option<File>>,
+    func_spec_policies: SecondaryMap<FuncId, FuncSpecPolicy>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -71,6 +89,7 @@ impl<'a> Interpreter<'a> {
             const_global_ids: Default::default(),
             next_symbolic_ptr_id: 0,
             files: Default::default(),
+            func_spec_policies: Default::default(),
         }
     }
 
@@ -109,7 +128,8 @@ impl<'a> Interpreter<'a> {
 
         ensure!(
             args.len() == func.ty().params.len(),
-            "invalid number of arguments for function: expected {}, got {}",
+            "invalid number of arguments for function {}: expected {}, got {}",
+            self.module.func_name(func_id),
             func.ty().params.len(),
             args.len(),
         );
@@ -118,7 +138,8 @@ impl<'a> Interpreter<'a> {
                 .zip(&func.ty().params)
                 .filter_map(|(arg, param_ty)| arg.map(|arg| (arg, param_ty)))
                 .all(|((value, _), param_ty)| value.val_ty() == *param_ty),
-            "invalid arguments for function: expected {}, got {}",
+            "invalid arguments for function {}: expected {}, got {}",
+            self.module.func_name(func_id),
             format_arg_list(func.ty().params.iter().cloned().map(Some)),
             format_arg_list(args.iter().map(|arg| arg.map(|(value, _)| value.val_ty()))),
         );
@@ -148,7 +169,11 @@ impl<'a> Interpreter<'a> {
             return self.specialize(spec_sig.orig_func_id, spec_sig.args);
         }
 
-        ensure!(!func.is_import(), "cannot specialize an imported function");
+        ensure!(
+            !func.is_import(),
+            "cannot specialize an imported function: {}",
+            self.module.func_name(func_id),
+        );
         let func = self.get_cfg(func_id).unwrap();
 
         let mut func_ty = func.ty.clone();
@@ -163,8 +188,9 @@ impl<'a> Interpreter<'a> {
             .funcs
             .insert(Func::Body(ast::FuncBody::new(body.ty.clone())));
         trace!(
-            "specializing {:?} as {func_id:?}: {}",
+            "specializing {:?} ({}) as {func_id:?}: {}",
             spec_sig.orig_func_id,
+            self.module.func_name(spec_sig.orig_func_id),
             format_arg_list(
                 spec_sig
                     .args
@@ -176,12 +202,36 @@ impl<'a> Interpreter<'a> {
             .insert(spec_sig.clone(), SpecializedFunc::Pending(func_id));
         self.spec_funcs.insert(func_id, spec_sig.clone());
 
-        let body = Specializer::new(self, spec_sig.clone(), body).run()?;
+        let body = Rc::new(Specializer::new(self, spec_sig.clone(), body).run()?);
+        debug!(
+            "finished specialization of {:?} ({}): written as {:?}, {} blocks, {} locals",
+            spec_sig.orig_func_id,
+            self.module.func_name(spec_sig.orig_func_id),
+            func_id,
+            body.blocks.len(),
+            body.locals.len(),
+        );
         trace!("cfg:\n{body}");
+        self.cfgs.insert(func_id, Rc::clone(&body));
 
-        *self.module.funcs[func_id].body_mut().unwrap() = body.to_ast();
+        let mut body = body.to_ast();
+        body.name = self.module.funcs[spec_sig.orig_func_id].name().map(|name| {
+            use std::fmt::Write;
+
+            let mut name = format!("{name}.specialized");
+
+            for arg in &spec_sig.args {
+                match arg.map(|(value, _)| value.val_ty()) {
+                    Some(ty) => write!(name, "-{ty}").unwrap(),
+                    None => write!(name, "-none").unwrap(),
+                }
+            }
+
+            name
+        });
+
+        *self.module.funcs[func_id].body_mut().unwrap() = body;
         *self.spec_sigs.get_mut(&spec_sig).unwrap() = SpecializedFunc::Finished(func_id);
-        self.cfgs.insert(func_id, Rc::new(body));
 
         Ok(func_id)
     }
@@ -189,11 +239,13 @@ impl<'a> Interpreter<'a> {
     fn get_cfg(&mut self, func_id: FuncId) -> Option<Rc<FuncBody>> {
         let body = self.module.funcs[func_id].body()?;
 
-        Some(Rc::clone(self.cfgs.entry(func_id).unwrap().or_insert_with(|| {
-            let cfg = Rc::new(FuncBody::from_ast(&self.module, body));
-            trace!("cfg for {func_id:?}:\n{cfg}");
+        Some(Rc::clone(self.cfgs.entry(func_id).unwrap().or_insert_with(
+            || {
+                let cfg = Rc::new(FuncBody::from_ast(&self.module, body));
+                trace!("cfg for {func_id:?}:\n{cfg}");
 
-            cfg
-        })))
+                cfg
+            },
+        )))
     }
 }

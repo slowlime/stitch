@@ -189,11 +189,13 @@ impl<'a> Translator<'a> {
 
     fn translate_params(&mut self) {
         for &local_id in &self.ast.params {
-            self.local_map.insert(
-                local_id,
-                self.func.locals.insert(self.ast.locals[local_id].clone()),
-            );
-            self.func.params.push(self.local_map[local_id]);
+            let mapped_local_id = self.func.locals.insert(self.ast.locals[local_id].clone());
+            self.local_map.insert(local_id, mapped_local_id);
+            self.func.params.push(mapped_local_id);
+
+            if let Some(name) = self.ast.local_names.get(local_id) {
+                self.func.local_names.insert(mapped_local_id, name.clone());
+            }
         }
     }
 
@@ -1031,7 +1033,6 @@ impl<'a> Translator<'a> {
                 (self.task_results.len() - next_subexpr)..,
                 [ExprResult::Unreachable],
             );
-            return;
         } else if next_subexpr < args.len() {
             self.tasks.push(Task::TranslateExprCall {
                 func_id,
@@ -1076,7 +1077,6 @@ impl<'a> Translator<'a> {
                 (self.task_results.len() - next_subexpr)..,
                 [ExprResult::Unreachable],
             );
-            return;
         } else if next_subexpr < args.len() + 1 {
             self.tasks.push(Task::TranslateExprCallIndirect {
                 ty_id,
@@ -1126,7 +1126,15 @@ impl<'a> Translator<'a> {
             .local_map
             .entry(local_id)
             .unwrap()
-            .or_insert_with(|| self.func.locals.insert(self.ast.locals[local_id].clone()))
+            .or_insert_with(|| {
+                let mapped_local_id = self.func.locals.insert(self.ast.locals[local_id].clone());
+
+                if let Some(name) = self.ast.local_names.get(local_id) {
+                    self.func.local_names.insert(mapped_local_id, name.clone());
+                }
+
+                mapped_local_id
+            })
     }
 
     fn use_expr(&mut self, expr_result: ExprResult, take_ownership: bool) -> Expr {

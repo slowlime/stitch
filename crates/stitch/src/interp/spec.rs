@@ -1,5 +1,5 @@
-mod preprocess;
 mod expr;
+mod preprocess;
 
 use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
@@ -10,7 +10,7 @@ use std::{iter, mem};
 use anyhow::{ensure, Result};
 use bitvec::prelude::*;
 use hashbrown::{HashMap, HashSet};
-use log::{trace, warn};
+use log::{log_enabled, trace, warn};
 use slotmap::{new_key_type, Key, SecondaryMap, SlotMap, SparseSecondaryMap};
 
 use crate::ast::expr::{format_value, MemArg, Ptr, Value, ValueAttrs};
@@ -21,7 +21,7 @@ use crate::cfg::{
     Store, Terminator, UnOp,
 };
 
-use super::{Interpreter, SpecSignature};
+use super::{InlineDisposition, Interpreter, SpecSignature};
 
 new_key_type! {
     struct FuncCtxId;
@@ -392,23 +392,14 @@ enum InlineMode {
     Inline,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-enum InlineDisposition {
-    #[default]
-    Allow,
-
-    Force,
-    Deny,
-}
-
-impl From<ValueAttrs> for InlineDisposition {
-    fn from(attrs: ValueAttrs) -> Self {
+impl InlineDisposition {
+    pub fn from_attrs(attrs: ValueAttrs) -> Option<InlineDisposition> {
         if attrs.contains(ValueAttrs::NO_INLINE) {
-            Self::Deny
+            Some(Self::Deny)
         } else if attrs.contains(ValueAttrs::INLINE) {
-            Self::Force
+            Some(Self::ForceInline)
         } else {
-            Self::Allow
+            None
         }
     }
 }
@@ -522,6 +513,11 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 let id = *self.symbolic_ptr_id_map.entry(id).or_insert_with(|| {
                     let id = self.symbolic_ptrs.len().try_into().unwrap();
                     let base_local_id = self.func.locals.insert(ValType::I32);
+                    self.func
+                        .local_names
+                        .entry(base_local_id)
+                        .unwrap()
+                        .or_insert_with(|| format!("ptr-base.{id}"));
                     self.symbolic_ptrs.push(SymbolicPtrInfo {
                         local_id: base_local_id,
                         owned: false,
@@ -656,7 +652,15 @@ impl<'a, 'i> Specializer<'a, 'i> {
         for (local_id, val_ty) in &cfg.locals {
             self.local_map
                 .entry((func_ctx_id, local_id))
-                .or_insert_with(|| self.func.locals.insert(val_ty.clone()));
+                .or_insert_with(|| {
+                    let mapped_local_id = self.func.locals.insert(val_ty.clone());
+
+                    if let Some(name) = cfg.local_names.get(local_id) {
+                        self.func.local_names.insert(mapped_local_id, name.clone());
+                    }
+
+                    mapped_local_id
+                });
         }
     }
 
@@ -677,6 +681,45 @@ impl<'a, 'i> Specializer<'a, 'i> {
             self.interp.module.funcs[func_id].name(),
             info.kind,
         );
+
+        if log_enabled!(log::Level::Trace) {
+            trace!("func stack (the current func ctx is at the top):");
+            let mut func_ctx_id = info.func_ctx_id;
+
+            loop {
+                let func_ctx = &self.func_ctxs[func_ctx_id];
+                trace!(
+                    "  {func_ctx_id:?}: func {:?} ({}), shape [{}]",
+                    func_ctx.func_id,
+                    self.interp.module.func_name(func_ctx.func_id),
+                    func_ctx
+                        .shape
+                        .iter()
+                        .map(|present| if *present { "#" } else { "_" })
+                        .map(str::to_string)
+                        .reduce(|lhs, rhs| format!("{lhs} {rhs}"))
+                        .unwrap_or_default(),
+                );
+
+                if let Some(parent) = &func_ctx.parent {
+                    trace!(
+                        "    return to {}{:?} (from stmt #{}), local {:?}",
+                        if parent.ret_canonical {
+                            "canonical "
+                        } else {
+                            ""
+                        },
+                        parent.ret_orig_block_id,
+                        parent.ret_start_stmt_idx,
+                        parent.ret_local_id,
+                    );
+                    func_ctx_id = parent.func_ctx_id;
+                } else {
+                    break;
+                }
+            }
+        }
+
         self.set_block_name(
             block_id,
             format_args!(
@@ -695,22 +738,25 @@ impl<'a, 'i> Specializer<'a, 'i> {
             cfg.blocks[orig_block_id].body.len()
         );
         assert!(stmt_idx <= cfg.blocks[orig_block_id].body.len());
-        trace!("locals:");
 
-        for (local_id, &(value, attrs)) in &info.exit_env.locals {
-            trace!("  {local_id:?} = {}", format_value(&value, attrs));
-        }
+        if log_enabled!(log::Level::Trace) {
+            trace!("locals:");
 
-        trace!("globals:");
+            for (local_id, &(value, attrs)) in &info.exit_env.locals {
+                trace!("  {local_id:?} = {}", format_value(&value, attrs));
+            }
 
-        for (global_id, &(value, attrs)) in &info.exit_env.globals {
-            trace!("  {global_id:?} = {}", format_value(&value, attrs));
-        }
+            trace!("globals:");
 
-        trace!("mem:");
+            for (global_id, &(value, attrs)) in &info.exit_env.globals {
+                trace!("  {global_id:?} = {}", format_value(&value, attrs));
+            }
 
-        for (idx, mem_slice) in info.exit_env.mem.iter().enumerate() {
-            trace!("  {idx}: {mem_slice:?}");
+            trace!("mem:");
+
+            for (idx, mem_slice) in info.exit_env.mem.iter().enumerate() {
+                trace!("  {idx}: {mem_slice:?}");
+            }
         }
 
         let mut skip_terminator = false;
@@ -776,11 +822,12 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         Expr::Value(value @ Value::Ptr(_), attrs) => {
                             trace!("set exit_env.globals[{global_id:?}] <- {expr}");
                             info.exit_env.globals.insert(global_id, (value, attrs));
-                            trace!("emitting Stmt::GlobalSet for the symbolic pointer");
-                            block.body.push(Stmt::GlobalSet(
+                            let stmt = Stmt::GlobalSet(
                                 global_id,
                                 Self::convert_expr(&self.symbolic_ptrs, expr),
-                            ));
+                            );
+                            trace!("emitting {stmt} for the symbolic pointer");
+                            block.body.push(stmt);
                         }
 
                         Expr::Value(value, attrs) => {
@@ -891,7 +938,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                                     ret_local_id,
                                     func_id,
                                     args,
-                                    InlineDisposition::from(idx_attrs),
+                                    InlineDisposition::from_attrs(idx_attrs),
                                 )? {
                                     skip_terminator = true;
                                     break 'body;
@@ -1240,7 +1287,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
         ret_local_id: Option<LocalId>,
         func_id: FuncId,
         args: Vec<Expr<()>>,
-        inline_disposition: InlineDisposition,
+        attr_inline_disposition: Option<InlineDisposition>,
     ) -> Result<bool> {
         trace!(
             "processing a call: {ret_local_id:?} <- {func_id:?} ({:?}) with {} args",
@@ -1287,7 +1334,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 | IntrinsicDecl::PrintStr
                 | IntrinsicDecl::FileOpen
                 | IntrinsicDecl::FileRead
-                | IntrinsicDecl::FileClose => {
+                | IntrinsicDecl::FileClose
+                | IntrinsicDecl::FuncSpecPolicy => {
                     warn!("encountered {intrinsic} during specialization");
 
                     false
@@ -1299,33 +1347,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
             }
         }
 
-        let inline_mode = if self.interp.module.funcs[func_id].is_import() {
-            trace!("not inlining {func_id:?}: this is an imported function");
-
-            InlineMode::No
-        } else if inline_disposition == InlineDisposition::Deny {
-            trace!("not inlining {func_id:?}: denied via an attribute");
-
-            InlineMode::No
-        } else if !self.is_recursive_call(block_id, func_id, &args) {
-            trace!("inlining {func_id:?}: the call is not recursive");
-
-            InlineMode::Inline
-        } else if inline_disposition == InlineDisposition::Force {
-            trace!("inlining {func_id:?}: forced via an attribute");
-
-            InlineMode::Inline
-        } else if self.blocks[block_id].kind == BlockKind::Canonical {
-            trace!("not inlining {func_id:?}: the recursive call site is in a canonical block");
-
-            InlineMode::No
-        } else {
-            trace!("outlining {func_id:?}: the call is recursive");
-
-            InlineMode::Outline
-        };
-
-        match inline_mode {
+        match self.inline_mode(func_id, block_id, &args, attr_inline_disposition) {
             InlineMode::Inline => {
                 trace!("inlining the body of {func_id:?}");
                 let info = &self.blocks[block_id];
@@ -1373,7 +1395,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 Ok(true)
             }
 
-            InlineMode::Outline | InlineMode::No => {
+            inline_mode @ (InlineMode::Outline | InlineMode::No) => {
                 let target_func_id = if inline_mode == InlineMode::Outline {
                     trace!("replacing a direct call to {func_id:?} with a specialized version");
 
@@ -1525,10 +1547,6 @@ impl<'a, 'i> Specializer<'a, 'i> {
                             local_id: ret_local_id,
                             owned: true,
                         });
-                        self.func.blocks[block_id].body.push(Stmt::LocalSet(
-                            ret_local_id,
-                            Self::convert_expr(&self.symbolic_ptrs, expr),
-                        ));
 
                         id
                     });
@@ -1543,6 +1561,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     "set exit_env.locals[{ret_local_id:?}] <- {}",
                     format_value(&result, Default::default()),
                 );
+                self.func.blocks[block_id].body.push(Stmt::LocalSet(
+                    ret_local_id,
+                    Self::convert_expr(&self.symbolic_ptrs, expr),
+                ));
                 self.blocks[block_id]
                     .exit_env
                     .locals
@@ -2027,11 +2049,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
             Expr::Value(value @ Value::Ptr(_), attrs) => {
                 trace!("set exit_env.locals[{local_id:?}] <- {expr}");
                 exit_env.locals.insert(local_id, (value, attrs));
-                trace!("emitting Stmt::LocalSet for the symbolic pointer");
-                self.func.blocks[block_id].body.push(Stmt::LocalSet(
-                    local_id,
-                    Self::convert_expr(&self.symbolic_ptrs, expr),
-                ));
+                let stmt = Stmt::LocalSet(local_id, Self::convert_expr(&self.symbolic_ptrs, expr));
+                trace!("emitting {stmt} for the symbolic pointer");
+                self.func.blocks[block_id].body.push(stmt);
             }
 
             Expr::Value(value, attrs) => {
@@ -2088,6 +2108,62 @@ impl<'a, 'i> Specializer<'a, 'i> {
             Expr::Unary(op, expr) => Expr::Unary(op, expr),
             Expr::Binary(op, exprs) => Expr::Binary(op, exprs),
             Expr::Ternary(op, exprs) => Expr::Ternary(op, exprs),
+        }
+    }
+
+    fn inline_mode(
+        &self,
+        func_id: FuncId,
+        block_id: BlockId,
+        args: &[Expr<()>],
+        attr_inline_disposition: Option<InlineDisposition>,
+    ) -> InlineMode {
+        let func_inline_policy = self
+            .interp
+            .func_spec_policies
+            .get(func_id)
+            .map(|policy| policy.inline_policy);
+        let (inline_disposition, inline_disposition_source) =
+            match (func_inline_policy, attr_inline_disposition) {
+                (None, None) => (Default::default(), "the default inline policy"),
+                (Some(inline_disposition), None) => {
+                    (inline_disposition, "a function specialization policy")
+                }
+                (_, Some(inline_disposition)) => (inline_disposition, "an attribute"),
+            };
+
+        if self.interp.module.funcs[func_id].is_import() {
+            trace!("not inlining {func_id:?}: this is an imported function");
+
+            InlineMode::No
+        } else if inline_disposition == InlineDisposition::Deny {
+            trace!("not inlining {func_id:?}: denied via {inline_disposition_source}");
+
+            InlineMode::No
+        } else if inline_disposition == InlineDisposition::ForceOutline {
+            trace!("outlining {func_id:?}: forced via {inline_disposition_source}");
+
+            InlineMode::Outline
+        } else if !self.is_recursive_call(block_id, func_id, &args) {
+            trace!("inlining {func_id:?}: the call is not recursive");
+
+            InlineMode::Inline
+        } else if self.blocks[block_id].kind == BlockKind::Regular {
+            trace!("inlining {func_id:?}: the call site occurs in a regular block");
+
+            InlineMode::Inline
+        } else if inline_disposition == InlineDisposition::ForceInline {
+            trace!("inlining {func_id:?}: forced via {inline_disposition_source}");
+
+            InlineMode::Inline
+        } else if self.blocks[block_id].kind == BlockKind::Canonical {
+            trace!("not inlining {func_id:?}: the recursive call site is in a canonical block");
+
+            InlineMode::No
+        } else {
+            trace!("outlining {func_id:?}: the call is recursive");
+
+            InlineMode::Outline
         }
     }
 }

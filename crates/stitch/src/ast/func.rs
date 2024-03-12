@@ -1,4 +1,4 @@
-use slotmap::SlotMap;
+use slotmap::{SecondaryMap, SlotMap};
 
 use crate::util::try_match;
 
@@ -57,6 +57,7 @@ impl Func {
 #[derive(Debug, Clone)]
 pub struct FuncImport {
     pub name: Option<String>,
+    pub param_names: Vec<Option<String>>,
     pub ty: FuncType,
     pub import_id: ImportId,
 }
@@ -76,6 +77,7 @@ pub struct FuncBody {
     pub name: Option<String>,
     pub ty: FuncType,
     pub locals: SlotMap<LocalId, ValType>,
+    pub local_names: SecondaryMap<LocalId, String>,
     pub params: Vec<LocalId>,
     pub blocks: SlotMap<BlockId, ()>,
     pub main_block: Block,
@@ -93,6 +95,7 @@ impl FuncBody {
             name: None,
             ty,
             locals: Default::default(),
+            local_names: Default::default(),
             params: Default::default(),
             blocks,
             main_block: body,
