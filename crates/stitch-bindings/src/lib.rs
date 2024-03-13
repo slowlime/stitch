@@ -19,6 +19,9 @@ pub mod ffi {
         #[link_name = "symbolic-ptr"]
         pub fn symbolic_ptr(ptr: *const ()) -> *const ();
 
+        #[link_name = "concrete-ptr"]
+        pub fn concrete_ptr(ptr: *const ()) -> *const ();
+
         #[link_name = "propagate-load"]
         pub fn propagate_load(ptr: *const ()) -> *const ();
 
@@ -298,6 +301,11 @@ pub unsafe fn const_ptr<P: Ptr>(ptr: P) -> P {
 #[inline(always)]
 pub unsafe fn symbolic_ptr<P: Ptr>(ptr: P) -> P {
     unsafe { Ptr::from_ptr(ffi::symbolic_ptr(ptr.into_ptr())) }
+}
+
+#[inline(always)]
+pub unsafe fn concrete_ptr<P: Ptr>(ptr: P) -> P {
+    unsafe { Ptr::from_ptr(ffi::concrete_ptr(ptr.into_ptr())) }
 }
 
 #[inline(always)]

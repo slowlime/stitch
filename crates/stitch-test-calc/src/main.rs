@@ -1,10 +1,10 @@
 use std::fmt::Display;
 use std::process::ExitCode;
-use std::{mem, str};
+use std::str;
 
 use stitch_bindings::{
-    arg_count, arg_len, arg_read, configure_rust_func_spec_policies, const_ptr, print_str,
-    propagate_load, specialize, SymbolicAlloc,
+    arg_count, arg_len, arg_read, concrete_ptr, configure_rust_func_spec_policies, const_ptr,
+    print_str, propagate_load, specialize, SymbolicAlloc,
 };
 
 #[global_allocator]
@@ -253,7 +253,7 @@ pub fn stitch_start() {
     };
 
     let expr = match Parser::new(&buf).parse() {
-        Ok(expr) => expr,
+        Ok(expr) => unsafe { concrete_ptr(Box::leak(Box::new(expr))) },
         Err(e) => {
             print_str!("could not parse the expression: {e}");
             return;
@@ -268,11 +268,9 @@ pub fn stitch_start() {
         EVAL = specialize!("eval": unsafe extern fn(expr: *const Expr) -> Box<Result<i64, String>>)(
             eval,
             None,
-            propagate_load(const_ptr(&expr)),
+            propagate_load(const_ptr(expr)),
         );
     }
-
-    mem::forget(expr);
 }
 
 pub fn main() -> ExitCode {

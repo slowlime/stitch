@@ -42,6 +42,7 @@ pub enum IntrinsicDecl {
     Unknown,
     ConstPtr,
     SymbolicPtr,
+    ConcretePtr,
     PropagateLoad,
     PrintValue,
     PrintStr,
@@ -92,14 +93,14 @@ impl IntrinsicDecl {
             Self::Unknown if func_ty.params.is_empty() && func_ty.ret.is_some() => Ok(()),
             Self::Unknown => Err("[] -> [t]".into()),
 
-            Self::ConstPtr | Self::SymbolicPtr | Self::PropagateLoad
+            Self::ConstPtr | Self::SymbolicPtr | Self::ConcretePtr | Self::PropagateLoad
                 if func_ty.params.len() == 1
                     && func_ty.params[0] == ValType::I32
                     && func_ty.ret == Some(ValType::I32) =>
             {
                 Ok(())
             }
-            Self::ConstPtr | Self::SymbolicPtr | Self::PropagateLoad => {
+            Self::ConstPtr | Self::SymbolicPtr | Self::ConcretePtr | Self::PropagateLoad => {
                 Err("[i32] -> [i32]".into())
             }
 
@@ -182,6 +183,7 @@ impl Display for IntrinsicDecl {
                 Self::Unknown => "unknown",
                 Self::ConstPtr => "const-ptr",
                 Self::SymbolicPtr => "symbolic-ptr",
+                Self::ConcretePtr => "concrete-ptr",
                 Self::PropagateLoad => "propagate-load",
                 Self::PrintValue => "print-value",
                 Self::PrintStr => "print-str",
@@ -241,6 +243,7 @@ impl Module {
             "unknown" => IntrinsicDecl::Unknown,
             "const-ptr" => IntrinsicDecl::ConstPtr,
             "symbolic-ptr" => IntrinsicDecl::SymbolicPtr,
+            "concrete-ptr" => IntrinsicDecl::ConcretePtr,
             "propagate-load" => IntrinsicDecl::PropagateLoad,
             "print-value" => IntrinsicDecl::PrintValue,
             "print-str" => IntrinsicDecl::PrintStr,

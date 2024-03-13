@@ -1041,6 +1041,7 @@ impl Interpreter<'_> {
                 IntrinsicDecl::Unknown => self.eval_intr_unknown(frames, func_id)?,
                 IntrinsicDecl::ConstPtr => self.eval_intr_const_ptr(frames, args)?,
                 IntrinsicDecl::SymbolicPtr => self.eval_intr_symbolic_ptr(frames, args)?,
+                IntrinsicDecl::ConcretePtr => self.eval_intr_concrete_ptr(frames, args)?,
                 IntrinsicDecl::PropagateLoad => self.eval_intr_propagate_load(frames, args)?,
                 IntrinsicDecl::PrintValue => self.eval_intr_print_value(args)?,
                 IntrinsicDecl::PrintStr => self.eval_intr_print_str(args)?,
@@ -1320,6 +1321,17 @@ impl Interpreter<'_> {
             }),
             args[0].1,
         ));
+
+        Ok(())
+    }
+
+    fn eval_intr_concrete_ptr(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        args: Vec<(Value, ValueAttrs)>,
+    ) -> Result<()> {
+        let frame = frames.last_mut().unwrap();
+        frame.stack.push((Value::I32(args[0].0.unwrap_i32()), args[0].1));
 
         Ok(())
     }

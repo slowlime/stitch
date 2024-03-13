@@ -447,6 +447,16 @@ impl<E> Expr<E> {
 }
 
 impl Expr {
+    pub fn lift_ptr<E>(self) -> Expr<E> {
+        match self {
+            Self::Value(value, attrs) => Expr::Value(value.lift_ptr(), attrs),
+            Self::Nullary(op) => Expr::Nullary(op),
+            Self::Unary(op, expr) => Expr::Unary(op, expr),
+            Self::Binary(op, exprs) => Expr::Binary(op, exprs),
+            Self::Ternary(op, exprs) => Expr::Ternary(op, exprs),
+        }
+    }
+
     pub fn any<F>(&self, predicate: &mut F) -> bool
     where
         F: FnMut(&Self) -> bool,

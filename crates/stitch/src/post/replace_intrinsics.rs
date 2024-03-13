@@ -68,6 +68,14 @@ impl PostProc<'_> {
         });
     }
 
+    pub(super) fn replace_intr_concrete_ptr(&mut self, func_id: FuncId) {
+        self.replace_intr(func_id, |_, body| {
+            body.main_block
+                .body
+                .push(NulOp::LocalGet(body.params[0]).into())
+        });
+    }
+
     pub(super) fn replace_intr_propagate_load(&mut self, func_id: FuncId) {
         self.replace_intr(func_id, |_, body| {
             body.main_block

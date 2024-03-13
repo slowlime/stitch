@@ -1315,6 +1315,9 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 IntrinsicDecl::SymbolicPtr => {
                     self.process_intr_symbolic_ptr(block_id, ret_local_id.unwrap(), &args)?
                 }
+                IntrinsicDecl::ConcretePtr => {
+                    self.process_intr_concrete_ptr(block_id, ret_local_id.unwrap(), &args)?
+                }
                 IntrinsicDecl::PropagateLoad => {
                     self.process_intr_propagate_load(block_id, ret_local_id.unwrap(), &args)?
                 }
@@ -1571,6 +1574,21 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     .insert(ret_local_id, (result, Default::default()));
             }
         }
+
+        Ok(true)
+    }
+
+    fn process_intr_concrete_ptr(
+        &mut self,
+        block_id: BlockId,
+        ret_local_id: LocalId,
+        args: &Vec<Expr<()>>,
+    ) -> Result<bool> {
+        self.set_local(
+            block_id,
+            ret_local_id,
+            Self::convert_expr(&self.symbolic_ptrs, args[0].clone()).lift_ptr(),
+        );
 
         Ok(true)
     }
