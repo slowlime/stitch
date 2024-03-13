@@ -59,7 +59,14 @@ pub mod ffi {
         pub fn file_close(fd: u32) -> u32;
 
         #[link_name = "func-spec-policy"]
-        pub fn func_spec_policy(name_regexp: *const u8, name_regexp_len: usize, inline_policy: InlinePolicy);
+        pub fn func_spec_policy(
+            name_regexp: *const u8,
+            name_regexp_len: usize,
+            inline_policy: InlinePolicy,
+        );
+
+        #[link_name = "symbolic-stack-ptr"]
+        pub fn symbolic_stack_ptr();
     }
 
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -452,7 +459,15 @@ pub fn func_spec_policy(name_regexp: &str, policy: &FuncSpecPolicy) {
     }
 }
 
-pub fn configure_rust_func_spec_policies() {
+pub fn symbolic_stack_ptr() {
+    unsafe {
+        ffi::symbolic_stack_ptr();
+    }
+}
+
+pub fn configure_specializer() {
+    symbolic_stack_ptr();
+
     let ref no_inline_policy = FuncSpecPolicy {
         inline_policy: InlinePolicy::Deny,
     };

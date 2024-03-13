@@ -53,6 +53,7 @@ pub enum IntrinsicDecl {
     FileRead,
     FileClose,
     FuncSpecPolicy,
+    SymbolicStackPtr,
 }
 
 impl IntrinsicDecl {
@@ -166,6 +167,10 @@ impl IntrinsicDecl {
                 Ok(())
             }
             Self::FuncSpecPolicy => Err("[i32 i32 i32] -> []".into()),
+
+            Self::SymbolicStackPtr
+                if func_ty.params.is_empty() && func_ty.ret.is_none() => Ok(()),
+            Self::SymbolicStackPtr => Err("[] -> []".into()),
         }
     }
 }
@@ -194,6 +199,7 @@ impl Display for IntrinsicDecl {
                 Self::FileRead => "file-read",
                 Self::FileClose => "file-close",
                 Self::FuncSpecPolicy => "func-spec-policy",
+                Self::SymbolicStackPtr => "symbolic-stack-ptr",
             }
         )
     }
@@ -254,6 +260,7 @@ impl Module {
             "file-read" => IntrinsicDecl::FileRead,
             "file-close" => IntrinsicDecl::FileClose,
              "func-spec-policy" => IntrinsicDecl::FuncSpecPolicy,
+            "symbolic-stack-ptr" => IntrinsicDecl::SymbolicStackPtr,
             _ => return None,
         })
     }

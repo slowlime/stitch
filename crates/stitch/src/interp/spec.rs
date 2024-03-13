@@ -15,13 +15,13 @@ use slotmap::{new_key_type, Key, SecondaryMap, SlotMap, SparseSecondaryMap};
 
 use crate::ast::expr::{format_value, MemArg, Ptr, Value, ValueAttrs};
 use crate::ast::ty::ValType;
-use crate::ast::{ConstExpr, FuncId, GlobalDef, GlobalId, IntrinsicDecl, MemoryId, TableDef};
+use crate::ast::{FuncId, GlobalId, IntrinsicDecl, MemoryId, TableDef};
 use crate::cfg::{
     BinOp, Block, BlockId, Call, Expr, FuncBody, I32Store, I64Store, Load, LocalId, NulOp, Stmt,
     Store, Terminator, UnOp,
 };
 
-use super::{InlineDisposition, Interpreter, SpecSignature};
+use super::{GlobalAttrs, GlobalValue, InlineDisposition, Interpreter, SpecSignature};
 
 new_key_type! {
     struct FuncCtxId;
@@ -43,9 +43,18 @@ impl MemSlice {
         if idx < 0 && idx.unsigned_abs() > self.zero_idx {
             let extra = idx.unsigned_abs() - self.zero_idx;
             self.bytes.splice(..0, iter::repeat(0).take(extra));
-            self.init.splice(..0, iter::repeat(false).take(extra));
+            // either self.init.split(..) is buggy or I'm an idiot
+            let mut init = BitVec::with_capacity(0);
+            init.resize(extra, false);
+            init.extend_from_bitslice(&self.init);
+            self.init = init;
+            self.zero_idx += extra;
         } else if idx >= 0 && self.zero_idx + idx as usize >= self.bytes.len() {
-            let extra = self.zero_idx + idx as usize + 1 - self.bytes.len();
+            let extra = self
+                .zero_idx
+                .wrapping_add_signed(idx)
+                .wrapping_add(1)
+                .wrapping_sub(self.bytes.len());
             self.bytes.extend(iter::repeat(0).take(extra));
             self.init.extend(iter::repeat(false).take(extra));
         }
@@ -126,7 +135,7 @@ impl MemSlice {
         for (idx, bit) in self.init.iter_mut().enumerate().filter(|(_, bit)| **bit) {
             if let Some(other_idx) = other
                 .zero_idx
-                .checked_add_signed((idx - self.zero_idx) as isize)
+                .checked_add_signed(idx.wrapping_sub(self.zero_idx) as isize)
             {
                 if other.init.get(other_idx).is_some_and(|rhs| *rhs) {
                     if self.bytes[idx] == other.bytes[other_idx] {
@@ -182,8 +191,11 @@ impl PartialEq for MemSlice {
 
         let self_last_one = self.init.last_one();
 
-        if other.init.last_one().map(|idx| idx - other.zero_idx)
-            != self_last_one.map(|idx| idx - self.zero_idx)
+        if other
+            .init
+            .last_one()
+            .map(|idx| idx.wrapping_sub(other.zero_idx))
+            != self_last_one.map(|idx| idx.wrapping_sub(self.zero_idx))
         {
             return false;
         }
@@ -562,17 +574,26 @@ impl<'a, 'i> Specializer<'a, 'i> {
         let cfg = self.get_cfg(self.orig_func_id).unwrap();
         let mut exit_env = Env::default();
 
-        let globals = mem::take(&mut self.interp.module.globals);
+        let globals = mem::take(&mut self.interp.globals);
 
-        for (global_id, global) in &globals {
-            match global.def {
-                GlobalDef::Import(_) => {}
-                GlobalDef::Value(ConstExpr::Value(value, attrs)) => {
-                    if !global.ty.mutable || self.interp.const_global_ids.contains(&global_id) {
+        for (global_id, &global_value) in &globals {
+            match global_value {
+                GlobalValue::Import | GlobalValue::GlobalGet => {}
+
+                GlobalValue::Value(value, attrs) => {
+                    let global_attrs = self
+                        .interp
+                        .global_attrs
+                        .get(global_id)
+                        .copied()
+                        .unwrap_or_default();
+                    let global = &self.interp.module.globals[global_id];
+
+                    if !global.ty.mutable || global_attrs.contains(GlobalAttrs::CONST) {
                         exit_env.globals.insert(
                             global_id,
                             (
-                                self.process_arg(value.lift_ptr(), || {
+                                self.process_arg(value.with_dropped_ptr_base(), || {
                                     Expr::Nullary(NulOp::GlobalGet(global_id))
                                 }),
                                 attrs,
@@ -580,11 +601,10 @@ impl<'a, 'i> Specializer<'a, 'i> {
                         );
                     }
                 }
-                GlobalDef::Value(ConstExpr::GlobalGet(_)) => {}
             }
         }
 
-        self.interp.module.globals = globals;
+        self.interp.globals = globals;
 
         for (local_id, val_ty) in &cfg.locals {
             let local_id = self.local_map[&(func_ctx_id, local_id)];
@@ -1255,7 +1275,7 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 trace!("performing symbolic store: {start}..{end}");
 
                 if mem.len() <= id {
-                    mem.resize_with(id, Default::default);
+                    mem.resize_with(id + 1, Default::default);
                 }
 
                 store.store(mem[id].write(start..end), value);
@@ -1338,7 +1358,8 @@ impl<'a, 'i> Specializer<'a, 'i> {
                 | IntrinsicDecl::FileOpen
                 | IntrinsicDecl::FileRead
                 | IntrinsicDecl::FileClose
-                | IntrinsicDecl::FuncSpecPolicy => {
+                | IntrinsicDecl::FuncSpecPolicy
+                | IntrinsicDecl::SymbolicStackPtr => {
                     warn!("encountered {intrinsic} during specialization");
 
                     false
@@ -1867,16 +1888,35 @@ impl<'a, 'i> Specializer<'a, 'i> {
                     debug_assert_eq!(idx_iter.next().unwrap(), idx + i + 1);
                 }
 
-                let start = (idx - mem_slice.zero_idx) as isize;
+                let start = idx.wrapping_sub(mem_slice.zero_idx) as isize;
+                let base = Expr::Nullary(NulOp::LocalGet(symbolic_ptr_info.local_id));
+                let (base, offset) = if start < 0 {
+                    (
+                        Expr::Binary(
+                            BinOp::I32Add,
+                            Box::new([
+                                base,
+                                Expr::Value(
+                                    Value::I32(start.try_into().unwrap()),
+                                    Default::default(),
+                                ),
+                            ]),
+                        ),
+                        0,
+                    )
+                } else {
+                    (base, start.try_into().unwrap())
+                };
+
                 let stmt = Stmt::Store(
                     MemArg {
                         mem_id,
-                        offset: idx.try_into().unwrap(),
+                        offset,
                         align: 1,
                     },
                     store,
                     Box::new([
-                        Expr::Nullary(NulOp::LocalGet(symbolic_ptr_info.local_id)),
+                        base,
                         Expr::Value(
                             match store {
                                 Store::I64(_) => {

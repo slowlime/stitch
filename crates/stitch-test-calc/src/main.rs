@@ -3,8 +3,8 @@ use std::process::ExitCode;
 use std::str;
 
 use stitch_bindings::{
-    arg_count, arg_len, arg_read, concrete_ptr, configure_rust_func_spec_policies, const_ptr,
-    print_str, propagate_load, specialize, SymbolicAlloc,
+    arg_count, arg_len, arg_read, concrete_ptr, configure_specializer, const_ptr, print_str,
+    propagate_load, specialize, SymbolicAlloc,
 };
 
 #[global_allocator]
@@ -233,7 +233,7 @@ static mut EVAL: Option<unsafe extern "C" fn() -> Box<Result<i64, String>>> = No
 
 #[export_name = "stitch-start"]
 pub fn stitch_start() {
-    configure_rust_func_spec_policies();
+    configure_specializer();
 
     if arg_count() != 1 {
         print_str(&format!("expected 1 argument, got {}", arg_count()));

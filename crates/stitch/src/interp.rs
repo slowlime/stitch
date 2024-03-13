@@ -5,14 +5,15 @@ use std::fs::File;
 use std::rc::Rc;
 
 use anyhow::{bail, ensure, Result};
-use hashbrown::{HashMap, HashSet};
+use bitflags::bitflags;
+use hashbrown::HashMap;
 use log::{debug, trace};
 use slotmap::{SecondaryMap, SparseSecondaryMap};
 use strum::{Display, FromRepr, VariantArray};
 
 use crate::ast::expr::{Value, ValueAttrs};
 use crate::ast::ty::ValType;
-use crate::ast::{self, ExportDef, Func, FuncId, GlobalId, Module};
+use crate::ast::{self, ConstExpr, ExportDef, Func, FuncId, GlobalDef, GlobalId, Module};
 use crate::cfg::FuncBody;
 use crate::interp::spec::Specializer;
 
@@ -46,6 +47,20 @@ pub struct FuncSpecPolicy {
     pub inline_policy: InlineDisposition,
 }
 
+bitflags! {
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct GlobalAttrs: u8 {
+        const CONST = 1 << 0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GlobalValue {
+    Import,
+    GlobalGet,
+    Value(Value<i32>, ValueAttrs),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpecSignature {
     orig_func_id: FuncId,
@@ -72,7 +87,8 @@ pub struct Interpreter<'a> {
     spec_funcs: SparseSecondaryMap<FuncId, SpecSignature>,
     cfgs: SparseSecondaryMap<FuncId, Rc<FuncBody>>,
     args: Vec<Vec<u8>>,
-    const_global_ids: HashSet<GlobalId>,
+    globals: SecondaryMap<GlobalId, GlobalValue>,
+    global_attrs: SparseSecondaryMap<GlobalId, GlobalAttrs>,
     next_symbolic_ptr_id: u32,
     files: Vec<Option<File>>,
     func_spec_policies: SecondaryMap<FuncId, FuncSpecPolicy>,
@@ -80,13 +96,31 @@ pub struct Interpreter<'a> {
 
 impl<'a> Interpreter<'a> {
     pub fn new(module: &'a mut Module, args: Vec<Vec<u8>>) -> Self {
+        let globals = module
+            .globals
+            .iter()
+            .map(|(global_id, global)| {
+                (
+                    global_id,
+                    match global.def {
+                        GlobalDef::Import(_) => GlobalValue::Import,
+                        GlobalDef::Value(ConstExpr::Value(value, attrs)) => {
+                            GlobalValue::Value(value.lift_ptr(), attrs)
+                        }
+                        GlobalDef::Value(ConstExpr::GlobalGet(_)) => GlobalValue::GlobalGet,
+                    },
+                )
+            })
+            .collect();
+
         Self {
             module,
             spec_sigs: Default::default(),
             spec_funcs: Default::default(),
             cfgs: Default::default(),
             args,
-            const_global_ids: Default::default(),
+            globals,
+            global_attrs: Default::default(),
             next_symbolic_ptr_id: 0,
             files: Default::default(),
             func_spec_policies: Default::default(),

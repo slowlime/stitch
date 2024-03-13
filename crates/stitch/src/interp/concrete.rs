@@ -14,13 +14,17 @@ use strum::VariantArray;
 use crate::ast::expr::{format_value, Never, ValueAttrs};
 use crate::ast::ty::{ElemType, FuncType};
 use crate::ast::{
-    ConstExpr, Export, ExportDef, FuncId, GlobalDef, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE,
+    ConstExpr, Export, ExportDef, FuncId, GlobalDef, GlobalId, IntrinsicDecl, MemoryDef, TableDef, PAGE_SIZE
 };
 use crate::cfg::{BinOp, BlockId, Call, Expr, LocalId, NulOp, Stmt, Terminator, TernOp, UnOp};
-use crate::interp::{format_arg_list, FuncSpecPolicy, InlineDisposition, SpecializedFunc};
+use crate::interp::{
+    format_arg_list, FuncSpecPolicy, GlobalAttrs, InlineDisposition, SpecializedFunc,
+};
 use crate::util::float::{F32, F64};
 
-use super::Interpreter;
+use super::{GlobalValue, Interpreter};
+
+const STACK_POINTER_NAME: &str = "__stack_pointer";
 
 type Ptr<E = i32> = crate::ast::expr::Ptr<E>;
 type Value<E = i32> = crate::ast::expr::Value<E>;
@@ -197,15 +201,8 @@ impl Interpreter<'_> {
                     }
 
                     Stmt::GlobalSet(global_id, _) => {
-                        let (value, attrs) = frame.stack.pop().unwrap();
-
-                        match self.module.globals[global_id].def {
-                            GlobalDef::Import(_) => bail!("cannot assign to an imported global"),
-                            GlobalDef::Value(ref mut expr) => {
-                                *expr = ConstExpr::Value(value.into_concrete(), attrs);
-                                trace!("globals[{global_id:?}] <- {}", format_value(&value, attrs));
-                            }
-                        }
+                        let value = frame.stack.pop().unwrap();
+                        self.eval_global_set(global_id, value);
                     }
 
                     Stmt::Store(mem_arg, store, _) => {
@@ -327,7 +324,10 @@ impl Interpreter<'_> {
                                 }
                             }
 
-                            None => return Ok(value),
+                            None => {
+                                self.flush_globals();
+                                return Ok(value);
+                            }
                         }
                     }
                 }
@@ -412,6 +412,20 @@ impl Interpreter<'_> {
         Ok(())
     }
 
+    fn flush_globals(&mut self) {
+        for (global_id, &global_value) in &self.globals {
+            let (value, attrs) = match global_value {
+                GlobalValue::Import | GlobalValue::GlobalGet => continue,
+                GlobalValue::Value(value, attrs) => (value, attrs)
+            };
+
+            self.module.globals[global_id].def = GlobalDef::Value(ConstExpr::Value(
+                value.into_concrete(),
+                attrs,
+            ));
+        }
+    }
+
     fn eval<'a>(&mut self, frames: &mut Vec<Frame>, task: impl Into<Task<'a>>) -> Result<()> {
         let mut stack = vec![(0, task.into())];
 
@@ -474,20 +488,7 @@ impl Interpreter<'_> {
                 );
             }
 
-            NulOp::GlobalGet(global_id) => {
-                match self.module.globals[global_id].def {
-                    GlobalDef::Import(_) => bail!("cannot evaluate an imported global"),
-
-                    GlobalDef::Value(ConstExpr::Value(value, attrs)) => {
-                        frame.stack.push((value.lift_ptr(), attrs));
-                        trace!("globals[{global_id:?}] -> {}", format_value(&value, attrs));
-                    }
-
-                    GlobalDef::Value(ConstExpr::GlobalGet(_)) => {
-                        bail!("cannot evaluate a global initialized with the value of an imported global")
-                    }
-                }
-            }
+            NulOp::GlobalGet(global_id) => frame.stack.push(self.eval_global_get(global_id)?),
 
             NulOp::MemorySize(mem_id) => match &self.module.mems[mem_id].def {
                 MemoryDef::Import(_) => {
@@ -1052,6 +1053,7 @@ impl Interpreter<'_> {
                 IntrinsicDecl::FileRead => self.eval_intr_file_read(frames, args)?,
                 IntrinsicDecl::FileClose => self.eval_intr_file_close(frames, args)?,
                 IntrinsicDecl::FuncSpecPolicy => self.eval_intr_func_spec_policy(args)?,
+                IntrinsicDecl::SymbolicStackPtr => self.eval_intr_symbolic_stack_ptr()?,
             }
 
             let frame = frames.last_mut().unwrap();
@@ -1065,6 +1067,33 @@ impl Interpreter<'_> {
         }
 
         Ok(())
+    }
+
+    fn eval_global_set(&mut self, global_id: GlobalId, (value, attrs): (Value, ValueAttrs)) {
+        self.globals
+            .insert(global_id, GlobalValue::Value(value, attrs));
+    }
+
+    fn eval_global_get(&self, global_id: GlobalId) -> Result<(Value, ValueAttrs)> {
+        match self.globals[global_id] {
+            GlobalValue::Import => bail!("cannot evaluate an imported global {global_id:?}"),
+            GlobalValue::GlobalGet => bail!(
+                "cannot evaluate a global {global_id:?} initialized with \
+                the value of an imported global",
+            ),
+            GlobalValue::Value(value, attrs) => Ok((value, attrs)),
+        }
+    }
+
+    fn make_symbolic_ptr(&mut self, base: i32) -> Ptr {
+        let id = self.next_symbolic_ptr_id;
+        self.next_symbolic_ptr_id = id.checked_add(1).unwrap();
+
+        Ptr {
+            base,
+            id,
+            offset: 0,
+        }
     }
 
     fn eval_intr_arg_count(&mut self, frames: &mut Vec<Frame>) -> Result<()> {
@@ -1311,14 +1340,8 @@ impl Interpreter<'_> {
         args: Vec<(Value, ValueAttrs)>,
     ) -> Result<()> {
         let frame = frames.last_mut().unwrap();
-        let id = self.next_symbolic_ptr_id;
-        self.next_symbolic_ptr_id = self.next_symbolic_ptr_id.checked_add(1).unwrap();
         frame.stack.push((
-            Value::Ptr(Ptr {
-                base: args[0].0.unwrap_i32(),
-                id,
-                offset: 0,
-            }),
+            Value::Ptr(self.make_symbolic_ptr(args[0].0.unwrap_i32())),
             args[0].1,
         ));
 
@@ -1331,7 +1354,9 @@ impl Interpreter<'_> {
         args: Vec<(Value, ValueAttrs)>,
     ) -> Result<()> {
         let frame = frames.last_mut().unwrap();
-        frame.stack.push((Value::I32(args[0].0.unwrap_i32()), args[0].1));
+        frame
+            .stack
+            .push((Value::I32(args[0].0.unwrap_i32()), args[0].1));
 
         Ok(())
     }
@@ -1585,10 +1610,7 @@ impl Interpreter<'_> {
         Ok(())
     }
 
-    fn eval_intr_func_spec_policy(
-        &mut self,
-        args: Vec<(Value, ValueAttrs)>,
-    ) -> Result<()> {
+    fn eval_intr_func_spec_policy(&mut self, args: Vec<(Value, ValueAttrs)>) -> Result<()> {
         let [name_regexp_ptr, name_regexp_len, inline_policy] =
             array::from_fn(|i| args[i].0.unwrap_u32());
         let name_regexp_ptr = name_regexp_ptr as usize;
@@ -1650,6 +1672,44 @@ impl Interpreter<'_> {
                 name_regexp.as_str()
             );
         }
+
+        Ok(())
+    }
+
+    fn eval_intr_symbolic_stack_ptr(&mut self) -> Result<()> {
+        let Some((global_id, _)) = self.module.globals.iter().find(|&(_, global)| {
+            global
+                .name
+                .as_ref()
+                .is_some_and(|name| name == STACK_POINTER_NAME)
+        }) else {
+            warn!("no stack pointer found (searched for ${STACK_POINTER_NAME})");
+            return Ok(());
+        };
+
+        let (value, attrs) = self.eval_global_get(global_id)?;
+
+        match value {
+            Value::I32(base) => {
+                debug!("marking {global_id:?} as symbolic");
+                let value = (Value::Ptr(self.make_symbolic_ptr(base)), attrs);
+                self.eval_global_set(global_id, value);
+            }
+
+            Value::Ptr(_) => {
+                debug!("marking {global_id:?} as symbolic");
+            }
+
+            _ => {
+                warn!(
+                    "the global ${STACK_POINTER_NAME} has a wrong type: expected i32, got {}",
+                    value.val_ty()
+                );
+                return Ok(());
+            }
+        }
+
+        *self.global_attrs.entry(global_id).unwrap().or_default() |= GlobalAttrs::CONST;
 
         Ok(())
     }
